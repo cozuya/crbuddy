@@ -267,7 +267,7 @@ commands, and settings. That's usually what you want, and it's also the most
 likely explanation for a run that behaves nothing like it does elsewhere.
 
 **The consolidator cannot delete anything.** It receives enumerated findings
-and returns only relationships between their IDs]; crbuddy renders the groups
+and returns only relationships between their IDs; crbuddy renders the groups
 from the original text. Every input ID must appear exactly once, or the merge
 is rejected and you get the raw file with a warning. The failure mode is
 under-grouping, never a finding that quietly vanished.
