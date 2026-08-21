@@ -10,26 +10,15 @@ import {
 /**
  * NOTE FOR WHOEVER RUNS THIS FIRST.
  *
- * These adapters were written against vendor documentation, not against
- * running binaries — the authoring environment had none installed. The
- * shapes below are the least-surprising reading of each CLI's
- * non-interactive interface, and they are the most likely part of crbuddy
- * to be wrong. Every flag is in one place per vendor so a fix is local.
+ * Native review is intentional. When a panel entry has no custom
+ * `instructions`, crbuddy invokes the vendor's own review workflow rather
+ * than trying to imitate it with a generic prompt. Custom instructions are a
+ * separate generic-agent operation by design.
  *
  * Two invariants that must survive any correction:
  *   - reviewers get read-only permissions, unconditionally
- *   - the reviewed range is the crbuddy-resolved one, not one the vendor picks
+ *   - native review stays native; do not replace it with "review this diff" prose
  */
-
-function reviewPrompt(range: string, extra?: string): string {
-  const base =
-    `Review the changes in the git range ${range}.\n\n` +
-    `Report concrete, actionable findings. For each finding give the file ` +
-    `path and line number where it applies, a short title, and an explanation. ` +
-    `Do not modify any files. Do not run tests or make commits.`;
-
-  return extra ? `${base}\n\nAdditional review criteria:\n${extra}` : base;
-}
 
 function genericPrompt(instructions: string, range: string | null): string {
   if (!range) return instructions;
@@ -42,13 +31,7 @@ function genericPrompt(instructions: string, range: string | null): string {
   );
 }
 
-/**
- * Pick the first spelling this CLI actually accepts.
- *
- * `purpose` is only used when nothing matches: for a safety-critical flag
- * that means refusing the lane, and for anything else a dropped flag plus a
- * warning.
- */
+/** Pick the first spelling this CLI actually accepts. */
 function firstSupported(
   request: InvocationRequest,
   candidates: string[],
@@ -66,11 +49,6 @@ function requireSafetyFlag(
 
   if (found) return found;
 
-  // Escape hatch: if the user has already supplied one of these in
-  // `vendorArgs`, they have taken responsibility explicitly. This matters
-  // because help output is not a perfect oracle — a flag the CLI supports
-  // but does not advertise in a parseable way would otherwise block a lane
-  // that works fine.
   const manual = (request.vendorArgs ?? []).some((arg) =>
     candidates.some((flag) => arg === flag || arg.startsWith(`${flag}=`)),
   );
@@ -86,24 +64,13 @@ function requireSafetyFlag(
   );
 }
 
-function promptFor(request: InvocationRequest): string {
-  return request.operation.kind === 'review'
-    ? reviewPrompt(request.operation.target.range)
-    : genericPrompt(
-        request.operation.instructions,
-        request.operation.target?.range ?? null,
-      );
-}
-
-/** Claude Code: `claude -p` in print mode. */
+/** Claude Code: native `/code-review` / `/review` via non-interactive `-p`. */
 export const claudeAdapter: Adapter = {
   name: 'claude',
   label: 'Claude Code',
   command: 'claude',
-  minVersion: '2.0.0',
+  minVersion: '2.1.223',
 
-  // Highest capability first. `defaultModel` decides where the cursor lands,
-  // which is not necessarily the top of the list.
   models: [
     { id: 'fable', label: 'Fable', hint: 'frontier tier' },
     { id: 'opus', label: 'Opus', hint: 'deep reasoning, slowest' },
@@ -112,8 +79,6 @@ export const claudeAdapter: Adapter = {
   ],
   defaultModel: 'opus',
 
-  // Passed through verbatim. `ultracode` is deliberately absent: it
-  // activates a different mode rather than being another effort level.
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'high',
   listsStampedFor: '2.1.239',
@@ -131,12 +96,9 @@ export const claudeAdapter: Adapter = {
   },
 
   build(request: InvocationRequest): Invocation {
-    const prompt = promptFor(request);
     const warnings: string[] = [];
-
     const args = ['-p', '--model', request.model];
 
-    // Reviewers never need write access.
     const permission = requireSafetyFlag(
       request,
       ['--permission-mode'],
@@ -144,7 +106,6 @@ export const claudeAdapter: Adapter = {
       this.command,
     );
 
-    // Null means the user supplied it themselves via vendorArgs.
     if (permission) args.push(permission, 'plan');
 
     const noSession = firstSupported(request, [
@@ -161,8 +122,36 @@ export const claudeAdapter: Adapter = {
       );
     }
 
-    // Tracked separately from what was REQUESTED: reporting a requested
-    // effort as applied misstates the run in the output provenance.
+    if (request.vendorArgs) {
+      args.push(...request.vendorArgs);
+    }
+
+    if (request.operation.kind === 'review') {
+      const target = request.operation.target;
+      const command = target.kind === 'uncommitted' ? '/code-review' : '/review';
+      const parts = [command];
+
+      if (request.effort) parts.push(request.effort);
+
+      // /code-review accepts an explicit ref range. Supplying crbuddy's pinned
+      // range keeps Claude on the same captured changeset, including untracked
+      // files represented in the snapshot commit.
+      parts.push(target.range);
+
+      return {
+        command: this.command,
+        args,
+        stdin: parts.join(' '),
+        appliedEffort: request.effort ?? null,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
+    }
+
+    const prompt = genericPrompt(
+      request.operation.instructions,
+      request.operation.target?.range ?? null,
+    );
+
     let appliedEffort: string | null = null;
 
     if (request.effort) {
@@ -179,14 +168,8 @@ export const claudeAdapter: Adapter = {
       }
     }
 
-    if (request.vendorArgs) {
-      args.push(...request.vendorArgs);
-    }
-
     return {
       command: this.command,
-      // Prompt goes on stdin, never argv: diffs and instructions are large
-      // and argv has hard limits (especially on Windows).
       args,
       stdin: prompt,
       appliedEffort,
@@ -203,12 +186,12 @@ export const claudeAdapter: Adapter = {
   },
 };
 
-/** Codex: `codex exec` for non-interactive runs. */
+/** Codex: native `codex exec review` for review operations. */
 export const codexAdapter: Adapter = {
   name: 'codex',
   label: 'Codex CLI',
   command: 'codex',
-  minVersion: '0.20.0',
+  minVersion: '0.130.0',
 
   models: [
     { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', hint: 'flagship' },
@@ -226,7 +209,7 @@ export const codexAdapter: Adapter = {
   },
 
   helpArgs() {
-    return ['exec', '--help'];
+    return ['exec', 'review', '--help'];
   },
 
   parseVersion(stdout) {
@@ -234,18 +217,10 @@ export const codexAdapter: Adapter = {
   },
 
   build(request: InvocationRequest): Invocation {
-    const prompt = promptFor(request);
     const warnings: string[] = [];
-
     const args = ['exec', '--model', request.model];
 
-    // `codex exec` is non-interactive by construction — it reads the prompt
-    // from stdin and offers no approval-policy flag, only an opt-in
-    // `--approve-for-me` (which escalates to workspace-write, the opposite of
-    // what a reviewer wants). Its absence is therefore normal and not worth
-    // warning about; the sandbox below is what actually constrains the run.
     const approval = firstSupported(request, ['--ask-for-approval']);
-
     if (approval) args.push(approval, 'never');
 
     const sandbox = requireSafetyFlag(
@@ -255,18 +230,14 @@ export const codexAdapter: Adapter = {
       this.command,
     );
 
-    // Null means the user supplied it themselves via vendorArgs.
     if (sandbox) args.push(sandbox, 'read-only');
 
-    // Both of these have come and gone across releases; neither is required.
     const ephemeral = firstSupported(request, ['--ephemeral']);
     if (ephemeral) args.push(ephemeral);
 
     const skipGitCheck = firstSupported(request, ['--skip-git-repo-check']);
     if (skipGitCheck) args.push(skipGitCheck);
 
-    // Keep output free of terminal control sequences at the source rather
-    // than only stripping them after the fact.
     const color = firstSupported(request, ['--color']);
     if (color) args.push(color, 'never');
 
@@ -274,9 +245,6 @@ export const codexAdapter: Adapter = {
 
     if (request.effort) {
       if (request.supports('-c')) {
-        // Unquoted on purpose: `-c` parses the value as TOML and falls back
-        // to the raw string, so `key=xhigh` works without embedding quotes
-        // that would need escaping through cmd.exe on Windows.
         args.push('-c', `model_reasoning_effort=${request.effort}`);
         appliedEffort = request.effort;
       } else {
@@ -291,10 +259,37 @@ export const codexAdapter: Adapter = {
       args.push(...request.vendorArgs);
     }
 
+    if (request.operation.kind === 'review') {
+      // This is Codex's real review engine: the headless equivalent of /review.
+      // Scoped review flags and custom prompts are mutually exclusive, which
+      // is why custom crbuddy instructions take the generic path below.
+      args.push('review');
+
+      if (request.operation.target.kind === 'uncommitted') {
+        args.push('--uncommitted');
+      } else {
+        args.push(
+          '--base',
+          request.operation.target.requestedBase ?? request.operation.target.base,
+        );
+      }
+
+      return {
+        command: this.command,
+        args,
+        appliedEffort,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
+    }
+
+    const prompt = genericPrompt(
+      request.operation.instructions,
+      request.operation.target?.range ?? null,
+    );
+
     return {
       command: this.command,
       args,
-      // Omitting the prompt argument makes codex read it from stdin.
       stdin: prompt,
       appliedEffort,
       ...(warnings.length > 0 ? { warnings } : {}),
@@ -302,7 +297,6 @@ export const codexAdapter: Adapter = {
   },
 
   finalOutput(result) {
-    // Progress goes to stderr; the final agent message goes to stdout.
     return result.stdout;
   },
 
@@ -311,7 +305,7 @@ export const codexAdapter: Adapter = {
   },
 };
 
-/** Gemini CLI: `gemini -p`. */
+/** Gemini CLI: generic agent runs only; no supported headless native review. */
 export const geminiAdapter: Adapter = {
   name: 'gemini',
   label: 'Gemini CLI',
@@ -324,7 +318,6 @@ export const geminiAdapter: Adapter = {
   ],
   defaultModel: 'gemini-2.5-pro',
 
-  // This CLI exposes no effort control; `init` skips the question entirely.
   efforts: [],
   defaultEffort: null,
   listsStampedFor: '0.55.1',
@@ -342,15 +335,23 @@ export const geminiAdapter: Adapter = {
   },
 
   build(request: InvocationRequest): Invocation {
-    const prompt = promptFor(request);
-    const warnings: string[] = [];
+    if (request.operation.kind === 'review') {
+      throw new UnsafeInvocationError(
+        'Gemini CLI does not currently expose a supported headless native code-review ' +
+          'operation that crbuddy can invoke. crbuddy will not silently replace native ' +
+          'review with a generic "review this diff" prompt. Add explicit `instructions` ' +
+          'to this Gemini panel entry to opt into generic read-only agent mode, or remove ' +
+          'the lane.',
+      );
+    }
 
+    const prompt = genericPrompt(
+      request.operation.instructions,
+      request.operation.target?.range ?? null,
+    );
+    const warnings: string[] = [];
     const args = ['--model', request.model];
 
-    // `default` approval mode permits tool actions, which breaks the
-    // review-only guarantee exactly as `--permission-mode plan` does for
-    // Claude and `--sandbox read-only` for Codex. `plan` is the read-only
-    // equivalent and is treated as safety-critical here too.
     const approval = requireSafetyFlag(
       request,
       ['--approval-mode'],
@@ -364,10 +365,6 @@ export const geminiAdapter: Adapter = {
       args.push(...request.vendorArgs);
     }
 
-    // `-p` is Gemini's documented non-interactive switch; without it the CLI
-    // may not treat a piped run as headless. It takes the prompt as a value,
-    // so very large prompts (the consolidation pass) go to stdin instead
-    // rather than risk an argv limit, especially on Windows.
     const promptFlag = firstSupported(request, ['--prompt', '-p']);
     const ARGV_SAFE = 6000;
 
