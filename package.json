@@ -9,6 +9,7 @@
   "files": [
     "dist",
     "README.md",
+    "README2.md",
     "DESIGN.md"
   ],
   "engines": {
