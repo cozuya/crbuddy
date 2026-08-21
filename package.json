@@ -1,0 +1,38 @@
+{
+  "name": "crbuddy",
+  "version": "0.1.0",
+  "description": "Fan one code review out across several vendor coding agents in parallel, then consolidate.",
+  "type": "module",
+  "bin": {
+    "crbuddy": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "DESIGN.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "prepare": "npm run build",
+    "test": "npm run build:test && node --test \"dist-test/test/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:test": "tsc -p tsconfig.test.json"
+  },
+  "keywords": [
+    "code-review",
+    "cli",
+    "multi-agent"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "@types/cross-spawn": "^6.0.6"
+  },
+  "dependencies": {
+    "cross-spawn": "^7.0.6"
+  }
+}
