@@ -61,6 +61,33 @@ test('Claude branch review also uses /code-review with the captured range', () =
   assert.ok(!invocation.args.some((arg) => arg.startsWith('/review')));
 });
 
+test('Claude refuses ultra on the normal native lane because -p does not wait for it', () => {
+  assert.throws(
+    () =>
+      claudeAdapter.build({
+        operation: { kind: 'review', target: uncommitted },
+        model: 'opus',
+        effort: 'ultra',
+        repoRoot: '/repo',
+        supports,
+      }),
+    (error: unknown) =>
+      error instanceof UnsafeInvocationError &&
+      /Ultrareview/.test(error.message) &&
+      /launches asynchronously/.test(error.message),
+  );
+});
+
+test('Claude status-only review response is not accepted as completed findings', () => {
+  const completion = claudeAdapter.checkCompletion({
+    code: 0,
+    stdout: "Still waiting for the code-review skill's verification/synthesis stage to complete.\n",
+    stderr: '',
+  });
+
+  assert.deepEqual(completion, { ok: false, reason: 'incomplete_review' });
+});
+
 test('Codex probes exec-level help where safety/config flags live', () => {
   assert.deepEqual(codexAdapter.helpArgs(), ['exec', '--help']);
 });
