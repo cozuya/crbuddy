@@ -124,8 +124,10 @@ Those target interfaces are not identical, which is why the snapshot is stable
 provenance rather than a claim that every native lane consumes the exact same
 SHA range.
 
-`vendorArgs` is an escape hatch — extra argv appended verbatim — for reaching
-a flag crbuddy doesn't model.
+`vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not
+model. It cannot override sandbox, approval, permission, dangerous-mode, or
+Codex config controls: those are owned by crbuddy so a project-local config
+cannot weaken read-only review.
 
 ### Effort
 
@@ -146,7 +148,14 @@ version stamps and clamp reporting to detect. Passing the value through
 deletes the failure mode instead of instrumenting it. An unusable value now
 fails fast, attributed to the lane that used it.
 
-Omit `effort` to pass no flag at all.
+For native Claude `/code-review`, an omitted `effort` resolves to crbuddy's
+explicit default (`high`) instead of inheriting whatever level was last chosen
+in an interactive Claude Code session. Other lanes with omitted effort pass no
+effort setting unless their adapter documents a default.
+
+`ultra` is intentionally not a normal Claude effort in crbuddy. It selects the
+separate cloud Ultrareview product, which is asynchronous under `claude -p` and
+may consume paid usage credits. crbuddy refuses it on the normal Claude lane.
 
 ## Caveats
 
@@ -187,18 +196,19 @@ findings is done by a heuristic that guarantees losslessness: concatenating
 the segments reproduces the review byte for byte. A bad split produces a
 finding that's too large or too small — never one that's missing.
 
-**Flags are detected, not assumed.** Vendor CLI flags churn between
-releases, and a flag your version doesn't have produces a usage error that can
-look like a crbuddy bug. At preflight crbuddy reads the adapter's appropriate
-help surface and only passes optional flags it advertises. A missing **safety**
-flag — read-only enforcement — refuses that lane instead. Parent and nested
-subcommand help are not interchangeable; Codex, for example, keeps crbuddy's
-sandbox/config flags on `codex exec --help`.
+**Flags and versions are detected, not assumed.** Vendor CLI behavior churns
+between releases. Preflight checks each adapter's minimum supported CLI version
+and refuses to guess when the installed binary is older or its version cannot
+be parsed. It also reads the adapter's appropriate help surface and only passes
+optional flags it advertises. A missing **safety** flag — read-only enforcement
+— refuses that lane instead. Parent and nested subcommand help are not
+interchangeable; Codex, for example, keeps crbuddy's sandbox/config flags on
+`codex exec --help`.
 
-**Preflight checks presence, not authentication.** crbuddy verifies the vendor
-binary exists and reports a version. It does not probe whether you're logged
-in: there's no uniform, free way to do that across vendors, and a wrong check
-rots per vendor. An expired login shows up as a lane failure.
+**Preflight checks presence/version, not authentication.** crbuddy does not
+probe whether you're logged in: there's no uniform, free way to do that across
+vendors, and a wrong check rots per vendor. An expired login shows up as a lane
+failure.
 
 **Concurrency is unmanaged by default.** Six entries means six subprocesses.
 That will hit per-subscription rate limits well before it hits your machine.
@@ -206,8 +216,9 @@ Set `maxConcurrent` if it bites.
 
 **Reviewers are forced read-only, or refused.** Each adapter passes its
 vendor's read-only/sandboxing mechanism when needed, and if crbuddy cannot
-establish a safe native invocation that lane is refused rather than run
-permissively.
+establish a safe invocation that lane is refused rather than run permissively.
+Safety-sensitive `vendorArgs` are rejected rather than allowed to override the
+enforced mode.
 
 **Ctrl-C aborts and writes nothing.** A partial panel is worse than no panel,
 because a consuming agent can't tell it's partial. The previous review is
@@ -218,6 +229,10 @@ spawn those without a shell in some cases. Spawning goes through `cross-spawn`
 on Windows to resolve shims correctly, and process-tree termination uses
 `taskkill /T`. If a vendor still shows as missing, `crbuddy check` prints the
 actual reason.
+
+**macOS/Linux.** Child reviewers run in their own process group so cancellation
+can signal the whole vendor process tree rather than orphaning helpers or MCP
+processes.
 
 ## How output is structured
 
@@ -245,10 +260,10 @@ break the command chain.
 ## Status
 
 Prototype. The pure-logic surface — config, target resolution, merge
-validation, rendering, and adapter dispatch — has unit tests. Vendor CLIs
-change quickly, so the native adapter layer is the most version-sensitive part
-of the program. Run `crbuddy check` on the machine that will actually execute
-the panel.
+validation, rendering, adapter safety, and adapter dispatch — has unit tests.
+Vendor CLIs change quickly, so the native adapter layer is the most
+version-sensitive part of the program. Run `crbuddy check` on every machine
+that will actually execute the panel.
 
 See `DESIGN.md` for why things are the way they are, including the non-goals.
 
