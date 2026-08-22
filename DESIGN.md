@@ -95,7 +95,7 @@ Named fields only. Model and effort identifiers are vendor-native strings.
 }
 ```
 
-Unknown keys are fatal. Panel IDs are stable provenance labels. `vendorArgs` is an escape hatch for CLI flags crbuddy does not model.
+Unknown keys are fatal. Panel IDs are stable provenance labels. `vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not model. It must never be able to weaken read-only, sandbox, approval, or permission policy; those controls are owned by crbuddy even when config is project-local.
 
 ### Wizard behavior
 
@@ -103,7 +103,7 @@ The wizard detects installed vendor CLIs, builds the panel, configures consolida
 
 Adapter metadata declares whether a vendor has a supported **headless native review** operation. A vendor without one may still be used as a generic reviewer, but the wizard must require explicit review instructions for that lane. It must not offer “vendor's own review behavior” and then write a configuration that `go` will deterministically refuse.
 
-Detection establishes CLI presence/capability, not authentication.
+Detection establishes CLI presence/version/capability, not authentication. Each adapter declares a minimum supported CLI version. `go` refuses an older or unparseable version rather than guessing at version-sensitive native-review behavior; `check` reports the same condition before a paid run starts.
 
 ---
 
@@ -170,7 +170,7 @@ Claude's native review path is `/code-review`, invoked through non-interactive p
 Current rules:
 
 - use canonical `/code-review` for both crbuddy target kinds; on Claude Code 2.1.223+ `/review` is an alias, but crbuddy uses the documented canonical spelling
-- pass the configured vendor-native local effort level as the command argument
+- always pass an explicit local effort level; when config omits one, resolve to crbuddy's documented Claude default (`high`) rather than inheriting ambient interactive-session state
 - pass crbuddy's captured git range as the target
 - invoke it using the documented `claude -p "<query>"` shape
 - enforce plan/read-only permissions
@@ -200,14 +200,15 @@ No supported headless native code-review operation is currently modeled.
 - Gemini remains usable with explicit `instructions` as a generic read-only lane
 - `init` must require those instructions rather than creating an unusable implicit lane
 
-### Capability probing
+### Capability and safety probing
 
 Vendor flags churn. Read the appropriate CLI help at preflight and construct argv from what that binary advertises.
 
 - optional missing flag → drop it and warn
 - required safety flag missing → refuse the lane
-- explicit equivalent in `vendorArgs` → user has taken responsibility
-- unreadable help → assume support rather than making every lane fail because help parsing failed
+- safety-sensitive `vendorArgs` → refuse them; project-local config may not override sandbox, approval, permission, dangerous-mode, or equivalent controls
+- Codex arbitrary `-c`/`--config` through `vendorArgs` → refuse, because config overrides can alter safety policy behind an apparently read-only argv
+- unreadable help → assume support rather than making every lane fail because help parsing failed; minimum-version enforcement still applies
 
 The help surface is adapter-specific. “Deepest subcommand” is not inherently correct; parent options may disappear from nested help output.
 
@@ -220,6 +221,7 @@ The help surface is adapter-specific. “Deepest subcommand” is not inherently
 - strip terminal control sequences from captured output
 - kill process trees on cancellation
 - support Windows `.cmd` shims through the platform spawning layer
+- on POSIX systems (including macOS), place reviewers in their own process groups so cancellation reaches their child/helper processes
 
 ---
 
@@ -271,6 +273,8 @@ Effort is vendor-native and passed through verbatim **except when a vendor reuse
 
 Each adapter supplies advisory values and a default for the wizard. Config validation accepts any non-empty string so a vendor adding a new value does not normally require a crbuddy release before users can select it manually. The adapter may still refuse a reserved value whose semantics violate crbuddy's execution contract; Claude `ultra` is the current example because it selects asynchronous cloud Ultrareview rather than local synchronous review.
 
+Native Claude review is additionally deterministic when effort is omitted from a hand-edited config: the adapter explicitly applies its documented default (`high`) rather than allowing Claude Code to reuse prior interactive state.
+
 The applied value, or lack of one, is recorded in output provenance.
 
 ---
@@ -321,12 +325,14 @@ HTML comments delimit human-navigation sections, but they are not parser boundar
 
 These are expected maintenance points rather than reasons to weaken the architecture:
 
+- vendor minimum CLI versions
 - vendor model and effort lists
 - vendor CLI flags and their help hierarchy
 - native review invocation syntax
 - Claude local-vs-Ultrareview command semantics
 - Codex parent/subcommand option placement
 - Windows shim/process-tree behavior
+- POSIX process-group behavior on macOS/Linux
 
 `crbuddy check`/diagnostics should make version mismatches observable before a long paid run whenever possible.
 
