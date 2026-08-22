@@ -23,12 +23,6 @@ import { probe } from '../run/spawn.js';
 import { Adapter } from '../adapters/types.js';
 import { PromptAborted, confirm, dim, select, text } from '../util/prompt.js';
 
-/**
- * `crbuddy init` and `crbuddy config` are the same command. `init` is the
- * discoverable name for first use; `config` is what people reach for later.
- * Both load-and-edit an existing config rather than overwriting blind.
- */
-
 export interface InitOptions {
   repoRoot: string | null;
   scope?: 'global' | 'project';
@@ -41,7 +35,6 @@ export async function runInit(options: InitOptions): Promise<number> {
     const name = (error as { name?: string })?.name;
 
     if (error instanceof PromptAborted || name === 'AbortError') {
-      // A deliberate Ctrl-C is not a crash and should not print a stack.
       console.log('');
       console.log('crbuddy setup not completed — aborted. No config was written.');
       return 130;
@@ -55,8 +48,6 @@ async function wizard(options: InitOptions): Promise<number> {
   console.log('');
   console.log('crbuddy setup');
 
-  // Outside a git repo the project option is not merely unavailable, it is
-  // meaningless — so it is omitted rather than shown grayed out.
   const scopeChoices = [
     { label: 'Global', value: 'global' as const, hint: homeConfigPath() },
     ...(options.repoRoot
@@ -136,7 +127,6 @@ async function wizard(options: InitOptions): Promise<number> {
   const available = detections.filter((d) => d.present).map((d) => d.adapter);
 
   for (const detection of detections) {
-    // Dimmed: useful confirmation, but not something the user must act on.
     console.log(
       dim(
         `  ${detection.present ? '\u2713' : '\u00b7'} ${detection.adapter.label} ` +
@@ -144,8 +134,6 @@ async function wizard(options: InitOptions): Promise<number> {
       ),
     );
 
-    // A bare dot with no reason makes a PATH problem indistinguishable from
-    // a broken install. This one is not dimmed — it needs acting on.
     if (detection.error) {
       console.log(`      ${detection.error}`);
     }
@@ -199,16 +187,8 @@ async function wizard(options: InitOptions): Promise<number> {
   return 0;
 }
 
-/**
- * crbuddy's own artifacts are untracked files in the repo it reviews, and
- * the default target includes untracked files. `go` already excludes them
- * from the diff, but they would still show up in `git status` and get
- * committed by a careless `git add -A` — so offer to ignore them once, at
- * the point the user opts into a project-local setup.
- */
 async function offerGitignore(repoRoot: string, config: Config): Promise<void> {
   const wanted = [config.output.merged, config.output.raw, `${WORK_DIR}/`];
-
   const gitignorePath = path.join(repoRoot, '.gitignore');
 
   let current = '';
@@ -227,11 +207,10 @@ async function offerGitignore(repoRoot: string, config: Config): Promise<void> {
   );
 
   const missing = wanted.filter((entry) => !lines.has(entry));
-
   if (missing.length === 0) return;
 
   console.log('');
-  console.log("crbuddy writes these into the repository:");
+  console.log('crbuddy writes these into the repository:');
 
   for (const entry of missing) {
     console.log(dim(`  ${entry}`));
@@ -250,13 +229,11 @@ async function offerGitignore(repoRoot: string, config: Config): Promise<void> {
   if (!add) return;
 
   const needsNewline = current !== '' && !current.endsWith('\n');
-
   const block =
     `${needsNewline ? '\n' : ''}` +
     `${current === '' ? '' : '\n'}# crbuddy\n${missing.join('\n')}\n`;
 
   await appendFile(gitignorePath, block, 'utf8');
-
   console.log(dim(`  Updated ${gitignorePath}`));
 }
 
@@ -306,8 +283,6 @@ async function pickModel(adapter: Adapter, current?: string): Promise<string> {
     index >= 0 ? index : 0,
   );
 
-  // The lists are advisory; config accepts any string, so a stale list is a
-  // convenience problem rather than a blocker.
   if (chosen === OTHER) {
     console.log(
       dim(
@@ -323,11 +298,6 @@ async function pickModel(adapter: Adapter, current?: string): Promise<string> {
   return chosen;
 }
 
-/**
- * Effort values come from the vendor and are stored verbatim. A vendor with
- * no effort control skips the question rather than asking about something
- * that will be ignored.
- */
 async function pickEffort(
   adapter: Adapter,
   model: string,
@@ -374,8 +344,6 @@ async function buildPanel(
     console.log('Current panel:');
 
     existing.forEach((entry) => {
-      // The id is an internal handle for provenance; it is not what someone
-      // reading their own config wants to see.
       let label = entry.vendor;
 
       try {
@@ -419,13 +387,25 @@ async function buildPanel(
     const model = await pickModel(adapter);
     const effort = await pickEffort(adapter, model);
 
-    const custom = await confirm(
-      'Give this run custom review instructions? ' +
-        '(default: the vendor\u2019s own review behavior)',
-      false,
-    );
+    let instructions: string | undefined;
 
-    const instructions = custom ? await text('Instructions:') : undefined;
+    if (!adapter.nativeReview) {
+      console.log('');
+      console.log(
+        dim(
+          `  ${adapter.label} does not expose a supported headless native code-review ` +
+            'operation, so this lane needs explicit review instructions.',
+        ),
+      );
+      instructions = await text('Instructions:');
+    } else {
+      const custom = await confirm(
+        'Give this run custom review instructions? ' +
+          '(default: the vendor\u2019s own review behavior)',
+        false,
+      );
+      instructions = custom ? await text('Instructions:') : undefined;
+    }
 
     const seen = new Set(panel.map((entry) => entry.id));
     const base = slug(`${adapter.name}-${model}`);
@@ -443,7 +423,6 @@ async function buildPanel(
     if (instructions) entry.instructions = instructions;
 
     panel.push(entry);
-
     console.log(`  added ${id}`);
   }
 
@@ -461,7 +440,7 @@ async function buildMerge(
   console.log('');
 
   const enabled = await confirm(
-    'Consolidate the reviews into a single merged file? This does not attempt to dedupe.',
+    'Consolidate apparent duplicate findings into a single merged file?',
     existing?.enabled ?? true,
   );
 

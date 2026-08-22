@@ -1,37 +1,29 @@
 # crbuddy — design specification
 
-A CLI that fans one code review out across several vendor coding agents in parallel,
-each blind to the others, and collects the results into one markdown file intended to
-be consumed by a coding agent that will make the fixes.
+crbuddy is a small local CLI that turns a repetitive multi-vendor code-review workflow into one command: run one or more coding-agent reviewers independently, preserve their outputs, optionally group apparent duplicate findings, and write a handoff file for the coding agent or human that will act on them.
 
-This document is the authoritative design. Decisions here were reached deliberately and
-several of them are deliberately *not* the obvious choice. Where a decision has a
-rationale attached, the rationale exists to stop the decision being "helpfully" reversed.
-If you think something here is wrong, say so — do not silently implement the alternative.
+This is the authoritative design. `README.md` is the short user-facing entry point and `GUIDE.md` is the detailed user documentation. If implementation and this file disagree, resolve the disagreement explicitly rather than silently changing one to match the other.
 
 ---
 
-## 1. Scope and non-goals
+## 1. Scope
 
-**Is:** a small, local, blocking CLI. Global npm install. Runs the user's own already-
-authenticated vendor coding CLIs as subprocesses. Produces markdown.
+crbuddy is:
 
-**Is not, deliberately:**
+- a local, blocking CLI installed globally with `npm i -g crbuddy`
+- an orchestrator for vendor coding CLIs the user already has installed and authenticated
+- a way to run several review lanes in parallel while keeping them blind to one another
+- an evidence collector and handoff generator
 
-- Not a daemon. No background mode, no `status` subcommand, no resumability, no state directory.
-- Not a hosted service. crbuddy holds no model credentials of any kind.
-- Not a fix applier. It produces a report; something else acts on it.
-- No sampling knob. An earlier design had a per-entry repeat count. It was cut: two entries
-  with the same model express the same thing, and the evidence that repeated samples of one
-  lane add information for open-ended review is weak (self-consistency's gains are on tasks
-  with a unique checkable answer; code review is not one). Do not re-add it.
-- No cross-invocation state. One run produces one report describing the current tree.
-  Re-invoking overwrites. No reconciling last week's findings against changed code.
+Deliberate non-goals:
 
-### Distribution
+- no daemon, background service, status server, or resumable job system
+- no hosted service and no model credentials stored by crbuddy
+- no fix application; another agent or human acts on the report
+- no cross-invocation memory or reconciliation against prior runs
+- no requirement that every vendor expose identical review controls
 
-npm, global install (`npm i -g crbuddy`). Node is already present on the target user's
-machine because the vendor CLIs need it. Do not add a Rust/Go build.
+TypeScript/Node is intentional. Do not add another implementation language merely to produce a single binary.
 
 ---
 
@@ -39,511 +31,318 @@ machine because the vendor CLIs need it. Do not add a Rust/Go build.
 
 ### `crbuddy go [instructions]`
 
-Runs the panel. Blocking — the user runs it in a spare terminal and waits.
+Run the configured panel. Blocking by design.
 
-The optional positional argument is a review instruction that **overrides `instructions`
-on every panel entry**, for a one-off "run this panel for X" without editing config.
+With no positional `instructions`, each panel entry uses its vendor's **native code-review operation** when crbuddy has a supported headless native path for that vendor.
 
-### `crbuddy init`
+Supplying positional `instructions` is an explicit override for the whole run. It replaces every panel entry's configured instructions, so those lanes run as generic read-only agents under the supplied criteria instead of using the vendor-native review flow.
 
-Interactive setup wizard. Writes a config file.
+Flags:
 
-### `crbuddy config`
+- `--force` — run despite `maxDiffBytes`
+- `--strict` — return exit 2 when the run is only partially successful
 
-Same implementation as `init`. Two names for one command. `init` is the discoverable name
-for first use; `config` is the name people reach for later. Both load-and-edit an existing
-config rather than overwriting it.
+### `crbuddy init` / `crbuddy config`
+
+Interactive configuration. Existing configuration is loaded and edited rather than overwritten blindly.
 
 ---
 
 ## 3. Configuration
 
-### Location and precedence
+Locations:
 
-- Global: `~/.crbuddy/`
-- Project-local: in the repo.
+- global: `~/.crbuddy/config.json`
+- project-local: `<repo>/.crbuddy/config.json`
 
-**A project-local config replaces the global one entirely.** No implicit merging. Array
-merging for `panel` is ambiguous (append? by model? by index?) and implicit inheritance
-makes "what panel did this repo actually request?" hard to answer.
+A project-local config replaces the global config entirely. There is no implicit merging.
 
-Reserve, but do not implement yet, an explicit `extends` key so inheritance can be added
-later without breaking configs that relied on omission meaning "unset."
-
-Include `configVersion` from the first release. The schema will change.
-
-### Schema
-
-Named fields throughout. No positional tuples — they are position-sensitive and make
-future additions awkward.
+Named fields only. Model and effort identifiers are vendor-native strings.
 
 ```jsonc
 {
   "configVersion": 1,
-
   "output": {
     "merged": "CODE-REVIEW-HANDOFF.md",
     "raw": "CODE-REVIEW-HANDOFF.raw.md"
   },
-
-  // "uncommitted" | { "base": "main" }
   "target": "uncommitted",
-
-  // Off by default. When true, `go` refuses to start if an output file already
-  // exists and prompts the user to delete it. See §6 for why this is not the
-  // mechanism that protects against self-contamination.
   "refuseIfOutputExists": false,
-
+  "timeoutMs": 900000,
+  "mergeTimeoutMs": 600000,
+  "maxConcurrent": 0,
+  "maxDiffBytes": 2000000,
   "merge": {
     "enabled": true,
-    "model": "…",
+    "vendor": "claude",
+    "model": "opus",
     "effort": "high"
   },
-
   "panel": [
     {
-      "id": "opus-default",        // stable, used in provenance; optional, generated if absent
-      "model": "…",                 // vendor + model
-      "effort": "high",             // crbuddy's vocabulary — see §7
-      "instructions": "…"          // optional; see §5
+      "id": "claude-opus",
+      "vendor": "claude",
+      "model": "opus",
+      "effort": "high"
+    },
+    {
+      "id": "security-gemini",
+      "vendor": "gemini",
+      "model": "gemini-2.5-pro",
+      "instructions": "Review only for security defects."
     }
   ]
 }
 ```
 
-`panel` entries carry stable IDs so provenance reads `security-opus` rather than
-`entry 3`, and so reordering the array doesn't renumber the report.
+Unknown keys are fatal. Panel IDs are stable provenance labels. `vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not model. It must never be able to weaken read-only, sandbox, approval, or permission policy; those controls are owned by crbuddy even when config is project-local.
 
-### `crbuddy init` / `crbuddy config` flow
+### Wizard behavior
 
-1. **Global or project-local.** First question.
-2. **Detect available vendor CLIs.** The panel a user can build is bounded by what is
-   installed. Detection drives the rest of the wizard. Detection is binary-exists plus
-   version-parses — see §9 on why it is not an auth probe.
-3. **Build the panel.** Per-entry walkthrough: model, effort, optional custom instructions.
-   Repeat until done. Not presets — the walkthrough is the primary path.
-4. **Merge settings.** Enabled; if so, model and effort.
-5. **Review target.**
-6. Write.
+The wizard detects installed vendor CLIs, builds the panel, configures consolidation, and chooses the target.
 
-If a config already exists at the target path, load it and edit it. Never overwrite blind.
+Adapter metadata declares whether a vendor has a supported **headless native review** operation. A vendor without one may still be used as a generic reviewer, but the wizard must require explicit review instructions for that lane. It must not offer “vendor's own review behavior” and then write a configuration that `go` will deterministically refuse.
+
+Detection establishes CLI presence/version/capability, not authentication. Each adapter declares a minimum supported CLI version. `go` refuses an older or unparseable version rather than guessing at version-sensitive native-review behavior; `check` reports the same condition before a paid run starts.
 
 ---
 
-## 4. Target resolution
+## 4. Target resolution and provenance
 
-crbuddy owns the definition of what is under review. Do not delegate this to the vendors.
+crbuddy resolves the intended review target once at startup and records a canonical git snapshot for provenance.
 
 ### `uncommitted`
 
-Defined as: **all tracked changes in the index and working tree, plus all non-ignored
-untracked files, relative to HEAD; relative to the empty tree if HEAD does not exist.**
+Defined as tracked index/worktree changes plus non-ignored untracked files relative to HEAD, or relative to the empty tree when HEAD does not exist.
 
-Note that plain `git diff` does not show untracked files. Untracked files are in scope and
-must be included, via intent-to-add or equivalent.
+Requirements:
 
-Explicit handling required for:
+- ignored files excluded
+- untracked files included
+- unresolved merge conflicts refuse the run
+- crbuddy output files and `.crbuddy/` excluded
+- linked worktrees supported by asking git for paths rather than assuming `.git/` is a directory
+- empty target refuses quickly
+- odd filenames handled with NUL-delimited git output
+- snapshot construction does not modify the user's index or worktree
 
-- ignored files — excluded
-- intent-to-add entries
-- unmerged / conflicted index entries — **refuse to run** in v0.1; "review my changes"
-  is too ambiguous mid-conflict to normalize
-- dirty submodules — treat as opaque gitlinks, report as uncovered
-- symlinks, binary files
-- empty diff — refuse fast, do not spend five minutes reviewing nothing
-- repo with no commits, shallow clone, sparse checkout, linked worktrees
-
-Resolve the worktree root via git, not by looking for a literal `.git/` directory —
-linked worktrees and submodules use different layouts. Output paths are relative to the
-worktree root, not the shell's cwd.
+A throwaway git index is used to build a tree and `commit-tree` produces a real snapshot commit. Record the snapshot object ID, base object ID, diff digest, changed-file manifest, file count, and byte count.
 
 ### Branch target
 
-Resolve all symbolic refs at startup and record resolved OIDs. Report the requested base,
-the resolved base OID, the head OID, and the merge-base OID — not merely `base: main`.
+`{ "base": "main" }` means review current HEAD relative to the merge base with the requested base ref.
 
-A shallow clone may lack the merge base. Fail with a clear message; do not silently fetch.
+Record the requested base, merge-base object ID, HEAD object ID, and canonical range. A shallow clone that cannot produce the merge base fails clearly; crbuddy does not silently fetch history.
 
-### Pinning
+### Native review target fidelity
 
-**Capture the target as a git object before starting any run.** `git stash create` (or
-equivalent plumbing) produces a commit representing the exact working state without
-touching the tree.
+The canonical snapshot is authoritative **provenance**, but vendor-native review commands are not one uniform API.
 
-Every run is then told to review `<base>..<snapshot-sha>`. This:
+Use the strongest native scoping primitive the vendor exposes:
 
-- composes with vendor review commands that accept a range argument (see §5)
-- removes the need to inject a large diff as prompt text, which would hit Windows'
-  command-line limit and vendor prompt ceilings
-- makes the changeset immune to the tree mutating mid-run
-- gives you a SHA to stamp into the report, which the consuming fix-agent needs to detect
-  staleness
+- if native review accepts an explicit range, give it crbuddy's captured range
+- if native review exposes selectors such as `--uncommitted` or `--base`, use those selectors
+- do not replace native review with a generic “review this diff” prompt merely to normalize target syntax
 
-File reads by the agents are still against the live tree. Document that; the *diff*
-guarantee is what's being made.
+Therefore crbuddy must not claim that every native lane is cryptographically pinned to the same snapshot. A native operation that selects live repository state may observe edits made after the run starts. Users should not edit the repository while a panel is running.
 
-Also compute and record a diff digest, a changed-file manifest (status + path), and byte/
-file counts. The manifest matters for binaries, renames, and submodules where diff text
-alone is insufficient, and it feeds the merge step.
+Generic-instruction lanes are told the canonical captured range.
 
-**Diff size guard:** warn, or refuse without a flag, past a threshold. A lockfile-heavy
-diff otherwise produces N expensive reviews of silently truncated context.
+The snapshot still provides stable report identity, diff-size checks, manifest generation, merge context, and downstream staleness detection.
 
 ---
 
-## 5. Adapters
+## 5. Adapter contract
 
-### The invocation is semantic, not a string
+Adapters expose semantic operations:
 
-An adapter exposes a **review operation**, not a command line. The two operations are:
+1. `review` — invoke the vendor's own supported native review feature
+2. `generic` — run a read-only agent with explicit user instructions
 
-1. native review of the crbuddy-resolved target
-2. generic read-only agent run with custom instructions
+The distinction is architectural. `review` must not be implemented as a generic prompt like “review this diff.”
 
-The vendor's own slash command or subcommand is an *implementation detail of the adapter*.
+Each adapter declares `nativeReview: boolean`. This is consumed by configuration UX as well as execution.
 
-This matters because vendor review commands are **scope-selecting operations** — they
-compute their own target. Passing `/review` as an opaque string while also claiming every
-run reviews an identical changeset is a contradiction. It is also already wrong at the
-command level: Codex exposes `codex review` as a command distinct from `codex exec`, and
-some Claude review paths behave differently under `-p` than their interactive form.
+### Claude Code
 
-Config therefore carries `instructions` (the user's criteria, verbatim) separately from
-the choice of operation. The `go` positional argument overrides `instructions`, not the
-operation.
+Claude's native review path is `/code-review`, invoked through non-interactive print mode.
 
-Keep a raw escape hatch (per-entry `vendorArgs`) for users who need to reach a flag the
-adapter doesn't model. It is the escape hatch, not the normal path.
+Current rules:
 
-### Flag capability detection
+- use canonical `/code-review` for both crbuddy target kinds; on Claude Code 2.1.223+ `/review` is an alias, but crbuddy uses the documented canonical spelling
+- always pass an explicit local effort level; when config omits one, resolve to crbuddy's documented Claude default (`high`) rather than inheriting ambient interactive-session state
+- pass crbuddy's captured git range as the target
+- invoke it using the documented `claude -p "<query>"` shape
+- enforce plan/read-only permissions
 
-Vendor flags churn. crbuddy reads each CLI's own `--help` at preflight (for the exact
-subcommand it will invoke) and builds argv from what that binary advertises.
+Anthropic's current documentation explicitly says a non-`ultra` `/code-review` run under `-p` runs in the foreground: Claude Code waits for the review and includes the findings in the response. That synchronous behavior is part of the adapter contract.
 
-- **Optional flag missing** → dropped, warning recorded in the run and the output header.
-- **Safety flag missing** (read-only enforcement) → the lane is REFUSED. Running a reviewer
-  that can edit the working tree changes the changeset under review, so degrading is not an
-  option here.
-- **Escape hatch** → if the user already passes an equivalent flag in `vendorArgs`, the
-  requirement is considered met. Help output is not a perfect oracle, and a flag the CLI
-  supports but does not advertise parseably must not permanently block a working lane.
-- **Help unreadable** → assume support. Failing closed there would break every lane on one
-  unparseable `--help`, which is worse than one clear usage error.
+`ultra` is different. `/code-review ultra` selects **Ultrareview**, a separate cloud review product. In a `claude -p '/code-review ultra'` run Claude Code launches the remote review and returns a tracking link without waiting for findings; paid runs can consume usage credits. Therefore `ultra` is not a supported effort value for crbuddy's normal Claude lane and must be refused rather than passed through. A user who intentionally wants Ultrareview should use its dedicated blocking `claude ultrareview` subcommand outside the normal adapter until crbuddy explicitly models that separate product.
 
-Terminal failure lines carry the first line of the CLI's own stderr; `exit_2` with no
-detail sends the user digging through the raw file for something crbuddy already had.
+A known status-only response was observed during development: `Still waiting for the code-review skill's verification/synthesis stage to complete.` Because that violates the documented foreground contract for local `-p` review, crbuddy treats that response as `incomplete_review` rather than accepting a zero exit as completed findings.
 
-### Adapter responsibilities
+### Codex CLI
 
-Each adapter defines, per vendor:
+Use Codex's native headless review subcommand rather than ordinary `codex exec` with a review prompt.
 
-- how to invoke a review of a given git range, non-interactively
-- how to invoke a generic read-only run with instructions
-- the effort mapping (§7)
-- **explicit non-interactive permission settings.** A subprocess is not non-interactive
-  merely because you expect it to be. Codex's current guidance is explicit `-a never` plus
-  a read-only sandbox rather than the deprecated `--full-auto`. Reviewers never need write
-  access; pass read-only unconditionally. This does not conflict with letting project
-  files (CLAUDE.md, AGENTS.md) supply context.
-- **ephemeral session flags** where available (`codex exec --ephemeral`, Claude's
-  no-session-persistence equivalent) so N reviews don't clutter vendor history
-- what constitutes the final model output versus diagnostics. Codex streams progress to
-  stderr and prints only the final agent message to stdout — "verbatim output" cannot mean
-  concatenating both.
-- what constitutes success. Exit code is primary, plus a small set of known failure
-  patterns. A zero exit with blank or malformed output is not a successful review.
-- minimum supported CLI version, and record the detected version per run
+- uncommitted target: `codex exec ... review --uncommitted`
+- branch target: `codex exec ... review --base <requested-base>`
+- apply a read-only sandbox
+- apply model/effort through Codex's own options
+
+Capability probing must read the help surface where **the flags crbuddy itself passes** are defined. For Codex, sandbox/config/ephemeral options are `exec`-level flags, so probe `codex exec --help`; probing only `codex exec review --help` can falsely report a safe parent option as missing.
+
+### Gemini CLI
+
+No supported headless native code-review operation is currently modeled.
+
+- implicit/native review is refused
+- Gemini remains usable with explicit `instructions` as a generic read-only lane
+- `init` must require those instructions rather than creating an unusable implicit lane
+
+### Capability and safety probing
+
+Vendor flags churn. Read the appropriate CLI help at preflight and construct argv from what that binary advertises.
+
+- optional missing flag → drop it and warn
+- required safety flag missing → refuse the lane
+- safety-sensitive `vendorArgs` → refuse them; project-local config may not override sandbox, approval, permission, dangerous-mode, or equivalent controls
+- Codex arbitrary `-c`/`--config` through `vendorArgs` → refuse, because config overrides can alter safety policy behind an apparently read-only argv
+- unreadable help → assume support rather than making every lane fail because help parsing failed; minimum-version enforcement still applies
+
+The help surface is adapter-specific. “Deepest subcommand” is not inherently correct; parent options may disappear from nested help output.
 
 ### Process handling
 
-- **Never build shell command strings.** Arbitrary instruction text, paths with spaces,
-  quotes, metacharacters. Use direct spawn with an argv array.
-- **Windows:** global npm installs are `.cmd` shims, which changes both spawning and
-  argument escaping. Node's Windows signal behavior also differs. If Windows is untested,
-  say so in the README.
-- **stdin must not be shared or inherited.** If any supposedly non-interactive CLI hits an
-  approval or login prompt, N processes will compete for the same terminal. Neutralize
-  stdin; if a vendor wants interaction anyway, fail that lane rather than hang.
-- **Stream output to per-run temp files.** Do not accumulate N large strings in memory,
-  and drain all child pipes continuously or they backpressure the child.
-- **Strip ANSI escapes** from captured output; some CLIs emit color even when piped.
-- **Encoding:** assume UTF-8, but one CLI emitting an invalid byte must not kill the panel.
-  Mark that lane malformed and preserve diagnostics.
+- direct spawn with argv arrays; never shell command strings
+- neutralize shared stdin except when intentionally providing prompt input
+- continuously drain child output
+- time out every lane
+- strip terminal control sequences from captured output
+- kill process trees on cancellation
+- support Windows `.cmd` shims through the platform spawning layer
+- on POSIX systems (including macOS), place reviewers in their own process groups so cancellation reaches their child/helper processes
 
 ---
 
 ## 6. Execution model
 
-### Blocking
+### Blocking and concurrency
 
-One `crbuddy go`, one terminal, wait. Discrete events append lines; scrollback beats a
-spinner when a run misbehaves. Terminal bell at the end, **TTY only** (don't put BEL bytes
-in CI logs). No intermediate report.
+One `crbuddy go`, one terminal, wait. Discrete events are appended to terminal output, with a TTY-only live status line and terminal bell at completion.
 
-On a TTY there is additionally one live status line pinned to the bottom (spinner, elapsed,
-which lanes are still running). A multi-minute wait with a frozen screen is
-indistinguishable from a hang. It is strictly additive: off a TTY nothing renders, so piped
-and CI output stays append-only.
+Panel entries run concurrently by default. `maxConcurrent: 0` means unlimited; the semaphore is still part of the execution path so a cap is a policy setting rather than an architectural rewrite.
 
-Two weights: full brightness for state changes and anything actionable, dim for everything
-else. A periodic "still going" line was tried and removed — the live line already carries
-elapsed time, so the interval line was redundant noise.
+### Timeouts and cancellation
 
-### Concurrency
+Every review lane has a timeout; the consolidation step has a separate timeout.
 
-Unmanaged by default: N configured runs means N subprocesses. Rate limiting is the user's
-problem.
-
-**But put a semaphore between config and spawn from day one**, defaulted to unlimited.
-Adding `maxConcurrent` later then becomes a policy change rather than an execution-engine
-rewrite. Per-vendor concurrency is the more useful second dimension if it's ever needed.
-
-Before shipping, verify empirically that two parallel runs of the same vendor CLI in one
-repo do not fight over lock or session state. If they do, per-vendor serialization is v0.1,
-not v2.
-
-### Timeouts
-
-**Every run has a timeout.** Non-negotiable, and the reason is structural: without one, a
-hung lane means the completion signal never fires and the user's only remedy is Ctrl-C,
-which by design destroys every completed review. A timeout converts a hang into an ordinary
-lane failure, which the reporting path already handles. Separate timeout for the merge step.
-
-### Cancellation
-
-Ctrl-C aborts everything and leaves no output.
-
-This requires **process-tree termination**, not child termination — vendor CLIs spawn
-shells, MCP servers, helper processes. Process groups on POSIX, job/tree termination on
-Windows. Graceful interrupt, then forced. A second Ctrl-C escalates. Note that installing
-a Node SIGINT handler removes the default behavior, so exiting becomes your responsibility.
+Ctrl-C aborts the run and restores prior output. A second interrupt escalates process-tree termination.
 
 ### Self-contamination
 
-This is the default lifecycle, not an edge case: `CODE-REVIEW-HANDOFF.md` sitting in the
-repo root is an uncommitted file, so the next run reviews the previous run's review.
-Excluding it from the diff is not sufficient — agents read the repo freely and can open it,
-which also breaks blindness.
+Previous output files must not become review input or break reviewer blindness.
 
-**Mechanism:** before the panel starts, move existing output files out of the review
-universe (into a gitignored `.crbuddy/` or outside the repo). On success, replace them with
-the new output. On total failure, restore them. This protects against contamination without
-destroying the prior review.
+Before reviewers start, existing output files are moved out of the review universe. On success they are replaced; on total failure they are restored. The `.crbuddy/` work area is excluded from the target.
 
-`refuseIfOutputExists` (default false) is a separate, optional courtesy for users who want
-to be asked before crbuddy touches an existing file at all. It is not the contamination
-mechanism.
+A per-repository lock prevents two simultaneous crbuddy runs from racing output lifecycle operations.
 
-The `.crbuddy/` working directory must itself be excluded from the target, since untracked
-files are in scope.
+### Output lifecycle
 
-### Holding directory
+`output.merged` is always the deliverable.
 
-Stashed outputs go in a PER-RUN holding directory. A shared one is unsafe: a hard stop
-mid-run strands files there, and the next run — which stashed nothing of its own — would
-delete the whole directory on failure, taking the stranded report with it. Each run also
-recovers anything stranded by a previous one before stashing its own.
+- consolidation succeeds → write merged deliverable plus raw audit file
+- consolidation disabled or fails → write unmerged reviews to the merged-path filename
+- total reviewer failure → restore prior output and write no fresh report
 
-### Output files
-
-`output.merged` is ALWAYS written and is always the deliverable. `output.raw` is written
-only when consolidation succeeded, as the audit trail.
-
-Anything else means the filename a user points a fix-agent at sometimes does not exist —
-or, worse, is a stale artifact from a previous run sitting beside fresh reviews under a
-different name.
-
-### Writing output
-
-- Stage temp files **on the destination filesystem** (beside the output), not in `/tmp` —
-  cross-filesystem rename is not atomic and may not be a rename at all.
-- Two renames are not one transaction. Write raw first, then merged. The merged file
-  references the raw file's `runId`; a mismatch means one of them is stale.
-- Every run gets a `runId` used in both outputs, temp filenames, and terminal diagnostics.
-- **Take a per-repository lock.** Two concurrent `crbuddy go` invocations otherwise race,
-  and atomic rename does not help — the slower one wins.
-- Clean up temp litter on the next run; a crash leaves it behind.
+Stage temp files on the destination filesystem, then rename into place.
 
 ### Exit codes
 
-`0` on total failure only… no. Specifically:
+- `0` — usable report produced; partial success also exits 0 by default
+- `1` — no usable review produced / fatal startup failure
+- `2` — partial success when `--strict` is requested
 
-- `0` — panel and merge completed as requested
-- `1` — no usable review produced
-- `2` — **reserved** for partial success
-
-v0.1 may return `0` for partial success (matching the earlier decision), but reserve `2`
-now so `--strict` can be added later without breaking anyone's hook. The motivating case:
-merge crashes, five reviewers succeed, exit 0, and `crbuddy go && agent CODE-REVIEW-HANDOFF.md`
-feeds the agent yesterday's merged file.
-
-Merge failure is reported separately from reviewer failure — the merge is not a panel run.
-On merge failure: raw output only, warn, and fall back cleanly.
-
-### Preflight
-
-Refuse to start on invalid config, or on a named vendor CLI that is missing or fails a
-version check.
-
-Do **not** attempt a real authentication probe. There is no uniform, free auth check across
-vendors; it may cost a request, may be impossible without one, and will rot per vendor.
-Auth failure surfaces as a fast lane failure in the first seconds, which the reporting path
-already handles. Call this phase `preflight`, and don't promise it guarantees all runs can start.
+Merge failure is separate from reviewer failure and counts as partial success when strict mode is enabled.
 
 ---
 
 ## 7. Effort
 
-**Vendor-native, passed through verbatim.** There is no crbuddy effort vocabulary and no
-translation layer.
+Effort is vendor-native and passed through verbatim **except when a vendor reuses an effort-looking token to select a different product or execution mode**. There is no portable crbuddy effort vocabulary and no translation/clamping layer.
 
-Each adapter declares the effort values its CLI accepts, plus a default. `init` offers that
-list (skipping the question entirely for a CLI with no effort control) with an "Other"
-escape, and stores the chosen string. `go` passes it to the CLI unchanged.
+Each adapter supplies advisory values and a default for the wizard. Config validation accepts any non-empty string so a vendor adding a new value does not normally require a crbuddy release before users can select it manually. The adapter may still refuse a reserved value whose semantics violate crbuddy's execution contract; Claude `ultra` is the current example because it selects asynchronous cloud Ultrareview rather than local synchronous review.
 
-Config validation accepts any non-empty string. Validating against a hardcoded list would
-mean a vendor adding a level breaks configs until crbuddy ships a release — the exact rot
-this design exists to avoid. An unusable value surfaces as a fast, attributed lane failure.
+Native Claude review is additionally deterministic when effort is omitted from a hand-edited config: the adapter explicitly applies its documented default (`high`) rather than allowing Claude Code to reuse prior interactive state.
 
-An earlier design had a portable vocabulary translated and clamped per vendor. It was cut
-for two reasons: `model` is already a vendor-native string in config, so an abstract
-`effort` beside it was inconsistent; and clamping could silently downgrade a run, which then
-required version stamps, clamp records in the output header, and staleness warnings purely
-to detect damage the translation layer itself caused. Removing the layer removed all of it.
+The applied value, or lack of one, is recorded in output provenance.
 
-The per-vendor version stamp survives, scoped to `init` and `doctor`: it tells the user the
-shipped model and effort lists may be incomplete for their CLI version. It does not affect
-what runs.
+---
 
-## 8. Merge
+## 8. Consolidation
 
-### The rule
+The consolidation model has **no authority to remove or rewrite a source finding**.
 
-**The merge model has no authority to remove or rewrite any source finding.**
+The process has two passes:
 
-It receives enumerated findings and returns **relationships** — which source IDs describe
-the same defect. crbuddy renders the clusters mechanically from the original text.
+1. mechanically segment each successful review into enumerated findings while preserving all text
+2. ask a model only for relationships between finding IDs that appear to describe the same underlying defect
 
-This is architectural, not a prompt instruction, because the identity/correctness boundary
-is conceptually leaky: deciding whether two findings are "the same" often *is* correctness
-reasoning (same symptom / different root cause versus the reverse). You cannot prompt your
-way out of that, so remove the authority instead.
+The model does not decide correctness. It is not shown the repository.
 
-Failure mode becomes visible under-deduplication rather than silent deletion.
+Validation requires:
 
-### Two passes
-
-1. **Segment.** Per run, split freeform output into an enumerated finding list with IDs.
-2. **Cluster.** Group the enumerated findings across runs.
-
-Clustering freeform blobs directly invites the model to summarize, which is to say destroy.
-
-### Validation
-
-Mechanically enforce, after pass 2:
-
-- every input finding ID appears
-- exactly once
+- every input finding ID present
+- each ID exactly once
 - no unknown IDs
 - no empty clusters
 
-Reject and fall back to raw-only if validation fails.
+Invalid consolidation is rejected and the deliverable falls back to unmerged review output.
 
-### What the merger sees
-
-Finding text, file/line locations, the changed-file manifest, and the pinned diff.
-**No repository access.** Under the keep-both-when-unsure rule, ambiguity is already handled
-safely, so code access buys little and mainly creates opportunities to adjudicate.
-
-### Tie-break
-
-Group only when the findings describe the same underlying defect such that fixing one
-addresses the other. Same file is not sufficient. Same line is not sufficient. Same symptom
-is not sufficient. When unsure, emit singletons.
-
-Beware transitivity: A≈B and B≈C should not blindly connected-component into {A,B,C} when B
-is an overly broad finding. Require each cluster to express one coherent defect identity.
-
-### Ordering
-
-Sort clusters by how many distinct vendors raised them. This is mechanical, requires no
-correctness judgment, and is the priority signal a fix-agent needs.
-
-Note the honest caveat, for the docs: cross-model agreement is a weak correctness signal.
-Published measurements put agreement-versus-correctness correlation in the 0.2–0.6 range,
-and models err in correlated ways — larger models more so, across vendors. Agreement counts
-are a useful ordering heuristic and should not be presented as confidence.
+Clusters are ordered by the number of distinct successful review lanes represented. Agreement is a reading-order heuristic, not a confidence score.
 
 ---
 
 ## 9. Output format
 
-Two files. The merged one is the deliverable; the raw one is the audit trail.
+Both merged and raw output are rendered from structured in-memory data. Markdown is never parsed back into internal state.
 
-```markdown
----
-crbuddy:
-  version: 0.1.0
-  runId: …
-  generated: …
-  target:
-    kind: uncommitted
-    snapshot: <sha>
-    base: <sha>
-    digest: …
-    files: 23
-  runs:
-    configured: 6
-    succeeded: 5
-    failed: 1
-  failures:
-    - { id: codex-high, reason: rate_limited, exit: 1 }
-  clamps:
-    - { id: opus-max, requested: max, applied: high, vendorNative: "…" }
-  adapters:
-    - { id: opus-max, cli: "claude", cliVersion: "…", modelRequested: "…", modelActual: "…", wallClockMs: … }
----
+Frontmatter records at least:
 
-<!-- crbuddy:report -->
-**5 of 6 reviews completed.** …
-<!-- /crbuddy:report -->
+- crbuddy version and run ID
+- generated timestamp
+- target kind, snapshot/base/range metadata, digest, file/byte counts
+- configured/succeeded/failed lane counts
+- lane failures
+- per-lane CLI version, model, applied effort, and wall-clock time
+- consolidation state and failure reason when applicable
 
-<!-- crbuddy:review id=opus-max -->
-…
-<!-- /crbuddy:review -->
-```
-
-Frontmatter is only frontmatter at byte 0, so a review emitting `---` cannot be mistaken
-for it. The visible report block exists because an HTML comment alone is invisible in
-rendered markdown.
-
-**The HTML comment markers are for humans, not machines.** A model's verbatim output can
-itself contain the closing marker. Do not parse them as a boundary — the merged file is
-rendered from validated structured data, not parsed back out of markdown.
+HTML comments delimit human-navigation sections, but they are not parser boundaries because verbatim model output can contain the same strings.
 
 ---
 
-## 10. Documented caveats
+## 10. Known version-sensitive surfaces
 
-These belong in the README, not buried:
+These are expected maintenance points rather than reasons to weaken the architecture:
 
-- Agreement counts order findings; they are not a confidence score.
-- Agents read the live tree even though the diff is pinned.
-- Vendor project files (CLAUDE.md, AGENTS.md, project-local commands) are loaded by design
-  and will influence reviews.
-- Effort levels are crbuddy's vocabulary and are clamped per vendor; the applied native
-  value is recorded per run.
-- Windows support status.
+- vendor minimum CLI versions
+- vendor model and effort lists
+- vendor CLI flags and their help hierarchy
+- native review invocation syntax
+- Claude local-vs-Ultrareview command semantics
+- Codex parent/subcommand option placement
+- Windows shim/process-tree behavior
+- POSIX process-group behavior on macOS/Linux
+
+`crbuddy doctor`/diagnostics should make version mismatches observable before a long paid run whenever possible.
 
 ---
 
 ## 11. Deliberately open
 
-- Whether `init` should be runnable non-interactively, and whether it should refuse when
-  stdin is not a TTY.
-- Where the per-vendor model list comes from: hardcoded (rots) versus queried from the
-  vendor CLI (may not be uniformly queryable).
-- Project-local config as a trust boundary. A cloned repo's config can name output paths
-  and instructions that cause authenticated agents to run. Minimum for v0.1: output paths
-  must resolve inside the repo, colliding output paths are rejected, unknown config keys
-  are fatal. A first-use trust acknowledgement is a later concern.
+- whether repeated identical model lanes should contribute equally to agreement ordering
+- whether `init` should support a non-interactive mode
+- whether model lists should stay advisory/hardcoded or be queried when vendors expose stable discovery
+- project-local configuration as a trust boundary for authenticated agents
+- whether report artifacts should eventually live outside the reviewed tree
+- empirical measurement of the incremental value of a multi-vendor panel over the best single reviewer

@@ -10,6 +10,7 @@ import { LoadedConfig } from '../config/load.js';
 import { ResolvedTarget, resolveTarget } from '../git/target.js';
 import { Adapter, UnsafeInvocationError } from '../adapters/types.js';
 import { getAdapter } from '../adapters/vendors.js';
+import { isVersionAtLeast } from '../adapters/version.js';
 import { Semaphore } from '../util/semaphore.js';
 import { acquireLock } from '../util/lock.js';
 import { killAll, probe, runProcess } from '../run/spawn.js';
@@ -132,6 +133,21 @@ export async function runGo(options: GoOptions): Promise<number> {
       const detected =
         adapter.parseVersion(result.version ?? '') ?? (await detectVersion(adapter, scratch));
 
+      if (!detected) {
+        throw new PreflightError(
+          `Could not determine ${adapter.label} version. crbuddy requires ` +
+            `${adapter.command} ${adapter.minVersion} or newer so it does not guess at ` +
+            `version-sensitive native-review behavior. Run \`crbuddy doctor\` for details.`,
+        );
+      }
+
+      if (!isVersionAtLeast(detected, adapter.minVersion)) {
+        throw new PreflightError(
+          `${adapter.label} ${detected} is too old for this crbuddy adapter; ` +
+            `${adapter.minVersion} or newer is required. Update ${adapter.command}, then retry.`,
+        );
+      }
+
       versions.set(name, detected);
       supports.set(name, await flagProbe(adapter, scratch));
     }
@@ -183,13 +199,10 @@ export async function runGo(options: GoOptions): Promise<number> {
       );
     }
 
-    // The exact SHAs are provenance, not something to read in a terminal;
-    // they live in the output file's frontmatter.
     progress.dim(
       `Reviewing ${target.files.length} file(s), ${formatSize(target.bytes)}.`,
     );
 
-    // Move previous output out of the review universe BEFORE agents start.
     stashed = await stashExistingOutputs(
       repoRoot,
       workDir,
@@ -200,19 +213,14 @@ export async function runGo(options: GoOptions): Promise<number> {
     // --- panel -----------------------------------------------------------
 
     const semaphore = new Semaphore(config.maxConcurrent);
-
     const startedAt = Date.now();
 
-    // Full brightness: this is the state change worth noticing.
     progress.line(
       `Starting ${config.panel.length} review${config.panel.length === 1 ? '' : 's'} ` +
         `at ${formatClock()}…`,
     );
 
     const names = displayNames(config.panel, adapters);
-
-    // A live line: a multi-minute wait with a frozen screen is
-    // indistinguishable from a hang.
     progress.startPulse(startedAt);
 
     const records = await Promise.all(
@@ -352,7 +360,6 @@ export async function runGo(options: GoOptions): Promise<number> {
     return EXIT_OK;
   } finally {
     progress.stopPulse();
-
     process.off('SIGINT', onInterrupt);
     process.off('SIGTERM', onInterrupt);
 
@@ -378,11 +385,6 @@ async function detectVersion(adapter: Adapter, scratch: string): Promise<string 
   return adapter.parseVersion(`${result.stdout}\n${result.stderr}`);
 }
 
-/**
- * Terminal-friendly names. Ids stay in the output file where machine
- * readability matters; the terminal gets "Claude Code (opus)". An id is
- * appended only when two entries would otherwise look identical.
- */
 function displayNames(
   panel: PanelEntry[],
   adapters: Map<string, Adapter>,
@@ -402,7 +404,6 @@ function displayNames(
 
   for (const entry of panel) {
     const name = base.get(entry.id)!;
-
     names.set(entry.id, (counts.get(name) ?? 0) > 1 ? `${name} [${entry.id}]` : name);
   }
 
@@ -424,7 +425,6 @@ interface ExecuteArgs {
 
 async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
   const { entry, adapter, target } = args;
-
   const instructions = args.instructionsOverride ?? entry.instructions;
 
   const base = {
@@ -452,7 +452,6 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       supports: args.supports,
     });
   } catch (error) {
-    // A missing safety flag refuses the lane rather than running unsandboxed.
     if (error instanceof UnsafeInvocationError) {
       progress.laneFinished(args.display);
 
@@ -502,14 +501,9 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
   };
 
   const report = (outcome: RunRecord): RunRecord => {
-    // Reported as it happens rather than after the whole panel: with a
-    // multi-minute wait, "one of them already finished" is information.
     if (outcome.ok) {
       progress.dim(`  ${args.display} — done in ${formatElapsed(outcome.wallClockMs)}`);
     } else {
-      // A failed lane is actionable, so it keeps full brightness — and it
-      // carries the first line of the CLI's own complaint, because "exit_2"
-      // alone sends you digging through the raw file.
       const detail = firstLine(outcome.diagnostics);
 
       progress.line(
@@ -590,7 +584,6 @@ interface MergeArgs {
 
 async function runMerge(args: MergeArgs) {
   const invocation = args.adapter.build({
-    // The merger sees findings and the manifest — never the repository.
     operation: {
       kind: 'generic',
       target: null,
@@ -626,7 +619,6 @@ async function runMerge(args: MergeArgs) {
   }
 
   const parsed = parseClusterResponse(args.adapter.finalOutput(result));
-
   return validateClusters(parsed, args.findings).clusters;
 }
 
@@ -678,17 +670,9 @@ function firstLine(text: string | undefined): string {
     .find((entry) => entry !== '');
 
   if (!line) return '';
-
   return line.length > 160 ? `${line.slice(0, 157)}\u2026` : line;
 }
 
-/**
- * Read a CLI's own help once and answer "does it accept this flag?".
- *
- * Vendor flags churn between releases, and a wrong one yields a usage error
- * (exit 2 from a clap-based CLI) that looks like a crbuddy bug rather than a
- * version mismatch. Asking the binary is cheaper than shipping a guess.
- */
 async function flagProbe(
   adapter: Adapter,
   scratch: string,
@@ -704,9 +688,6 @@ async function flagProbe(
 
   const help = `${result.stdout}\n${result.stderr}`;
 
-  // If help could not be read, assume support rather than refusing to run.
-  // Failing closed here would break every lane on an unparseable --help,
-  // which is a worse outcome than one clear usage error.
   if (help.trim() === '') return () => true;
 
   return (flag: string) => {

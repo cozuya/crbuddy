@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { ADAPTERS } from '../adapters/vendors.js';
 import { isNewerThanStamp } from '../adapters/effort.js';
+import { isVersionAtLeast } from '../adapters/version.js';
 import { probe, runProcess } from '../run/spawn.js';
 import { findRepoRoot } from '../git/target.js';
 
@@ -60,10 +61,6 @@ function supported(help: string, flag: string): boolean {
  *
  * Read-only: it runs `--version` and `--help` on each vendor CLI and reports
  * what it found. It contacts no models, writes nothing, and changes nothing.
- *
- * This exists because "vendor not detected" is the single most likely thing
- * to go wrong, and a checkmark with no reason attached makes it impossible
- * to tell a PATH problem from a shim problem from a broken install.
  */
 export async function runDoctor(): Promise<number> {
   const scratch = await mkdtemp(path.join(tmpdir(), 'crbuddy-doctor-'));
@@ -87,8 +84,9 @@ export async function runDoctor(): Promise<number> {
 
     for (const adapter of ADAPTERS) {
       const result = await probe(adapter.command, adapter.versionArgs());
-
-      const mark = result.present ? 'OK  ' : 'MISS';
+      const version = result.present ? adapter.parseVersion(result.output ?? '') : null;
+      const versionOk = version !== null && isVersionAtLeast(version, adapter.minVersion);
+      const mark = !result.present ? 'MISS' : versionOk ? 'OK  ' : 'OLD ';
 
       console.log(`  ${mark} ${adapter.label} — \`${adapter.command}\``);
 
@@ -97,23 +95,30 @@ export async function runDoctor(): Promise<number> {
       }
 
       if (result.present) {
-        usable += 1;
-
-        const version = adapter.parseVersion(result.output ?? '');
-
         if (version) {
           console.log(
-            `       version:  ${version} (lists written for ${adapter.listsStampedFor})`,
+            `       version:  ${version} (minimum ${adapter.minVersion}; lists written for ${adapter.listsStampedFor})`,
           );
 
-          if (isNewerThanStamp(version, adapter.listsStampedFor)) {
+          if (!versionOk) {
+            console.log(
+              `       problem:  too old for this adapter; update to ${adapter.minVersion} or newer`,
+            );
+          } else {
+            usable += 1;
+          }
+
+          if (versionOk && isNewerThanStamp(version, adapter.listsStampedFor)) {
             console.log(
               `       note:     newer than crbuddy's lists; init may not offer` +
                 ` every model or effort value this CLI supports`,
             );
           }
         } else {
-          console.log(`       version:  could not parse`);
+          console.log(`       version:  could not parse (minimum ${adapter.minVersion})`);
+          console.log(
+            `       problem:  crbuddy will refuse to guess at version-sensitive review behavior`,
+          );
         }
 
         console.log(
@@ -126,9 +131,6 @@ export async function runDoctor(): Promise<number> {
           console.log(`       effort:   (this CLI has no effort control)`);
         }
 
-        // Which flags crbuddy will actually pass, read from the CLI's help.
-        // This is where a version mismatch becomes visible before it costs
-        // you a five-minute run.
         const help = await readHelp(adapter, scratch);
 
         if (help === null) {
@@ -141,7 +143,7 @@ export async function runDoctor(): Promise<number> {
             const found = entry.candidates.find((flag) => supported(help, flag));
 
             return found
-              ? `${found}${entry.required ? '' : ''}`
+              ? `${found}`
               : `${entry.candidates[0]} MISSING${entry.required ? ' (required)' : ''}`;
           });
 
