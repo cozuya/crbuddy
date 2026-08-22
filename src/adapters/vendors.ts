@@ -8,16 +8,10 @@ import {
 } from './types.js';
 
 /**
- * NOTE FOR WHOEVER RUNS THIS FIRST.
- *
  * Native review is intentional. When a panel entry has no custom
  * `instructions`, crbuddy invokes the vendor's own review workflow rather
  * than trying to imitate it with a generic prompt. Custom instructions are a
  * separate generic-agent operation by design.
- *
- * Two invariants that must survive any correction:
- *   - reviewers get read-only permissions, unconditionally
- *   - native review stays native; do not replace it with "review this diff" prose
  */
 
 function genericPrompt(instructions: string, range: string | null): string {
@@ -31,7 +25,6 @@ function genericPrompt(instructions: string, range: string | null): string {
   );
 }
 
-/** Pick the first spelling this CLI actually accepts. */
 function firstSupported(
   request: InvocationRequest,
   candidates: string[],
@@ -57,18 +50,18 @@ function requireSafetyFlag(
 
   throw new UnsafeInvocationError(
     `\`${cli}\` does not appear to support ${purpose} ` +
-      `(looked for ${candidates.join(', ')} in \`${cli} --help\`). crbuddy will ` +
-      `not run a reviewer without it, because an agent that can edit the working ` +
-      `tree changes the very diff under review. Update ${cli}; or, if it does ` +
-      `support this, pass the flag yourself via "vendorArgs" on that panel entry.`,
+      `(looked for ${candidates.join(', ')} in the probed help output). crbuddy will ` +
+      `not run a reviewer without it. Update ${cli}; or, if it does support this, ` +
+      `pass the flag yourself via "vendorArgs" on that panel entry.`,
   );
 }
 
-/** Claude Code: native `/code-review` / `/review` via non-interactive `-p`. */
+/** Claude Code: invoke the native `/code-review` skill through print mode. */
 export const claudeAdapter: Adapter = {
   name: 'claude',
   label: 'Claude Code',
   command: 'claude',
+  nativeReview: true,
   minVersion: '2.1.223',
 
   models: [
@@ -127,21 +120,21 @@ export const claudeAdapter: Adapter = {
     }
 
     if (request.operation.kind === 'review') {
-      const target = request.operation.target;
-      const command = target.kind === 'uncommitted' ? '/code-review' : '/review';
-      const parts = [command];
-
+      // /review is PR-oriented. /code-review is the native review surface that
+      // accepts an explicit target such as a branch or ref range, so it is the
+      // correct primitive for both crbuddy target kinds.
+      const parts = ['/code-review'];
       if (request.effort) parts.push(request.effort);
+      parts.push(request.operation.target.range);
 
-      // /code-review accepts an explicit ref range. Supplying crbuddy's pinned
-      // range keeps Claude on the same captured changeset, including untracked
-      // files represented in the snapshot commit.
-      parts.push(target.range);
+      // Use the documented `claude -p "query"` form. Current print mode loads
+      // skills/plugins unless --bare is used, so the slash-command skill is
+      // dispatched by Claude Code rather than reproduced as a generic prompt.
+      args.push(parts.join(' '));
 
       return {
         command: this.command,
         args,
-        stdin: parts.join(' '),
         appliedEffort: request.effort ?? null,
         ...(warnings.length > 0 ? { warnings } : {}),
       };
@@ -191,6 +184,7 @@ export const codexAdapter: Adapter = {
   name: 'codex',
   label: 'Codex CLI',
   command: 'codex',
+  nativeReview: true,
   minVersion: '0.130.0',
 
   models: [
@@ -209,7 +203,10 @@ export const codexAdapter: Adapter = {
   },
 
   helpArgs() {
-    return ['exec', 'review', '--help'];
+    // The flags crbuddy itself passes (--sandbox, -c, --ephemeral, etc.) are
+    // exec-level options. `codex exec review --help` may omit those parent
+    // flags and would make a safe invocation look unsupported.
+    return ['exec', '--help'];
   },
 
   parseVersion(stdout) {
@@ -260,9 +257,6 @@ export const codexAdapter: Adapter = {
     }
 
     if (request.operation.kind === 'review') {
-      // This is Codex's real review engine: the headless equivalent of /review.
-      // Scoped review flags and custom prompts are mutually exclusive, which
-      // is why custom crbuddy instructions take the generic path below.
       args.push('review');
 
       if (request.operation.target.kind === 'uncommitted') {
@@ -310,6 +304,7 @@ export const geminiAdapter: Adapter = {
   name: 'gemini',
   label: 'Gemini CLI',
   command: 'gemini',
+  nativeReview: false,
   minVersion: '0.1.0',
 
   models: [
@@ -338,10 +333,8 @@ export const geminiAdapter: Adapter = {
     if (request.operation.kind === 'review') {
       throw new UnsafeInvocationError(
         'Gemini CLI does not currently expose a supported headless native code-review ' +
-          'operation that crbuddy can invoke. crbuddy will not silently replace native ' +
-          'review with a generic "review this diff" prompt. Add explicit `instructions` ' +
-          'to this Gemini panel entry to opt into generic read-only agent mode, or remove ' +
-          'the lane.',
+          'operation that crbuddy can invoke. Add explicit `instructions` to this Gemini ' +
+          'panel entry to opt into generic read-only agent mode, or remove the lane.',
       );
     }
 
