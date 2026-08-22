@@ -120,16 +120,28 @@ export const claudeAdapter: Adapter = {
     }
 
     if (request.operation.kind === 'review') {
-      // /review is PR-oriented. /code-review is the native review surface that
-      // accepts an explicit target such as a branch or ref range, so it is the
-      // correct primitive for both crbuddy target kinds.
+      if (request.effort?.toLowerCase() === 'ultra') {
+        throw new UnsafeInvocationError(
+          'Claude Code reserves `/code-review ultra` for Ultrareview, a separate ' +
+            'cloud review product. Under `claude -p` it launches asynchronously and ' +
+            'returns a tracking link instead of waiting for findings, and paid runs may ' +
+            'consume usage credits. crbuddy\'s normal Claude lane supports the local ' +
+            '`/code-review` effort levels (`low` through `max`) only. Run `claude ' +
+            'ultrareview` directly if you intentionally want the cloud product.',
+        );
+      }
+
+      // /code-review is the canonical native review surface and accepts an
+      // explicit target such as a branch or ref range. Current Claude Code
+      // (>=2.1.223) also treats /review as an alias, but crbuddy uses the
+      // canonical spelling for both target kinds.
       const parts = ['/code-review'];
       if (request.effort) parts.push(request.effort);
       parts.push(request.operation.target.range);
 
-      // Use the documented `claude -p "query"` form. Current print mode loads
-      // skills/plugins unless --bare is used, so the slash-command skill is
-      // dispatched by Claude Code rather than reproduced as a generic prompt.
+      // Use the documented `claude -p "query"` form. In non-interactive mode
+      // a non-ultra /code-review runs in the foreground: Claude Code waits for
+      // the review and includes the findings in the response.
       args.push(parts.join(' '));
 
       return {
@@ -175,6 +187,20 @@ export const claudeAdapter: Adapter = {
   },
 
   checkCompletion(result): CompletionCheck {
+    const body = result.stdout.trim();
+
+    // This exact class of status-only response was observed during the initial
+    // build. It violates Claude Code's current documented non-interactive
+    // contract (local /code-review should wait and return findings), so never
+    // let a zero exit turn it into a successful review artifact.
+    if (
+      result.code === 0 &&
+      body.length < 500 &&
+      /still waiting for .*code-review.*verification\/synthesis stage to complete/i.test(body)
+    ) {
+      return { ok: false, reason: 'incomplete_review' };
+    }
+
     return defaultCompletion({ ...result, body: result.stdout });
   },
 };
