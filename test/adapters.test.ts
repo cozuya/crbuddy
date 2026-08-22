@@ -48,6 +48,18 @@ test('Claude native review invokes /code-review for uncommitted target', () => {
   assert.equal(invocation.appliedEffort, 'high');
 });
 
+test('Claude native review uses an explicit default effort when config omits it', () => {
+  const invocation = claudeAdapter.build({
+    operation: { kind: 'review', target: uncommitted },
+    model: 'opus',
+    repoRoot: '/repo',
+    supports,
+  });
+
+  assert.equal(invocation.args.at(-1), `/code-review high ${uncommitted.range}`);
+  assert.equal(invocation.appliedEffort, 'high');
+});
+
 test('Claude branch review also uses /code-review with the captured range', () => {
   const invocation = claudeAdapter.build({
     operation: { kind: 'review', target: branch },
@@ -86,6 +98,20 @@ test('Claude status-only review response is not accepted as completed findings',
   });
 
   assert.deepEqual(completion, { ok: false, reason: 'incomplete_review' });
+});
+
+test('Claude vendorArgs cannot override permission safety', () => {
+  assert.throws(
+    () =>
+      claudeAdapter.build({
+        operation: { kind: 'review', target: uncommitted },
+        model: 'opus',
+        repoRoot: '/repo',
+        supports,
+        vendorArgs: ['--permission-mode', 'bypassPermissions'],
+      }),
+    UnsafeInvocationError,
+  );
 });
 
 test('Codex probes exec-level help where safety/config flags live', () => {
@@ -131,6 +157,34 @@ test('Codex refuses when exec-level help does not advertise a safety sandbox', (
         model: 'gpt-5.6-sol',
         repoRoot: '/repo',
         supports: (flag) => flag !== '--sandbox' && flag !== '-s',
+      }),
+    UnsafeInvocationError,
+  );
+});
+
+test('Codex vendorArgs cannot weaken sandbox safety', () => {
+  assert.throws(
+    () =>
+      codexAdapter.build({
+        operation: { kind: 'review', target: uncommitted },
+        model: 'gpt-5.6-sol',
+        repoRoot: '/repo',
+        supports,
+        vendorArgs: ['--sandbox', 'danger-full-access'],
+      }),
+    UnsafeInvocationError,
+  );
+});
+
+test('Codex vendorArgs cannot use arbitrary config overrides around safety', () => {
+  assert.throws(
+    () =>
+      codexAdapter.build({
+        operation: { kind: 'review', target: uncommitted },
+        model: 'gpt-5.6-sol',
+        repoRoot: '/repo',
+        supports,
+        vendorArgs: ['-c', 'approval_policy=never'],
       }),
     UnsafeInvocationError,
   );
