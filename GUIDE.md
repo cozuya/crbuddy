@@ -109,9 +109,20 @@ than a failed startup.
 
 ### Panel entries
 
-`instructions` is optional. Without it, the adapter runs that vendor's native
-review behavior. With it, the adapter runs a generic read-only agent given
-those instructions.
+`instructions` is optional for vendors with a supported headless native review
+operation. Without it, the adapter runs that vendor's own review behavior.
+With it, the adapter runs a generic read-only agent given those instructions.
+
+Not every vendor exposes a usable headless native review surface. For those
+vendors, `crbuddy init` requires explicit `instructions` rather than creating a
+lane that would later be refused. Gemini is currently in this category.
+
+For Claude Code, native review uses `/code-review` through print mode and gives
+the command crbuddy's captured git range. For Codex, native review uses
+`codex exec review` with the vendor's `--uncommitted` or `--base` selector.
+Those target interfaces are not identical, which is why the snapshot is stable
+provenance rather than a claim that every native lane consumes the exact same
+SHA range.
 
 `vendorArgs` is an escape hatch — extra argv appended verbatim — for reaching
 a flag crbuddy doesn't model.
@@ -178,12 +189,11 @@ finding that's too large or too small — never one that's missing.
 
 **Flags are detected, not assumed.** Vendor CLI flags churn between
 releases, and a flag your version doesn't have produces a usage error that can
-look like a crbuddy bug. At preflight crbuddy reads each CLI's own `--help` and
-only passes what it advertises. Optional flags that are missing get dropped
-with a warning; a missing **safety** flag — read-only enforcement — refuses
-that lane instead. If your CLI supports a flag but doesn't advertise it
-parseably, pass it yourself via `vendorArgs`. `crbuddy check` shows what was
-detected.
+look like a crbuddy bug. At preflight crbuddy reads the adapter's appropriate
+help surface and only passes optional flags it advertises. A missing **safety**
+flag — read-only enforcement — refuses that lane instead. Parent and nested
+subcommand help are not interchangeable; Codex, for example, keeps crbuddy's
+sandbox/config flags on `codex exec --help`.
 
 **Preflight checks presence, not authentication.** crbuddy verifies the vendor
 binary exists and reports a version. It does not probe whether you're logged
@@ -213,8 +223,8 @@ actual reason.
 
 YAML frontmatter carries provenance: the captured snapshot and base SHAs, the
 diff digest, per-run CLI versions and applied effort, failures with reasons,
-and any clamps. A visible report block summarizes the same thing for a human
-skimming rendered markdown.
+and consolidation state. A visible report block summarizes the same thing for
+a human skimming rendered markdown.
 
 HTML comment markers delimit reviews, clusters, and findings. **They are
 navigation aids, not a parsing boundary** — a model's verbatim output can
@@ -225,12 +235,12 @@ nothing in crbuddy parses markdown back out of them.
 
 | | |
 |---|---|
-| `0` | Panel completed, and consolidation if enabled |
+| `0` | Usable report produced; partial success also exits 0 by default |
 | `1` | No usable review produced |
 | `2` | Partial success — only with `--strict` |
 
-Partial success exits `0` by default so `crbuddy go && agent ...` doesn't
-break on one flaky vendor. Use `--strict` in a hook where that matters.
+Use `--strict` in a hook where a failed lane or failed consolidation should
+break the command chain.
 
 ## Status
 
