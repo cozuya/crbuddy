@@ -169,16 +169,17 @@ Claude's native review path is `/code-review`, invoked through non-interactive p
 
 Current rules:
 
-- use `/code-review` for both crbuddy target kinds
-- pass the configured vendor-native effort level as the command argument
+- use canonical `/code-review` for both crbuddy target kinds; on Claude Code 2.1.223+ `/review` is an alias, but crbuddy uses the documented canonical spelling
+- pass the configured vendor-native local effort level as the command argument
 - pass crbuddy's captured git range as the target
 - invoke it using the documented `claude -p "<query>"` shape
-- do not use `/review <range>`: `/review` is PR-oriented and crbuddy does not model a PR number
 - enforce plan/read-only permissions
 
-Print mode loads normal project/user context, skills, and plugins unless `--bare` is used. crbuddy does not use `--bare`. Slash-command/skill dispatch in print mode is therefore the intended native mechanism, not a prose imitation of review behavior.
+Anthropic's current documentation explicitly says a non-`ultra` `/code-review` run under `-p` runs in the foreground: Claude Code waits for the review and includes the findings in the response. That synchronous behavior is part of the adapter contract.
 
-This is still a version-sensitive integration. A zero-exit status message is not evidence that the native review completed correctly; runtime behavior should continue to be exercised against installed Claude Code versions.
+`ultra` is different. `/code-review ultra` selects **Ultrareview**, a separate cloud review product. In a `claude -p '/code-review ultra'` run Claude Code launches the remote review and returns a tracking link without waiting for findings; paid runs can consume usage credits. Therefore `ultra` is not a supported effort value for crbuddy's normal Claude lane and must be refused rather than passed through. A user who intentionally wants Ultrareview should use its dedicated blocking `claude ultrareview` subcommand outside the normal adapter until crbuddy explicitly models that separate product.
+
+A known status-only response was observed during development: `Still waiting for the code-review skill's verification/synthesis stage to complete.` Because that violates the documented foreground contract for local `-p` review, crbuddy treats that response as `incomplete_review` rather than accepting a zero exit as completed findings.
 
 ### Codex CLI
 
@@ -266,9 +267,9 @@ Merge failure is separate from reviewer failure and counts as partial success wh
 
 ## 7. Effort
 
-Effort is vendor-native and passed through verbatim. There is no portable crbuddy effort vocabulary and no translation/clamping layer.
+Effort is vendor-native and passed through verbatim **except when a vendor reuses an effort-looking token to select a different product or execution mode**. There is no portable crbuddy effort vocabulary and no translation/clamping layer.
 
-Each adapter supplies advisory values and a default for the wizard. Config validation accepts any non-empty string so a vendor adding a new value does not require a crbuddy release before users can select it manually.
+Each adapter supplies advisory values and a default for the wizard. Config validation accepts any non-empty string so a vendor adding a new value does not normally require a crbuddy release before users can select it manually. The adapter may still refuse a reserved value whose semantics violate crbuddy's execution contract; Claude `ultra` is the current example because it selects asynchronous cloud Ultrareview rather than local synchronous review.
 
 The applied value, or lack of one, is recorded in output provenance.
 
@@ -323,7 +324,7 @@ These are expected maintenance points rather than reasons to weaken the architec
 - vendor model and effort lists
 - vendor CLI flags and their help hierarchy
 - native review invocation syntax
-- Claude print-mode skill behavior
+- Claude local-vs-Ultrareview command semantics
 - Codex parent/subcommand option placement
 - Windows shim/process-tree behavior
 
