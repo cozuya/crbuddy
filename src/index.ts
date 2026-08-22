@@ -7,7 +7,7 @@ import { GitError, findRepoRoot } from './git/target.js';
 import { LockError } from './util/lock.js';
 import { PreflightError, runGo } from './commands/go.js';
 import { runInit } from './commands/init.js';
-import { runCheck } from './commands/check.js';
+import { runDoctor } from './commands/doctor.js';
 
 const HELP = `crbuddy — fan one code review across several agent CLIs, then consolidate.
 
@@ -15,7 +15,7 @@ Usage:
   crbuddy init                 Interactive setup. Writes a config.
   crbuddy config               Same as init; edits an existing config.
   crbuddy go [instructions]    Run the panel. Blocking.
-  crbuddy check                Report which vendor CLIs are usable, and why not.
+  crbuddy doctor               Report which vendor CLIs are usable, and why not.
 
 Options for \`go\`:
   --force      Run even if the diff exceeds maxDiffBytes.
@@ -62,10 +62,10 @@ async function main(argv: string[]): Promise<number> {
 
   const repoRoot = await findRepoRoot(process.cwd()).catch(() => null);
 
-  // `doctor` kept as an alias: it is the conventional name for this in other
-  // toolchains, and muscle memory should not produce an error.
-  if (command === 'check' || command === 'doctor') {
-    return runCheck();
+  // `doctor` is the conventional name for a read-only diagnostic across
+  // toolchains (brew, flutter, npm); `check` stays as an alias.
+  if (command === 'doctor' || command === 'check') {
+    return runDoctor();
   }
 
   if (command === 'init' || command === 'config') {

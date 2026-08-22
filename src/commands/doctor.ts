@@ -42,7 +42,7 @@ async function readHelp(
     cwd: scratch,
     timeoutMs: 20_000,
     scratchDir: scratch,
-    id: `check-help-${adapter.name}`,
+    id: `doctor-help-${adapter.name}`,
   });
 
   const help = `${result.stdout}\n${result.stderr}`;
@@ -56,7 +56,7 @@ function supported(help: string, flag: string): boolean {
 }
 
 /**
- * `crbuddy check` — everything crbuddy knows about this machine.
+ * `crbuddy doctor` — everything crbuddy knows about this machine.
  *
  * Read-only: it runs `--version` and `--help` on each vendor CLI and reports
  * what it found. It contacts no models, writes nothing, and changes nothing.
@@ -65,8 +65,8 @@ function supported(help: string, flag: string): boolean {
  * to go wrong, and a checkmark with no reason attached makes it impossible
  * to tell a PATH problem from a shim problem from a broken install.
  */
-export async function runCheck(): Promise<number> {
-  const scratch = await mkdtemp(path.join(tmpdir(), 'crbuddy-check-'));
+export async function runDoctor(): Promise<number> {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'crbuddy-doctor-'));
 
   try {
     console.log('');

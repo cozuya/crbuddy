@@ -17,6 +17,13 @@ export interface Finding {
   /** Stable within a panel: `<runId>#<n>`. */
   id: string;
   runId: string;
+  /**
+   * True when this segment is scene-setting rather than a finding — a
+   * preamble line, a bare section heading, a sign-off. Still carried
+   * verbatim (segmentation stays lossless), just rendered apart from the
+   * numbered findings instead of masquerading as one.
+   */
+  context?: boolean;
   /** Best-effort title pulled from the segment's first heading or line. */
   title: string;
   /** Verbatim text. Never modified. */
@@ -31,11 +38,51 @@ const BULLET = /^\s{0,3}[-*+]\s+\S/;
 const HRULE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/;
 
 /**
- * Matches `path/to/file.ext:123` and `path/to/file.ext line 123`, plus bare
- * paths with an extension.
+ * Matches `path/to/file.ext:123`, `file.ext line 12`, and bare paths.
+ *
+ * Deliberately strict about what counts as a file. A loose pattern matched
+ * things like `abc123..def456` (a commit range) and `5.7k` (a line count) as
+ * file paths, which both polluted the clustering hints and made preamble
+ * text look like a located finding. So: no consecutive dots before the
+ * extension, and the extension must start with a letter.
  */
 const LOCATION =
-  /\b((?:[\w.\-]+\/)*[\w.\-]+\.[A-Za-z0-9]{1,8})(?::(\d+)|\s+(?:line|lines)\s+(\d+))?/g;
+  /(?<![\w.\-/\\])((?:[\w.\-]+[/\\])*[\w\-]+(?:\.[\w\-]+)*\.[A-Za-z][A-Za-z0-9]{0,7})(?::(\d+)|\s+(?:line|lines)\s+(\d+))?/g;
+
+/**
+ * Rewrite absolute paths under the repository root to repo-relative form.
+ *
+ * Some CLIs emit fully-qualified local paths. Those leak a machine's
+ * directory layout the moment a handoff is pasted into an issue or a PR, and
+ * they are useless to anyone else. Only the repo-root prefix is stripped —
+ * a deterministic, mechanical substitution, not the model rewriting text.
+ */
+export function relativizePaths(text: string, repoRoot: string): string {
+  if (!repoRoot) return text;
+
+  const variants = new Set<string>();
+
+  for (const base of [repoRoot, repoRoot.replace(/\\/g, '/')]) {
+    const slashed = base.replace(/[\\/]+$/, '');
+
+    variants.add(`${slashed}/`);
+    variants.add(`${slashed.replace(/\//g, '\\')}\\`);
+    variants.add(slashed);
+    variants.add(slashed.replace(/\//g, '\\'));
+  }
+
+  let out = text;
+
+  // Longest first, so trailing-separator forms win over their prefixes.
+  for (const variant of [...variants].sort((a, b) => b.length - a.length)) {
+    if (variant === '') continue;
+
+    const escaped = variant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(escaped, 'gi'), '');
+  }
+
+  return out;
+}
 
 export function segment(runId: string, output: string): Finding[] {
   const lines = output.split('\n');
@@ -96,12 +143,15 @@ export function segment(runId: string, output: string): Finding[] {
       return;
     }
 
+    const locations = locationsIn(text);
+
     findings.push({
       id: `${runId}#${index + 1}`,
       runId,
       title: titleOf(text),
       text,
-      locations: locationsIn(text),
+      locations,
+      ...(isContext(text, locations) ? { context: true } : {}),
     });
   });
 
@@ -143,4 +193,33 @@ export function locationsIn(text: string): string[] {
 /** Test hook: segmentation must reproduce its input exactly. */
 export function reassemble(findings: Finding[]): string {
   return findings.map((finding) => finding.text).join('\n');
+}
+
+/**
+ * A finding says something about specific code. A segment with no file
+ * reference and no substance behind its heading is a preamble, a section
+ * divider, or a sign-off — clustering those as findings produced entries
+ * like "Findings ordered by severity" sitting beside real bugs.
+ *
+ * Conservative on purpose: any file reference at all, or a real body, makes
+ * it a finding. The cost of a false negative here is one tidy line in the
+ * wrong section; the cost of a false positive is a buried bug.
+ */
+export function isContext(text: string, locations: string[]): boolean {
+  if (locations.length > 0) return false;
+
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+
+  if (lines.length === 0) return true;
+
+  // A lone heading or one-liner with nothing under it.
+  if (lines.length === 1) return true;
+
+  // A heading plus only trivial body text.
+  const body = lines.slice(1).join(' ');
+
+  return body.length < 80;
 }

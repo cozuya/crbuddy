@@ -175,7 +175,15 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
     // `events.once` attaches its own 'error' listener, so an ENOENT here is
     // a clean rejection rather than a crash — but the spool files still have
     // to go, or a failed probe litters whatever directory it ran in.
-    await Promise.all([outClosed, errClosed]);
+    //
+    // Destroy the write streams rather than waiting for a pipe that may
+    // never deliver an end event: when spawn itself failed there may be no
+    // child stdout to close them, and a preflight probe that hangs is worse
+    // than one that reports a missing executable.
+    outFile.destroy();
+    errFile.destroy();
+
+    await settle([outClosed, errClosed]);
     await discard(outPath, errPath);
 
     return {
@@ -192,7 +200,7 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
     live.delete(child);
   }
 
-  await Promise.all([outClosed, errClosed]);
+  await settle([outClosed, errClosed]);
 
   const [stdout, stderr] = await Promise.all([
     readText(outPath),
@@ -213,6 +221,14 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
 
 async function discard(...paths: string[]): Promise<void> {
   await Promise.all(paths.map((file) => unlink(file).catch(() => {})));
+}
+
+/** Await stream cleanup, but never let it become the thing that hangs. */
+async function settle(waits: Array<Promise<unknown>>): Promise<void> {
+  await Promise.race([
+    Promise.all(waits),
+    new Promise((resolve) => setTimeout(resolve, 2000).unref()),
+  ]);
 }
 
 /**

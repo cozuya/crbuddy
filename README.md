@@ -40,7 +40,7 @@ for free.
 | `crbuddy init` | Interactive setup. Writes a config. |
 | `crbuddy config` | The same command; edits an existing config. |
 | `crbuddy go [instructions]` | Run the panel. |
-| `crbuddy check` | Report which vendor CLIs are usable, which flags they accept, and why not. Read-only; contacts no models. Also aliased as `doctor`. |
+| `crbuddy doctor` | Report which vendor CLIs are usable, which flags they accept, and why not. Read-only; contacts no models. Also aliased as `doctor`. |
 
 The optional positional argument to `go` overrides the review instructions on
 **every** panel entry, for a one-off run without editing config:
@@ -175,7 +175,7 @@ flags that are missing get dropped with a warning; a missing **safety** flag
 — read-only enforcement — refuses that lane instead, because a reviewer that
 can edit the working tree changes the very diff under review. If your CLI
 supports a flag but doesn't advertise it parseably, pass it yourself via
-`vendorArgs` and crbuddy will take that as handled. `crbuddy check` shows
+`vendorArgs` and crbuddy will take that as handled. `crbuddy doctor` shows
 what was detected.
 
 **Preflight checks presence, not authentication.** crbuddy verifies the vendor
@@ -202,7 +202,7 @@ spawn those without a shell (the fix for CVE-2024-27980), so vendors that
 ship a native `.exe` would be detected while shimmed ones would not.
 Spawning goes through `cross-spawn` on Windows to resolve shims correctly,
 and process-tree termination uses `taskkill /T`. If a vendor still shows as
-missing, `crbuddy check` prints the actual reason.
+missing, `crbuddy doctor` prints the actual reason.
 
 ## How output is structured
 

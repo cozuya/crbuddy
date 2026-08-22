@@ -56,33 +56,75 @@ function firstSupported(
   return candidates.find((flag) => request.supports(flag)) ?? null;
 }
 
+/** Index of a safety flag inside vendorArgs, or -1. */
+function findInVendorArgs(vendorArgs: string[], candidates: string[]): number {
+  return vendorArgs.findIndex((arg) =>
+    candidates.some((flag) => arg === flag || arg.startsWith(`${flag}=`)),
+  );
+}
+
+/**
+ * `vendorArgs` is appended AFTER generated args, so a user-supplied copy of a
+ * safety flag wins on most CLIs. That makes it a bypass unless its value is
+ * checked: `vendorArgs: ["--sandbox", "workspace-write"]` would otherwise
+ * both satisfy the requirement and hand the reviewer a writable sandbox.
+ */
+function assertVendorArgsSafe(
+  request: InvocationRequest,
+  candidates: string[],
+  allowedValues: string[],
+  purpose: string,
+  cli: string,
+): boolean {
+  const vendorArgs = request.vendorArgs ?? [];
+  const index = findInVendorArgs(vendorArgs, candidates);
+
+  if (index === -1) return false;
+
+  const arg = vendorArgs[index]!;
+  const value = arg.includes('=') ? arg.split('=').slice(1).join('=') : vendorArgs[index + 1];
+
+  if (value !== undefined && allowedValues.includes(value)) return true;
+
+  throw new UnsafeInvocationError(
+    `"vendorArgs" sets ${purpose} for \`${cli}\` to ` +
+      `"${value ?? '(no value)'}", which is not read-only. crbuddy appends ` +
+      `vendorArgs last, so this would override its own read-only setting and ` +
+      `let the reviewer modify the working tree. Use one of: ` +
+      `${allowedValues.join(', ')} — or remove it and let crbuddy set it.`,
+  );
+}
+
 function requireSafetyFlag(
   request: InvocationRequest,
   candidates: string[],
+  allowedValues: string[],
   purpose: string,
   cli: string,
 ): string | null {
+  // Checked first, and unconditionally: a user-supplied unsafe value must be
+  // rejected even when the CLI does advertise the flag.
+  const suppliedSafely = assertVendorArgsSafe(
+    request,
+    candidates,
+    allowedValues,
+    purpose,
+    cli,
+  );
+
+  if (suppliedSafely) return null;
+
   const found = firstSupported(request, candidates);
 
   if (found) return found;
-
-  // Escape hatch: if the user has already supplied one of these in
-  // `vendorArgs`, they have taken responsibility explicitly. This matters
-  // because help output is not a perfect oracle — a flag the CLI supports
-  // but does not advertise in a parseable way would otherwise block a lane
-  // that works fine.
-  const manual = (request.vendorArgs ?? []).some((arg) =>
-    candidates.some((flag) => arg === flag || arg.startsWith(`${flag}=`)),
-  );
-
-  if (manual) return null;
 
   throw new UnsafeInvocationError(
     `\`${cli}\` does not appear to support ${purpose} ` +
       `(looked for ${candidates.join(', ')} in \`${cli} --help\`). crbuddy will ` +
       `not run a reviewer without it, because an agent that can edit the working ` +
       `tree changes the very diff under review. Update ${cli}; or, if it does ` +
-      `support this, pass the flag yourself via "vendorArgs" on that panel entry.`,
+      `support this, pass the flag AND a read-only value yourself via ` +
+      `"vendorArgs" on that panel entry.`,
   );
 }
 
@@ -140,6 +182,7 @@ export const claudeAdapter: Adapter = {
     const permission = requireSafetyFlag(
       request,
       ['--permission-mode'],
+      ['plan'],
       'read-only permissions',
       this.command,
     );
@@ -251,6 +294,7 @@ export const codexAdapter: Adapter = {
     const sandbox = requireSafetyFlag(
       request,
       ['--sandbox', '-s'],
+      ['read-only'],
       'a read-only sandbox',
       this.command,
     );
@@ -354,6 +398,7 @@ export const geminiAdapter: Adapter = {
     const approval = requireSafetyFlag(
       request,
       ['--approval-mode'],
+      ['plan'],
       'a read-only approval mode',
       this.command,
     );

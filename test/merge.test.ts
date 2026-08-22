@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { Finding, locationsIn, reassemble, segment } from '../src/merge/segment.js';
+import {
+  Finding,
+  locationsIn,
+  reassemble,
+  relativizePaths,
+  segment,
+} from '../src/merge/segment.js';
 import {
   MergeValidationError,
   orderClusters,
@@ -240,4 +246,79 @@ test('elapsed time reads naturally at each scale', () => {
   assert.equal(formatElapsed(42_000), '42s');
   assert.equal(formatElapsed(185_000), '3m 05s');
   assert.equal(formatElapsed(4_320_000), '1h 12m');
+});
+
+test('preamble segments are marked as context, real findings are not', () => {
+  const review = [
+    'Reviewed abc123..def456 (21 commits, ~5.7k lines). Findings ordered by severity.',
+    '',
+    '## Unhandled rejection',
+    'In `src/api.ts:42` the await is missing, so failures are swallowed silently.',
+    '',
+    '## Minor',
+  ].join('\n');
+
+  const findings = segment('run-1', review);
+
+  const preamble = findings.find((f) => f.title.startsWith('Reviewed abc123'));
+  const real = findings.find((f) => f.title === 'Unhandled rejection');
+  const bareHeading = findings.find((f) => f.title === 'Minor');
+
+  assert.equal(preamble?.context, true, 'preamble is not a finding');
+  assert.equal(bareHeading?.context, true, 'a bare heading is not a finding');
+  assert.equal(real?.context, undefined, 'a located finding must stay a finding');
+});
+
+test('context clusters sort below every real finding', () => {
+  const findings: Finding[] = [
+    { id: 'a#1', runId: 'a', title: 'preamble', text: 'x', locations: [], context: true },
+    { id: 'a#2', runId: 'a', title: 'bug', text: 'y', locations: ['f.ts:1'] },
+  ];
+
+  const ordered = orderClusters(
+    [{ findingIds: ['a#1'] }, { findingIds: ['a#2'] }],
+    findings,
+  );
+
+  assert.deepEqual(ordered[0]?.findingIds, ['a#2']);
+});
+
+test('absolute repo paths are rewritten to repo-relative', () => {
+  const root = 'C:/Users/Chris/ai/crbuddy';
+
+  const text =
+    'Problem at [src/run/spawn.ts:178](C:/Users/Chris/ai/crbuddy/src/run/spawn.ts:178) here.';
+
+  const out = relativizePaths(text, root);
+
+  assert.ok(!out.includes('C:/Users/Chris'), `machine layout leaked: ${out}`);
+  assert.ok(out.includes('src/run/spawn.ts:178'));
+});
+
+test('backslash spellings of the repo root are stripped too', () => {
+  const out = relativizePaths(
+    'see C:\\Users\\Chris\\ai\\crbuddy\\src\\a.ts:1',
+    'C:/Users/Chris/ai/crbuddy',
+  );
+
+  assert.ok(!out.includes('Users'), `machine layout leaked: ${out}`);
+});
+
+test('paths outside the repo root are left alone', () => {
+  const text = 'compare with /usr/lib/node/thing.js:9';
+  assert.equal(relativizePaths(text, '/home/someone/repo'), text);
+});
+
+test('commit ranges and line counts are not mistaken for file paths', () => {
+  // A loose pattern matched these as files, which polluted clustering hints
+  // and made preamble text look like a located finding.
+  assert.deepEqual(locationsIn('Reviewed abc123..def456 (~5.7k lines)'), []);
+  assert.deepEqual(locationsIn('version 1.2.3 released'), []);
+  assert.deepEqual(locationsIn('takes 3.5s to run'), []);
+});
+
+test('real file references still parse, including nested and multi-dot names', () => {
+  assert.deepEqual(locationsIn('see src/api.ts:42'), ['src/api.ts:42']);
+  assert.deepEqual(locationsIn('see a/b/c.test.ts:7'), ['a/b/c.test.ts:7']);
+  assert.deepEqual(locationsIn('check package.json'), ['package.json']);
 });

@@ -193,6 +193,9 @@ export function orderClusters(
 ): Cluster[] {
   const byId = new Map(findings.map((finding) => [finding.id, finding]));
 
+  const isContextCluster = (cluster: Cluster): boolean =>
+    cluster.findingIds.every((id) => byId.get(id)?.context === true);
+
   const reviewersOf = (cluster: Cluster): number =>
     new Set(
       cluster.findingIds
@@ -201,6 +204,11 @@ export function orderClusters(
     ).size;
 
   return [...clusters].sort((a, b) => {
+    // Context segments sink below every real finding regardless of how many
+    // reviewers happened to emit similar boilerplate.
+    const contextDiff = Number(isContextCluster(a)) - Number(isContextCluster(b));
+    if (contextDiff !== 0) return contextDiff;
+
     const diff = reviewersOf(b) - reviewersOf(a);
     if (diff !== 0) return diff;
 

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -12,7 +13,7 @@ import { getAdapter } from '../adapters/vendors.js';
 import { Semaphore } from '../util/semaphore.js';
 import { acquireLock } from '../util/lock.js';
 import { killAll, probe, runProcess } from '../run/spawn.js';
-import { Finding, segment } from '../merge/segment.js';
+import { Finding, relativizePaths, segment } from '../merge/segment.js';
 import {
   MergeValidationError,
   buildMergePrompt,
@@ -35,6 +36,9 @@ import {
 } from '../output/write.js';
 import { progress } from '../run/progress.js';
 import { formatClock, formatElapsed, formatSize } from '../util/format.js';
+
+/** Below this, a "successful" review is more likely a status message. */
+const SUSPICIOUSLY_SHORT = 200;
 
 export const EXIT_OK = 0;
 export const EXIT_TOTAL_FAILURE = 1;
@@ -249,7 +253,10 @@ export async function runGo(options: GoOptions): Promise<number> {
       target,
       runs: records,
       mergeState: 'off',
-      configSource: loaded.source,
+      // Displayed, not absolute: a full path leaks the machine's directory
+      // layout into a file people paste into issues.
+      configSource: displayPath(loaded.source, repoRoot),
+      configScope: loaded.scope,
       warnings,
       rawPath: config.output.raw,
     };
@@ -264,7 +271,9 @@ export async function runGo(options: GoOptions): Promise<number> {
     // --- merge -----------------------------------------------------------
 
     const findings: Finding[] = succeeded.flatMap((record) =>
-      segment(record.id, record.output),
+      // Absolute local paths are stripped to repo-relative first: they leak
+      // a machine's directory layout into a file people paste into issues.
+      segment(record.id, relativizePaths(record.output, repoRoot)),
     );
 
     let clusters = singletons(findings);
@@ -297,6 +306,15 @@ export async function runGo(options: GoOptions): Promise<number> {
     }
 
     // --- write -----------------------------------------------------------
+
+    // Re-checked here, not just after the panel: a SIGINT during
+    // consolidation surfaces as a merge failure, and execution would
+    // otherwise carry straight on and replace the report anyway.
+    if (interrupted) {
+      await stashed.restore();
+      progress.line('No output written.');
+      return 130;
+    }
 
     // `output.merged` is ALWAYS the deliverable, whatever happened to
     // consolidation. Anything else means the filename a user points an agent
@@ -535,7 +553,27 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     });
   }
 
-  return report({ ...record, ok: true, output: body });
+  const output = relativizePaths(body, args.repoRoot);
+
+  // A vendor CLI can exit zero having returned a progress or status message
+  // rather than a review — seen in the wild as "still waiting for the
+  // code-review skill to complete". It is not a failure crbuddy can prove,
+  // so it is surfaced as a warning rather than discarded.
+  const suspicious = output.trim().length < SUSPICIOUSLY_SHORT;
+
+  if (suspicious) {
+    progress.line(
+      `  ${args.display} — warning: returned only ${output.trim().length} characters; ` +
+        `this may be a status message rather than a review.`,
+    );
+  }
+
+  return report({
+    ...record,
+    ok: true,
+    output,
+    ...(suspicious ? { suspiciouslyShort: true } : {}),
+  });
 }
 
 interface MergeArgs {
@@ -567,7 +605,10 @@ async function runMerge(args: MergeArgs) {
   const result = await runProcess({
     command: invocation.command,
     args: invocation.args,
-    cwd: args.repoRoot,
+    // Deliberately NOT the repository. The consolidator's contract is that
+    // it sees findings and nothing else; launching it with the repo as cwd
+    // handed a general-purpose agent the live tree and quietly broke that.
+    cwd: args.scratch,
     stdin: invocation.stdin,
     env: invocation.env,
     timeoutMs: args.timeoutMs,
@@ -607,6 +648,24 @@ async function confirm(question: string): Promise<boolean> {
   } finally {
     rl.close();
   }
+}
+
+/** Repo-relative if inside the repo, else ~-prefixed. Never a full path. */
+function displayPath(file: string, repoRoot: string): string {
+  const normalized = file.replace(/\\/g, '/');
+  const root = repoRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+
+  if (normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`)) {
+    return normalized.slice(root.length + 1);
+  }
+
+  const home = homedir().replace(/\\/g, '/').replace(/\/+$/, '');
+
+  if (home && normalized.toLowerCase().startsWith(`${home.toLowerCase()}/`)) {
+    return `~/${normalized.slice(home.length + 1)}`;
+  }
+
+  return path.basename(normalized);
 }
 
 /** First meaningful line of a CLI's error output, for the terminal. */

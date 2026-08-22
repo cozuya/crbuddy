@@ -85,6 +85,30 @@ async function wizard(options: InitOptions): Promise<number> {
       ? projectConfigPath(options.repoRoot)
       : homeConfigPath();
 
+  // A project-local config REPLACES the global one, so editing global while
+  // a local one exists here changes a file that will never be read in this
+  // repo. Silence there is how you end up debugging a panel you did not run.
+  if (scope === 'global' && options.repoRoot) {
+    const local = projectConfigPath(options.repoRoot);
+
+    if (existsSync(local)) {
+      console.log('');
+      console.log(
+        `Heads up: this repository has its own config at ${local}, and a ` +
+          `project config replaces the global one entirely.`,
+      );
+      console.log(
+        dim('  `crbuddy go` here will use that file, not the one you are about to edit.'),
+      );
+
+      const switchToLocal = await confirm('  Edit the repository config instead?', true);
+
+      if (switchToLocal) {
+        return wizard({ ...options, scope: 'project' });
+      }
+    }
+  }
+
   let existing: Config | null = null;
 
   if (existsSync(targetFile)) {
@@ -132,7 +156,7 @@ async function wizard(options: InitOptions): Promise<number> {
     console.log(
       'No supported vendor CLIs are usable. crbuddy drives your own\n' +
         'installed agent CLIs, so at least one has to work here.\n' +
-        'Run `crbuddy check` for details.',
+        'Run `crbuddy doctor` for details.',
     );
     return 1;
   }
@@ -213,11 +237,14 @@ async function offerGitignore(repoRoot: string, config: Config): Promise<void> {
     console.log(dim(`  ${entry}`));
   }
 
+  // Defaults to NO: .gitignore is usually a tracked file, and editing a
+  // tracked file in the repo under review is not something to do on an
+  // absent-minded Enter.
   const add = await confirm(
     existsSync(gitignorePath)
-      ? 'Add them to .gitignore?'
+      ? 'Add them to .gitignore? (this edits a tracked file)'
       : 'Create a .gitignore with them?',
-    true,
+    false,
   );
 
   if (!add) return;

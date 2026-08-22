@@ -24,6 +24,8 @@ export interface RunRecord {
   output: string;
   /** Truncated diagnostics, kept when a run fails and has nowhere else to go. */
   diagnostics?: string;
+  /** Completed, but returned so little it may not be a review at all. */
+  suspiciouslyShort?: boolean;
 }
 
 export interface ReportContext {
@@ -34,7 +36,9 @@ export interface ReportContext {
   runs: RunRecord[];
   mergeState: 'off' | 'ok' | 'failed';
   mergeReason?: string;
+  /** Repo-relative or ~-prefixed; never a full machine path. */
   configSource: string;
+  configScope: 'project' | 'global';
   warnings: string[];
   /** Relative path of the raw file, referenced from the merged one. */
   rawPath?: string;
@@ -58,6 +62,7 @@ export function renderFrontmatter(
     `  runId: ${context.runId}`,
     `  generated: ${context.generated}`,
     `  configSource: ${yamlString(context.configSource)}`,
+    `  configScope: ${context.configScope}`,
     '  target:',
     `    kind: ${context.target.kind}`,
     `    snapshot: ${context.target.snapshot}`,
@@ -135,6 +140,13 @@ export function renderReportBlock(context: ReportContext): string {
     body.push(`- \`${run.id}\` (${run.vendor}) failed: ${run.reason ?? 'unknown'}`);
   }
 
+  for (const run of context.runs.filter((r) => r.suspiciouslyShort)) {
+    body.push(
+      `- \`${run.id}\` completed but returned very little text; check whether ` +
+        `it actually produced a review.`,
+    );
+  }
+
   if (context.mergeState === 'failed') {
     body.push(
       `- Consolidation failed (${context.mergeReason ?? 'unknown'}). ` +
@@ -205,14 +217,29 @@ export function renderMerged(
     `# Code review — consolidated\n`,
     renderReportBlock(context),
     `_Findings are grouped by apparent duplication and ordered by how many ` +
-      `reviewers raised them. Agreement is a priority heuristic, not a ` +
-      `confidence score. Unmerged reviews: \`${context.rawPath ?? ''}\`_\n`,
+      `reviewers raised them. Cluster labels (C1, C2…) are crbuddy's; any ` +
+      `numbering inside a finding is the reviewer's own. Agreement is a ` +
+      `priority heuristic, not a confidence score. Unmerged reviews: ` +
+      `\`${context.rawPath ?? ''}\`_\n`,
   ];
 
-  clusters.forEach((cluster, index) => {
-    const members = cluster.findingIds
+  const resolve = (cluster: Cluster): Finding[] =>
+    cluster.findingIds
       .map((id) => byId.get(id))
       .filter((finding): finding is Finding => finding !== undefined);
+
+  const isContextCluster = (cluster: Cluster): boolean => {
+    const members = resolve(cluster);
+    return members.length > 0 && members.every((member) => member.context === true);
+  };
+
+  const real = clusters.filter((cluster) => !isContextCluster(cluster));
+  const contextOnly = clusters.filter(isContextCluster);
+
+  let counter = 0;
+
+  const renderCluster = (cluster: Cluster, label: string): void => {
+    const members = resolve(cluster);
 
     if (members.length === 0) return;
 
@@ -220,10 +247,13 @@ export function renderMerged(
     const first = members[0]!;
 
     parts.push(
-      `<!-- crbuddy:cluster n=${index + 1} reviewers=${reviewers.length} -->`,
+      `<!-- crbuddy:cluster id=${label} reviewers=${reviewers.length} -->`,
     );
 
-    parts.push(`## ${index + 1}. ${first.title}`);
+    // Labelled C1, C2… rather than 1, 2… because reviewers number their own
+    // findings, and two competing "finding 3"s in one document is a
+    // guaranteed miscommunication.
+    parts.push(`## ${label}. ${first.title}`);
 
     parts.push(
       `_Raised by ${reviewers.length} of ${countRuns(context)} reviewer(s): ` +
@@ -237,8 +267,28 @@ export function renderMerged(
       parts.push(`<!-- /crbuddy:finding id=${member.id} -->\n`);
     });
 
-    parts.push(`<!-- /crbuddy:cluster n=${index + 1} -->\n`);
-  });
+    parts.push(`<!-- /crbuddy:cluster id=${label} -->\n`);
+  };
+
+  for (const cluster of real) {
+    counter += 1;
+    renderCluster(cluster, `C${counter}`);
+  }
+
+  if (contextOnly.length > 0) {
+    parts.push(
+      `---\n`,
+      `## Reviewer preamble\n`,
+      `_Kept verbatim for completeness. These segments carried no file ` +
+        `reference and no substantive body, so they are not treated as ` +
+        `findings._\n`,
+    );
+
+    for (const cluster of contextOnly) {
+      counter += 1;
+      renderCluster(cluster, `P${counter - real.length}`);
+    }
+  }
 
   return parts.join('\n');
 }

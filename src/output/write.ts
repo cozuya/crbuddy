@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /**
@@ -18,6 +18,9 @@ import path from 'node:path';
  * replaced by new output on success or restored on total failure. Nothing is
  * deleted on the assumption that a replacement is coming.
  */
+
+/** Sidecar recording which stashed file came from which path. */
+const MANIFEST = 'manifest.json';
 
 export interface StashedOutputs {
   restore(): Promise<void>;
@@ -41,16 +44,25 @@ export async function stashExistingOutputs(
 
   const moved: Array<{ from: string; to: string; relative: string }> = [];
 
-  for (const relative of relativePaths) {
+  for (const [index, relative] of relativePaths.entries()) {
     const from = path.join(repoRoot, relative);
 
     if (!existsSync(from)) continue;
 
-    const to = path.join(holding, relative.replace(/[\\/]/g, '__'));
+    // Opaque, positional names plus a sidecar manifest. Encoding the path
+    // into the filename (separators as `__`) is not reversible: a legitimate
+    // output called `review__previous.md` decodes back as `review/previous.md`.
+    const to = path.join(holding, `${index}.stashed`);
 
     await rename(from, to);
     moved.push({ from, to, relative });
   }
+
+  await writeFile(
+    path.join(holding, MANIFEST),
+    JSON.stringify(moved.map((entry) => ({ stored: path.basename(entry.to), relative: entry.relative }))),
+    'utf8',
+  );
 
   return {
     moved: moved.map((entry) => entry.relative),
@@ -94,21 +106,30 @@ export async function commitOutputs(
     staged.push({ temp, final });
   }
 
-  const written: string[] = [];
+  const written: Array<{ temp: string; final: string }> = [];
 
   try {
     for (const entry of staged) {
       await rename(entry.temp, entry.final);
-      written.push(entry.final);
+      written.push(entry);
     }
   } catch (error) {
+    // Roll back the renames that already landed, so the destination returns
+    // to its pre-commit state. Otherwise a half-committed pair is left
+    // behind and the caller's restore() renames the OLD file over a NEW one
+    // — losing the old copy and leaving merged/raw from different runs.
+    for (const entry of written.reverse()) {
+      await rename(entry.final, entry.temp).catch(() => {});
+    }
+
     for (const entry of staged) {
       await rm(entry.temp, { force: true }).catch(() => {});
     }
+
     throw error;
   }
 
-  return written;
+  return written.map((entry) => entry.final);
 }
 
 /**
@@ -125,7 +146,6 @@ export async function recoverStrandedOutputs(
   let batches: string[];
 
   try {
-    const { readdir } = await import('node:fs/promises');
     batches = await readdir(root);
   } catch {
     return recovered;
@@ -135,22 +155,25 @@ export async function recoverStrandedOutputs(
     const dir = path.join(root, batch);
 
     try {
-      const { readdir } = await import('node:fs/promises');
-      const files = await readdir(dir);
+      const manifest = JSON.parse(
+        await readFile(path.join(dir, MANIFEST), 'utf8'),
+      ) as Array<{ stored: string; relative: string }>;
 
-      for (const stored of files) {
-        const relative = stored.replace(/__/g, path.sep);
-        const destination = path.join(repoRoot, relative);
+      for (const entry of manifest) {
+        const destination = path.join(repoRoot, entry.relative);
+        const source = path.join(dir, entry.stored);
 
         // Never clobber a file that is already back in place.
-        if (!existsSync(destination)) {
+        if (existsSync(source) && !existsSync(destination)) {
           await mkdir(path.dirname(destination), { recursive: true });
-          await rename(path.join(dir, stored), destination);
-          recovered.push(relative);
+          await rename(source, destination);
+          recovered.push(entry.relative);
         }
       }
     } catch {
-      // Unreadable batch; the cleanup below still removes it.
+      // No readable manifest: leave the batch alone rather than guess at
+      // filenames. The debris is inert; a wrong guess is not.
+      continue;
     }
 
     await rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -166,7 +189,6 @@ export async function cleanupTemps(repoRoot: string, relativePaths: string[]): P
     const base = path.basename(relative);
 
     try {
-      const { readdir } = await import('node:fs/promises');
       const entries = await readdir(dir);
 
       for (const entry of entries) {
