@@ -37,23 +37,46 @@ function requireSafetyFlag(
   candidates: string[],
   purpose: string,
   cli: string,
-): string | null {
+): string {
   const found = firstSupported(request, candidates);
 
   if (found) return found;
 
-  const manual = (request.vendorArgs ?? []).some((arg) =>
-    candidates.some((flag) => arg === flag || arg.startsWith(`${flag}=`)),
-  );
-
-  if (manual) return null;
-
   throw new UnsafeInvocationError(
     `\`${cli}\` does not appear to support ${purpose} ` +
       `(looked for ${candidates.join(', ')} in the probed help output). crbuddy will ` +
-      `not run a reviewer without it. Update ${cli}; or, if it does support this, ` +
-      `pass the flag yourself via "vendorArgs" on that panel entry.`,
+      `not run a reviewer without it. Update ${cli} to a supported version.`,
   );
+}
+
+/**
+ * `vendorArgs` is an escape hatch for capability flags, not a way to weaken
+ * crbuddy's safety boundary. Reject anything that can plausibly change
+ * sandbox / approval / permission behavior before argv is constructed.
+ *
+ * In particular, Codex `-c`/`--config` is blocked because arbitrary config
+ * overrides can change sandbox or approval policy even if the visible argv
+ * also contains `--sandbox read-only`.
+ */
+function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void {
+  if (!args || args.length === 0) return;
+
+  const forbidden = args.find((arg) => {
+    if (/permission|sandbox|approval|dangerously|\byolo\b/i.test(arg)) return true;
+    if (vendor === 'codex' && (arg === '-s' || arg === '-c' || arg === '--config')) {
+      return true;
+    }
+    if (vendor === 'codex' && (/^-s=/.test(arg) || /^-c=/.test(arg))) return true;
+    return false;
+  });
+
+  if (forbidden) {
+    throw new UnsafeInvocationError(
+      `vendorArgs may not override crbuddy safety controls (${JSON.stringify(forbidden)}). ` +
+        `Sandbox, approval, permission, dangerous-mode, and Codex config-override ` +
+        `arguments are owned by crbuddy so a project-local config cannot weaken read-only review.`,
+    );
+  }
 }
 
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
@@ -89,6 +112,8 @@ export const claudeAdapter: Adapter = {
   },
 
   build(request: InvocationRequest): Invocation {
+    assertSafeVendorArgs(this.name, request.vendorArgs);
+
     const warnings: string[] = [];
     const args = ['-p', '--model', request.model];
 
@@ -99,7 +124,7 @@ export const claudeAdapter: Adapter = {
       this.command,
     );
 
-    if (permission) args.push(permission, 'plan');
+    args.push(permission, 'plan');
 
     const noSession = firstSupported(request, [
       '--no-session-persistence',
@@ -120,7 +145,12 @@ export const claudeAdapter: Adapter = {
     }
 
     if (request.operation.kind === 'review') {
-      if (request.effort?.toLowerCase() === 'ultra') {
+      // Native /code-review otherwise reuses the last interactively selected
+      // level when no effort is supplied. Never inherit ambient session state:
+      // an omitted config value resolves to crbuddy's documented default.
+      const reviewEffort = request.effort ?? this.defaultEffort;
+
+      if (reviewEffort?.toLowerCase() === 'ultra') {
         throw new UnsafeInvocationError(
           'Claude Code reserves `/code-review ultra` for Ultrareview, a separate ' +
             'cloud review product. Under `claude -p` it launches asynchronously and ' +
@@ -136,7 +166,7 @@ export const claudeAdapter: Adapter = {
       // (>=2.1.223) also treats /review as an alias, but crbuddy uses the
       // canonical spelling for both target kinds.
       const parts = ['/code-review'];
-      if (request.effort) parts.push(request.effort);
+      if (reviewEffort) parts.push(reviewEffort);
       parts.push(request.operation.target.range);
 
       // Use the documented `claude -p "query"` form. In non-interactive mode
@@ -147,7 +177,7 @@ export const claudeAdapter: Adapter = {
       return {
         command: this.command,
         args,
-        appliedEffort: request.effort ?? null,
+        appliedEffort: reviewEffort,
         ...(warnings.length > 0 ? { warnings } : {}),
       };
     }
@@ -240,6 +270,8 @@ export const codexAdapter: Adapter = {
   },
 
   build(request: InvocationRequest): Invocation {
+    assertSafeVendorArgs(this.name, request.vendorArgs);
+
     const warnings: string[] = [];
     const args = ['exec', '--model', request.model];
 
@@ -253,7 +285,7 @@ export const codexAdapter: Adapter = {
       this.command,
     );
 
-    if (sandbox) args.push(sandbox, 'read-only');
+    args.push(sandbox, 'read-only');
 
     const ephemeral = firstSupported(request, ['--ephemeral']);
     if (ephemeral) args.push(ephemeral);
@@ -356,6 +388,8 @@ export const geminiAdapter: Adapter = {
   },
 
   build(request: InvocationRequest): Invocation {
+    assertSafeVendorArgs(this.name, request.vendorArgs);
+
     if (request.operation.kind === 'review') {
       throw new UnsafeInvocationError(
         'Gemini CLI does not currently expose a supported headless native code-review ' +
@@ -378,7 +412,7 @@ export const geminiAdapter: Adapter = {
       this.command,
     );
 
-    if (approval) args.push(approval, 'plan');
+    args.push(approval, 'plan');
 
     if (request.vendorArgs) {
       args.push(...request.vendorArgs);
