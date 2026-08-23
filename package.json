@@ -4,7 +4,8 @@
   "description": "Fan one code review out across several vendor coding agents in parallel, then consolidate.",
   "type": "module",
   "bin": {
-    "crbuddy": "./dist/index.js"
+    "crbuddy": "./dist/index.js",
+    "crb": "./dist/index.js"
   },
   "files": [
     "dist",

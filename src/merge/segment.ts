@@ -54,7 +54,7 @@ const LOCATION =
  *
  * Some CLIs emit fully-qualified local paths. Those leak a machine's
  * directory layout the moment a handoff is pasted into an issue or a PR, and
- * they are useless to anyone else. Only the repo-root prefix is stripped —
+ * they are useless to anyone else. Only the repo-root prefix is stripped -
  * a deterministic, mechanical substitution, not the model rewriting text.
  */
 export function relativizePaths(text: string, repoRoot: string): string {

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /**
@@ -21,6 +21,27 @@ import path from 'node:path';
 
 /** Sidecar recording which stashed file came from which path. */
 const MANIFEST = 'manifest.json';
+
+/**
+ * `rename` cannot cross a filesystem, and an absolute output path is allowed
+ * to sit on another drive entirely. Stashing such a report into the
+ * repository's holding directory raises EXDEV, which would otherwise mean a
+ * configuration crbuddy explicitly supports can never start a second review.
+ *
+ * Copy-then-delete is not atomic, but this is the recovery path for an
+ * already-written artifact, not the commit path: the copy is verified by
+ * `rename` succeeding or by the copy completing before the original goes.
+ */
+async function moveFile(from: string, to: string): Promise<void> {
+  try {
+    await rename(from, to);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+
+    await copyFile(from, to);
+    await unlink(from);
+  }
+}
 
 export interface StashedOutputs {
   restore(): Promise<void>;
@@ -45,7 +66,7 @@ export async function stashExistingOutputs(
   const moved: Array<{ from: string; to: string; relative: string }> = [];
 
   for (const [index, relative] of relativePaths.entries()) {
-    const from = path.join(repoRoot, relative);
+    const from = path.resolve(repoRoot, relative);
 
     if (!existsSync(from)) continue;
 
@@ -54,7 +75,7 @@ export async function stashExistingOutputs(
     // output called `review__previous.md` decodes back as `review/previous.md`.
     const to = path.join(holding, `${index}.stashed`);
 
-    await rename(from, to);
+    await moveFile(from, to);
     moved.push({ from, to, relative });
   }
 
@@ -70,7 +91,7 @@ export async function stashExistingOutputs(
     async restore() {
       for (const entry of moved) {
         await mkdir(path.dirname(entry.from), { recursive: true });
-        await rename(entry.to, entry.from).catch(() => {});
+        await moveFile(entry.to, entry.from).catch(() => {});
       }
 
       await rm(holding, { recursive: true, force: true }).catch(() => {});
@@ -97,7 +118,7 @@ export async function commitOutputs(
   const staged: Array<{ temp: string; final: string }> = [];
 
   for (const file of files) {
-    const final = path.join(repoRoot, file.relative);
+    const final = path.resolve(repoRoot, file.relative);
     const temp = `${final}.crbuddy-tmp-${process.pid}`;
 
     await mkdir(path.dirname(final), { recursive: true });
@@ -160,13 +181,13 @@ export async function recoverStrandedOutputs(
       ) as Array<{ stored: string; relative: string }>;
 
       for (const entry of manifest) {
-        const destination = path.join(repoRoot, entry.relative);
+        const destination = path.resolve(repoRoot, entry.relative);
         const source = path.join(dir, entry.stored);
 
         // Never clobber a file that is already back in place.
         if (existsSync(source) && !existsSync(destination)) {
           await mkdir(path.dirname(destination), { recursive: true });
-          await rename(source, destination);
+          await moveFile(source, destination);
           recovered.push(entry.relative);
         }
       }
@@ -185,7 +206,7 @@ export async function recoverStrandedOutputs(
 /** Sweep temp litter left by a crashed run. */
 export async function cleanupTemps(repoRoot: string, relativePaths: string[]): Promise<void> {
   for (const relative of relativePaths) {
-    const dir = path.dirname(path.join(repoRoot, relative));
+    const dir = path.dirname(path.resolve(repoRoot, relative));
     const base = path.basename(relative);
 
     try {

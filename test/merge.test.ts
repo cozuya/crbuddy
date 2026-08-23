@@ -33,7 +33,7 @@ const NUMBERED_REVIEW = `1. First problem in src/a.ts:1
 2. Second problem in src/b.ts:9
 `;
 
-test('segmentation is lossless — reassembly reproduces the input', () => {
+test('segmentation is lossless - reassembly reproduces the input', () => {
   for (const input of [HEADING_REVIEW, NUMBERED_REVIEW, 'just one paragraph\n']) {
     const findings = segment('run-1', input);
     assert.equal(reassemble(findings), input, 'segmentation must not lose bytes');
@@ -106,7 +106,7 @@ test('validation accepts a complete partition', () => {
   assert.equal(result.clusters.length, 2);
 });
 
-test('validation REJECTS a dropped finding — the merge cannot delete', () => {
+test('validation REJECTS a dropped finding - the merge cannot delete', () => {
   const findings = makeFindings();
 
   assert.throws(

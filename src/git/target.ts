@@ -241,7 +241,7 @@ export async function resolveTarget(
   if (await hasUnmerged(repoRoot)) {
     throw new GitError(
       'The working tree has unresolved merge conflicts. ' +
-        'Resolve them before running a review — "review my changes" is ambiguous mid-conflict.',
+        'Resolve them before running a review; "review my changes" is ambiguous mid-conflict.',
     );
   }
 

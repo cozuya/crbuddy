@@ -88,15 +88,58 @@ test('rejects the old positional output tuple with a useful message', () => {
   );
 });
 
-test('output paths must stay inside the repository', () => {
-  assert.throws(
-    () => validate({ ...minimal, output: { merged: '../escape.md', raw: 'b.md' } }),
-    /inside the repository/,
-  );
+test('output paths may leave the repository', () => {
+  // A report one level up is outside the review universe entirely, rather
+  // than relying on the diff exclusion to keep it out.
+  const up = validate({
+    ...minimal,
+    output: { merged: '../CODE-REVIEW-HANDOFF.md', raw: '../CODE-REVIEW-HANDOFF.raw.md' },
+  });
 
+  assert.equal(up.output.merged, '../CODE-REVIEW-HANDOFF.md');
+
+  const absolute = validate({
+    ...minimal,
+    output: { merged: '/srv/reviews/x.md', raw: '/srv/reviews/x.raw.md' },
+  });
+
+  assert.equal(absolute.output.merged, '/srv/reviews/x.md');
+});
+
+test('output destination defaults to a file and accepts the terminal', () => {
+  assert.equal(validate({ ...minimal }).output.destination, 'file');
+
+  assert.equal(
+    validate({ ...minimal, output: { destination: 'terminal' } }).output.destination,
+    'terminal',
+  );
+});
+
+test('terminal mode keeps the paths so switching back restores them', () => {
+  const config = validate({
+    ...minimal,
+    output: { destination: 'terminal', merged: '../report.md', raw: '../report.raw.md' },
+  });
+
+  assert.equal(config.output.merged, '../report.md');
+});
+
+test('an unrecognized output destination is rejected', () => {
+  for (const bad of ['stdout', 'FILE', '', true]) {
+    assert.throws(
+      () => validate({ ...minimal, output: { destination: bad } }),
+      /expected "file" or "terminal"/,
+      `expected ${JSON.stringify(bad)} to be rejected`,
+    );
+  }
+});
+
+test('bad paths are still caught in terminal mode', () => {
+  // Otherwise switching a config back to "file" surfaces a problem that was
+  // sitting there unnoticed.
   assert.throws(
-    () => validate({ ...minimal, output: { merged: '/tmp/x.md', raw: 'b.md' } }),
-    /relative/,
+    () => validate({ ...minimal, output: { destination: 'terminal', merged: '.git/x.md' } }),
+    /must not write inside/,
   );
 });
 
@@ -187,11 +230,23 @@ test('output paths that normalize to the same file are rejected', () => {
   );
 });
 
-test('traversal that escapes the repo is rejected however it is spelled', () => {
-  for (const bad of ['../out.md', 'a/../../out.md']) {
+test('reserved directories are rejected from outside the repo too', () => {
+  // Now that a path may start with `..`, a check anchored at the repository
+  // root would miss these.
+  for (const bad of ['../.git/HEAD', '/srv/repo/.git/config', '../x/.crbuddy/config.json']) {
     assert.throws(
       () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
-      /inside the repository/,
+      /must not write inside/,
+      `expected ${bad} to be rejected`,
+    );
+  }
+});
+
+test('an output path that names no file is rejected', () => {
+  for (const bad of ['..', '.', '../']) {
+    assert.throws(
+      () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
+      /must name a file/,
       `expected ${bad} to be rejected`,
     );
   }

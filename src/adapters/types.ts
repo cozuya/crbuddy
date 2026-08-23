@@ -62,6 +62,13 @@ export interface Adapter {
   readonly command: string;
   /** Whether this adapter has a supported headless vendor-native review path. */
   readonly nativeReview: boolean;
+  /**
+   * What the native review actually invokes, for prompts that would
+   * otherwise say "the vendor's own review behavior" and leave the user
+   * guessing. Null when there is no native lane. Deliberately omits the
+   * target flags: which of them applies is decided per run, not per entry.
+   */
+  readonly nativeReviewCommand: string | null;
 
   /** Vendor-native effort values, lowest to highest. */
   readonly efforts: string[];

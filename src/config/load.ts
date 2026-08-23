@@ -12,6 +12,7 @@ import {
   HOME_CONFIG_DIR,
   MergeConfig,
   OutputConfig,
+  OutputDestination,
   PROJECT_CONFIG_DIR,
   PanelEntry,
   Target,
@@ -273,46 +274,89 @@ function validateOutput(value: unknown, where: string): OutputConfig {
 
   const raw = value as Record<string, unknown>;
 
-  rejectUnknown(raw, new Set(['merged', 'raw']), `${where}.output`);
+  rejectUnknown(raw, new Set(['destination', 'merged', 'raw']), `${where}.output`);
 
   const merged = str(raw.merged, DEFAULT_OUTPUT.merged, `${where}.output.merged`);
   const rawPath = str(raw.raw, DEFAULT_OUTPUT.raw, `${where}.output.raw`);
+  const destination = validateDestination(raw.destination, `${where}.output.destination`);
 
+  // Validated even for "terminal", so switching a config back to "file"
+  // cannot surface a path problem that was sitting there unnoticed.
+  assertUsableOutput({ merged, raw: rawPath }, `${where}.output`);
+
+  return { destination, merged, raw: rawPath };
+}
+
+function validateDestination(value: unknown, where: string): OutputDestination {
+  if (value === undefined) return DEFAULT_OUTPUT.destination;
+
+  if (value !== 'file' && value !== 'terminal') {
+    throw new ConfigError(
+      `${where}: expected "file" or "terminal", got ${JSON.stringify(value)}.`,
+    );
+  }
+
+  return value;
+}
+
+/**
+ * Shared by the validator and the setup wizard, so a path the wizard offers
+ * can never be one `crbuddy go` refuses to load.
+ *
+ * A report may live outside the repository — that is the point of the "one
+ * level up" option, and it takes the file out of the review universe
+ * entirely rather than relying on the diff exclusion. So `..` and absolute
+ * paths are both accepted; these guards are about not destroying state, not
+ * about staying inside the repo.
+ */
+/**
+ * True for a configured path that stays inside the repository.
+ *
+ * Output paths may now sit outside it, and an outside path is not merely
+ * uninteresting to git — it is fatal. Passing one as a `:(exclude)`
+ * pathspec makes git abort with "is outside repository", so every caller
+ * that builds a pathspec or a .gitignore entry has to filter first.
+ */
+export function insideRepo(entry: string): boolean {
+  if (path.isAbsolute(entry)) return false;
+
+  const normalized = path.normalize(entry).replace(/\\/g, '/');
+
+  return !normalized.startsWith('../') && normalized !== '..';
+}
+
+export function assertUsableOutput(
+  output: { merged: string; raw: string },
+  where: string,
+): void {
   const normalizedPaths: string[] = [];
 
   for (const [key, candidate] of [
-    ['merged', merged],
-    ['raw', rawPath],
+    ['merged', output.merged],
+    ['raw', output.raw],
   ] as const) {
-    if (path.isAbsolute(candidate)) {
-      throw new ConfigError(
-        `${where}.output.${key}: must be relative to the repository root.`,
-      );
-    }
-
     // Normalize before every check: `a/../../b` and `./.git/config` both
     // slip past naive prefix tests.
     const normalized = path.normalize(candidate).replace(/\\/g, '/');
 
-    if (normalized.startsWith('..')) {
-      throw new ConfigError(
-        `${where}.output.${key}: must resolve inside the repository.`,
-      );
-    }
+    // Segment-wise, not prefix-wise: now that a path may start outside the
+    // repository, `../.git/HEAD` is the same hazard as `.git/HEAD` and a
+    // check anchored at the repository root would miss it.
+    const segments = normalized.split('/').filter((part) => part !== '');
 
-    // These outputs are moved aside and then overwritten, so a path
-    // pointing into git's or crbuddy's own state would destroy it.
     for (const reserved of ['.git', PROJECT_CONFIG_DIR]) {
-      if (normalized === reserved || normalized.startsWith(`${reserved}/`)) {
+      if (segments.includes(reserved)) {
         throw new ConfigError(
-          `${where}.output.${key}: must not write inside ${reserved}/. ` +
+          `${where}.${key}: must not write inside ${reserved}/. ` +
             `crbuddy overwrites its output paths.`,
         );
       }
     }
 
-    if (normalized === '' || normalized === '.') {
-      throw new ConfigError(`${where}.output.${key}: must name a file.`);
+    const named = segments.at(-1);
+
+    if (named === undefined || named === '.' || named === '..') {
+      throw new ConfigError(`${where}.${key}: must name a file.`);
     }
 
     normalizedPaths.push(normalized);
@@ -320,11 +364,9 @@ function validateOutput(value: unknown, where: string): OutputConfig {
 
   if (normalizedPaths[0] === normalizedPaths[1]) {
     throw new ConfigError(
-      `${where}.output.merged and ${where}.output.raw resolve to the same file.`,
+      `${where}.merged and ${where}.raw resolve to the same file.`,
     );
   }
-
-  return { merged, raw: rawPath };
 }
 
 function validateTarget(value: unknown, where: string): Target {
@@ -508,7 +550,7 @@ function nonNegativeInt(value: unknown, fallback: number, at: string): number {
 /**
  * Effort is vendor-native and passed through verbatim, so any non-empty
  * string is accepted. Validating against a hardcoded list here would mean a
- * vendor adding a level breaks configs until crbuddy ships a release —
+ * vendor adding a level breaks configs until crbuddy ships a release -
  * exactly the rot the translation layer was removed to avoid. An unusable
  * value surfaces as a fast, clearly-attributed lane failure instead.
  */

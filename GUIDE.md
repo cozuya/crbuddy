@@ -1,4 +1,4 @@
-# crbuddy — detailed documentation
+# crbuddy - detailed documentation
 
 Fan one code review out across several coding-agent CLIs in parallel, each
 blind to the others, then consolidate the results into one markdown file
@@ -34,11 +34,11 @@ judge: it cannot reject, rewrite, summarize away, or delete a review finding.
 **`CODE-REVIEW-HANDOFF.md` is always the deliverable.** With consolidation
 on it holds findings grouped and ordered by how many reviewers raised them,
 and `CODE-REVIEW-HANDOFF.raw.md` is written alongside as the unmerged audit
-trail. With consolidation off — or if it fails — the primary file holds the
+trail. With consolidation off - or if it fails - the primary file holds the
 reviews unmerged, with a header saying so. The filename you point an agent at
 never changes.
 
-It's blocking on purpose — run it in a spare terminal. There's no daemon, no
+It's blocking on purpose - run it in a spare terminal. There's no daemon, no
 `status` command, and no resumability, because a second terminal solves that
 for free.
 
@@ -51,6 +51,9 @@ for free.
 | `crbuddy go [instructions]` | Run the panel. |
 | `crbuddy doctor` | Report which vendor CLIs are usable, which flags they accept, and why not. Read-only; contacts no models. Also aliased as `check`. |
 
+`crb` is installed as a second name for the same binary, so `crb go` and
+`crbuddy go` are interchangeable.
+
 The optional positional argument to `go` overrides the review instructions on
 **every** panel entry, for a one-off run without editing config:
 
@@ -58,21 +61,50 @@ The optional positional argument to `go` overrides the review instructions on
 crbuddy go "focus only on error handling and resource cleanup"
 ```
 
-Flags: `--force` runs despite an oversized diff, `--strict` exits 2 on partial
-success.
+Flags: `--force` runs despite an oversized diff and opts an unattended run
+into the whole-checkout fallback below, `--strict` exits 2 on partial success.
+
+### When there is no diff
+
+If the target resolves to nothing - `go` run straight after committing, or a
+base branch that is already the current commit - crbuddy warns and reviews the
+whole checkout instead of exiting.
+
+That only happens when a terminal is attached. The warning is the safeguard,
+and an unattended caller has nobody to read it: a hook or CI job on a clean
+tree would otherwise spend one full agent run per panel entry with no diff
+size limit bounding any of them. Without a terminal, `go` prints the reason
+and exits 1, as it always did. Pass `--force` to ask for the fallback anyway.
+
+That is a materially different run, so it is worth recognizing in the output.
+No vendor CLI has a native review mode for "the entire repository", so every
+panel entry drops to a general-purpose agent pointed at the working tree
+rather than the vendor's own review workflow. It is broader and slower than a
+diff review, the diff size limit does not apply to it, and Gemini - which
+refuses ordinary diff review because it exposes no headless native lane - can
+take part. The report records all of this in its warnings and says
+`Reviewed the checkout at <sha>` in place of a changed-file count.
 
 ## Configuration
 
 Global at `~/.crbuddy/config.json`, or per-repository at
 `.crbuddy/config.json`. **A project-local config replaces the global one
-entirely** — there is no merging, because merging arrays of panel entries is
+entirely** - there is no merging, because merging arrays of panel entries is
 ambiguous and makes "which panel actually ran?" hard to answer.
 
 ```jsonc
 {
   "configVersion": 1,
 
+  // "file" writes a report; "terminal" prints it and writes nothing.
+  // The paths are relative to the repository root, so one config serves
+  // many repos. `../` puts the report outside the repo entirely, where it
+  // cannot land in a diff or be committed by accident. An absolute path is
+  // allowed and pins every repository to the same file. Both paths are
+  // kept and validated even in "terminal" mode, so switching back to
+  // "file" restores the last choice.
   "output": {
+    "destination": "file",
     "merged": "CODE-REVIEW-HANDOFF.md",
     "raw": "CODE-REVIEW-HANDOFF.raw.md"
   },
@@ -134,9 +166,9 @@ cannot weaken read-only review.
 Effort values are **vendor-native and passed through verbatim**. There is no
 crbuddy effort vocabulary and no translation.
 
-`crbuddy init` offers each vendor's own values — Claude Code's `low` through
+`crbuddy init` offers each vendor's own values - Claude Code's `low` through
 `max`, Codex's `none` through `max`, nothing at all for a CLI without an
-effort setting — plus an "Other…" escape for anything the shipped list
+effort setting - plus an "Other…" escape for anything the shipped list
 doesn't cover. Whatever you pick is written to config and handed to the CLI
 unchanged.
 
@@ -194,14 +226,14 @@ is not its job.
 **Segmentation is mechanical, not a model call.** Splitting each review into
 findings is done by a heuristic that guarantees losslessness: concatenating
 the segments reproduces the review byte for byte. A bad split produces a
-finding that's too large or too small — never one that's missing.
+finding that's too large or too small - never one that's missing.
 
 **Flags and versions are detected, not assumed.** Vendor CLI behavior churns
 between releases. Preflight checks each adapter's minimum supported CLI version
 and refuses to guess when the installed binary is older or its version cannot
 be parsed. It also reads the adapter's appropriate help surface and only passes
-optional flags it advertises. A missing **safety** flag — read-only enforcement
-— refuses that lane instead. Parent and nested subcommand help are not
+optional flags it advertises. A missing **safety** flag - read-only enforcement
+- refuses that lane instead. Parent and nested subcommand help are not
 interchangeable; Codex, for example, keeps crbuddy's sandbox/config flags on
 `codex exec --help`.
 
@@ -234,6 +266,31 @@ actual reason.
 can signal the whole vendor process tree rather than orphaning helpers or MCP
 processes.
 
+## Where output goes
+
+`output.destination` decides between a file and the terminal.
+
+**`file`** is the default and the original behavior. `output.merged` is always
+the deliverable; `output.raw` is written alongside it only when consolidation
+ran.
+
+**`terminal`** writes nothing to disk. The report goes to stdout, so
+`crbuddy go > review.md` works and every progress line stays on stderr where
+it cannot interleave. With consolidation on, only the consolidated report is
+printed - the unmerged reviews are an audit trail worth having on disk, not
+worth doubling the scrollback for. When both ends are a terminal the run then
+stops on a prompt offering to copy the report to the clipboard; piped or
+redirected, it prints and exits. Nothing clears the screen or uses the
+alternate buffer, so the report survives in the scrollback either way.
+
+A report left on disk by an earlier `file`-mode run is still moved aside for
+the duration of a `terminal` run - reviewers must not read the last review -
+and put back afterwards, since this run replaced nothing.
+
+Clipboard support uses `clip` on Windows, `pbcopy` on macOS, and the first of
+`wl-copy`, `xclip`, or `xsel` found on Linux. Failure is reported and never
+fatal; the report has already been printed by then.
+
 ## How output is structured
 
 YAML frontmatter carries provenance: the captured snapshot and base SHAs, the
@@ -242,7 +299,7 @@ and consolidation state. A visible report block summarizes the same thing for
 a human skimming rendered markdown.
 
 HTML comment markers delimit reviews, clusters, and findings. **They are
-navigation aids, not a parsing boundary** — a model's verbatim output can
+navigation aids, not a parsing boundary** - a model's verbatim output can
 contain the closing marker. Both files are rendered from structured data;
 nothing in crbuddy parses markdown back out of them.
 
@@ -252,15 +309,15 @@ nothing in crbuddy parses markdown back out of them.
 |---|---|
 | `0` | Usable report produced; partial success also exits 0 by default |
 | `1` | No usable review produced |
-| `2` | Partial success — only with `--strict` |
+| `2` | Partial success - only with `--strict` |
 
 Use `--strict` in a hook where a failed lane or failed consolidation should
 break the command chain.
 
 ## Status
 
-Prototype. The pure-logic surface — config, target resolution, merge
-validation, rendering, adapter safety, and adapter dispatch — has unit tests.
+Prototype. The pure-logic surface - config, target resolution, merge
+validation, rendering, adapter safety, and adapter dispatch - has unit tests.
 Vendor CLIs change quickly, so the native adapter layer is the most
 version-sensitive part of the program. Run `crbuddy doctor` on every machine
 that will actually execute the panel.

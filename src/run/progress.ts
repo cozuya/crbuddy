@@ -3,7 +3,7 @@ import { formatElapsed } from '../util/format.js';
 /**
  * Run narration.
  *
- * Two things are happening here. Discrete events append lines, as before —
+ * Two things are happening here. Discrete events append lines, as before -
  * scrollback is more useful than a spinner when a run misbehaves. On top of
  * that, a TTY gets one live status line pinned to the bottom, because a
  * multi-minute wait with a frozen screen gives no signal that anything is
@@ -103,7 +103,7 @@ class Progress {
         ? 'finishing up'
         : `waiting on ${[...this.active].join(', ')}`;
 
-    const text = `${spinner} ${elapsed} — ${waiting}`;
+    const text = `${spinner} ${elapsed} - ${waiting}`;
 
     // Truncate rather than wrap: a wrapped status line cannot be cleared
     // with a single erase and leaves debris in the scrollback.

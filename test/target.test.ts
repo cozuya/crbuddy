@@ -85,7 +85,7 @@ test('uncommitted target includes UNTRACKED files', async () => {
 
   assert.ok(
     paths.includes('brand-new.txt'),
-    `expected brand-new.txt in ${JSON.stringify(paths)} — plain git diff would miss it`,
+    `expected brand-new.txt in ${JSON.stringify(paths)} - plain git diff would miss it`,
   );
   assert.match(target.diff, /\+fresh/);
 });

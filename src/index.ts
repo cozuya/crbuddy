@@ -9,7 +9,7 @@ import { PreflightError, runGo } from './commands/go.js';
 import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
 
-const HELP = `crbuddy — fan one code review across several agent CLIs, then consolidate.
+const HELP = `crbuddy - fan one code review across several agent CLIs, then consolidate.
 
 Usage:
   crbuddy init                 Interactive setup. Writes a config.

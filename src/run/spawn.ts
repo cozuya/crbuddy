@@ -326,7 +326,7 @@ function notFoundHint(command: string, raw: string): string {
 
   return isWindows
     ? `\`${command}\` was not found on PATH. If it runs in your terminal, it is ` +
-        `probably an npm \`.cmd\` shim — crbuddy resolves those, so check that ` +
+        `probably an npm \`.cmd\` shim. crbuddy resolves those, so check that ` +
         `the same PATH is visible to this shell.`
     : `\`${command}\` was not found on PATH.`;
 }

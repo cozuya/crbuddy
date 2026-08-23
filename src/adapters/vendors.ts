@@ -85,6 +85,7 @@ export const claudeAdapter: Adapter = {
   label: 'Claude Code',
   command: 'claude',
   nativeReview: true,
+  nativeReviewCommand: '/code-review',
   minVersion: '2.1.223',
 
   models: [
@@ -241,6 +242,7 @@ export const codexAdapter: Adapter = {
   label: 'Codex CLI',
   command: 'codex',
   nativeReview: true,
+  nativeReviewCommand: 'codex exec review',
   minVersion: '0.130.0',
 
   models: [
@@ -363,6 +365,7 @@ export const geminiAdapter: Adapter = {
   label: 'Gemini CLI',
   command: 'gemini',
   nativeReview: false,
+  nativeReviewCommand: null,
   minVersion: '0.1.0',
 
   models: [

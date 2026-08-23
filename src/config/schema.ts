@@ -45,7 +45,15 @@ export interface MergeConfig {
   effort?: Effort;
 }
 
+/**
+ * Where a finished review goes. `terminal` writes nothing to disk: the
+ * report is printed and the run ends on a prompt offering the clipboard.
+ */
+export type OutputDestination = 'file' | 'terminal';
+
 export interface OutputConfig {
+  destination: OutputDestination;
+  /** Only meaningful when `destination` is "file". */
   merged: string;
   raw: string;
 }
@@ -75,6 +83,7 @@ export interface Config {
 }
 
 export const DEFAULT_OUTPUT: OutputConfig = {
+  destination: 'file',
   merged: 'CODE-REVIEW-HANDOFF.md',
   raw: 'CODE-REVIEW-HANDOFF.raw.md',
 };

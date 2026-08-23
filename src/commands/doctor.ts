@@ -88,7 +88,7 @@ export async function runDoctor(): Promise<number> {
       const versionOk = version !== null && isVersionAtLeast(version, adapter.minVersion);
       const mark = !result.present ? 'MISS' : versionOk ? 'OK  ' : 'OLD ';
 
-      console.log(`  ${mark} ${adapter.label} — \`${adapter.command}\``);
+      console.log(`  ${mark} ${adapter.label} - \`${adapter.command}\``);
 
       if (result.output) {
         console.log(`       reported: ${result.output}`);

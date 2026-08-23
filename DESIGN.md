@@ -1,4 +1,4 @@
-# crbuddy — design specification
+# crbuddy - design specification
 
 crbuddy is a small local CLI that turns a repetitive multi-vendor code-review workflow into one command: run one or more coding-agent reviewers independently, preserve their outputs, optionally group apparent duplicate findings, and write a handoff file for the coding agent or human that will act on them.
 
@@ -39,8 +39,8 @@ Supplying positional `instructions` is an explicit override for the whole run. I
 
 Flags:
 
-- `--force` — run despite `maxDiffBytes`
-- `--strict` — return exit 2 when the run is only partially successful
+- `--force` - run despite `maxDiffBytes`
+- `--strict` - return exit 2 when the run is only partially successful
 
 ### `crbuddy init` / `crbuddy config`
 
@@ -156,8 +156,8 @@ The snapshot still provides stable report identity, diff-size checks, manifest g
 
 Adapters expose semantic operations:
 
-1. `review` — invoke the vendor's own supported native review feature
-2. `generic` — run a read-only agent with explicit user instructions
+1. `review` - invoke the vendor's own supported native review feature
+2. `generic` - run a read-only agent with explicit user instructions
 
 The distinction is architectural. `review` must not be implemented as a generic prompt like “review this diff.”
 
@@ -259,9 +259,9 @@ Stage temp files on the destination filesystem, then rename into place.
 
 ### Exit codes
 
-- `0` — usable report produced; partial success also exits 0 by default
-- `1` — no usable review produced / fatal startup failure
-- `2` — partial success when `--strict` is requested
+- `0` - usable report produced; partial success also exits 0 by default
+- `1` - no usable review produced / fatal startup failure
+- `2` - partial success when `--strict` is requested
 
 Merge failure is separate from reviewer failure and counts as partial success when strict mode is enabled.
 

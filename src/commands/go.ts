@@ -6,7 +6,7 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 
 import { Config, PanelEntry, WORK_DIR } from '../config/schema.js';
-import { LoadedConfig } from '../config/load.js';
+import { LoadedConfig, insideRepo } from '../config/load.js';
 import { ResolvedTarget, resolveTarget } from '../git/target.js';
 import { Adapter, UnsafeInvocationError } from '../adapters/types.js';
 import { getAdapter } from '../adapters/vendors.js';
@@ -36,10 +36,24 @@ import {
   stashExistingOutputs,
 } from '../output/write.js';
 import { progress } from '../run/progress.js';
+import { copyToClipboard } from '../util/clipboard.js';
+import { PromptAborted, dim, select } from '../util/prompt.js';
 import { formatClock, formatElapsed, formatSize } from '../util/format.js';
 
 /** Below this, a "successful" review is more likely a status message. */
 const SUSPICIOUSLY_SHORT = 200;
+
+/**
+ * Used when there is no diff at all. Deliberately not phrased as a diff
+ * prompt: there is no range to anchor to, so the reviewer is pointed at the
+ * checkout itself. The "do not modify" line is spelled out here because
+ * `genericPrompt` only appends it when there IS a range.
+ */
+const WHOLE_CHECKOUT_INSTRUCTIONS =
+  'Review this repository as it currently stands. There is no diff to review, so ' +
+  'treat the checked-out code itself as the subject. Report concrete, actionable ' +
+  'defects with file paths and line numbers, covering correctness bugs, error ' +
+  'handling, resource cleanup, and security. Do not modify any files.';
 
 export const EXIT_OK = 0;
 export const EXIT_TOTAL_FAILURE = 1;
@@ -95,7 +109,7 @@ export async function runGo(options: GoOptions): Promise<number> {
 
     interrupted = true;
     progress.dim('');
-    progress.line('Interrupted — terminating agents and restoring previous output.');
+    progress.line('Interrupted - terminating agents and restoring previous output.');
     killAll('SIGTERM');
   };
 
@@ -152,9 +166,10 @@ export async function runGo(options: GoOptions): Promise<number> {
       supports.set(name, await flagProbe(adapter, scratch));
     }
 
-    if (config.refuseIfOutputExists) {
+    // Nothing is replaced when the report only ever reaches the terminal.
+    if (config.refuseIfOutputExists && config.output.destination === 'file') {
       const existing = [config.output.merged, config.output.raw].filter((relative) =>
-        existsSync(path.join(repoRoot, relative)),
+        existsSync(path.resolve(repoRoot, relative)),
       );
 
       if (existing.length > 0) {
@@ -183,12 +198,54 @@ export async function runGo(options: GoOptions): Promise<number> {
       // crbuddy's own artifacts must not become the thing under review.
       // The working directory counts: it is untracked, so "all uncommitted
       // changes" would otherwise sweep the config and scratch files in.
-      exclude: [config.output.merged, config.output.raw, `${WORK_DIR}/`],
+      //
+      // Filtered, and not merely as tidiness: these become `:(exclude)`
+      // pathspecs, and git aborts the whole diff on one that points outside
+      // the worktree. A report written to `../` needs no exclusion anyway —
+      // git cannot see it.
+      exclude: [config.output.merged, config.output.raw, `${WORK_DIR}/`].filter(
+        (entry) => insideRepo(entry),
+      ),
     });
 
-    if (target.files.length === 0) {
+    // An empty diff is usually an accident — `go` run straight after
+    // committing, or a base branch that resolved to the same commit — so
+    // interactively it falls back rather than exiting. The fallback is a
+    // materially different run, which is why it warns rather than proceeding
+    // quietly.
+    //
+    // Gated on a terminal because the warning is the whole safeguard, and an
+    // unattended caller has nobody to read it: a hook or CI job on a clean
+    // tree would silently spend one full agent run per panel entry, with no
+    // diff size limit to bound any of them. Unattended, that has to be asked
+    // for rather than inferred.
+    const emptyDiff = target.files.length === 0;
+    const attended = Boolean(process.stdin.isTTY);
+    const wholeCheckout = emptyDiff && (attended || options.force);
+
+    if (emptyDiff && !wholeCheckout) {
       progress.line('Nothing to review — the target diff is empty.');
+      progress.dim(
+        '  Reviewing the whole checkout instead is possible, but it is broader, ' +
+          'slower, and unbounded by the diff size limit, so it is not done ' +
+          'unattended. Re-run with --force to ask for it.',
+      );
+
       return EXIT_TOTAL_FAILURE;
+    }
+
+    if (wholeCheckout) {
+      progress.line(
+        'Warning: the target diff is empty, so there is nothing to review. ' +
+          'Reviewing the whole checkout instead.',
+      );
+
+      progress.dim(
+        '  Broader and slower than a diff review, and it ignores the diff size ' +
+          'limit. No vendor CLI has a native review mode for "everything", so ' +
+          'every entry runs as a general-purpose agent rather than the native ' +
+          'review workflow it would normally use.',
+      );
     }
 
     if (target.bytes > config.maxDiffBytes && !options.force) {
@@ -236,6 +293,7 @@ export async function runGo(options: GoOptions): Promise<number> {
             repoRoot,
             scratch,
             timeoutMs: config.timeoutMs,
+            ...(wholeCheckout ? { wholeCheckout: true } : {}),
             ...(options.instructionsOverride
               ? { instructionsOverride: options.instructionsOverride }
               : {}),
@@ -265,8 +323,17 @@ export async function runGo(options: GoOptions): Promise<number> {
       // layout into a file people paste into issues.
       configSource: displayPath(loaded.source, repoRoot),
       configScope: loaded.scope,
+      ...(wholeCheckout ? { wholeCheckout: true } : {}),
       warnings,
-      rawPath: config.output.raw,
+      // Only a real path when one is actually written; the consolidated
+      // report points at it, and pointing at a file that does not exist is
+      // worse than not mentioning it.
+      // Displayed, not absolute, for the same reason as configSource: an
+       // absolute output directory would otherwise put the machine's layout
+       // into a file people paste into issues.
+      ...(config.output.destination === 'file'
+        ? { rawPath: displayPath(path.resolve(repoRoot, config.output.raw), repoRoot) }
+        : {}),
     };
 
     if (succeeded.length === 0) {
@@ -339,18 +406,43 @@ export async function runGo(options: GoOptions): Promise<number> {
           ]
         : [{ relative: config.output.merged, content: renderRaw(context) }];
 
-    await commitOutputs(repoRoot, files);
-    await stashed.discard();
-    stashed = null;
+    if (config.output.destination === 'terminal') {
+      // Restored, not discarded: this run wrote nothing, so a report left by
+      // an earlier file-mode run is still the newest copy on disk and was
+      // only moved aside to keep it out of the reviewers' sight.
+      await stashed.restore();
+      stashed = null;
 
-    progress.dim('');
-    progress.line(
-      context.mergeState === 'ok'
-        ? `Wrote ${config.output.merged} and ${config.output.raw}.`
-        : `Wrote ${config.output.merged}.`,
-    );
+      progress.bell();
 
-    progress.bell();
+      // The LAST entry is the deliverable in both shapes: `files` is
+      // [raw, merged] when consolidation ran and [merged] when it did not.
+      await printReport(files[files.length - 1]!.content);
+    } else {
+      await commitOutputs(repoRoot, files);
+      await stashed.discard();
+      stashed = null;
+
+      progress.dim('');
+      progress.line(
+        context.mergeState === 'ok'
+          ? `Wrote ${config.output.merged} and ${config.output.raw}.`
+          : `Wrote ${config.output.merged}.`,
+      );
+
+      // Two filenames that differ by one word need saying out loud once.
+      // Only when consolidation actually ran: otherwise there is one file
+      // and nothing to tell apart.
+      if (context.mergeState === 'ok') {
+        progress.dim(
+          `  ${config.output.merged} is the deliverable: duplicate findings grouped ` +
+            `and ordered by how many reviewers raised them. ${config.output.raw} is ` +
+            `every review verbatim, to check that grouping against.`,
+        );
+      }
+
+      progress.bell();
+    }
 
     const partial =
       succeeded.length < records.length || context.mergeState === 'failed';
@@ -421,6 +513,8 @@ interface ExecuteArgs {
   scratch: string;
   timeoutMs: number;
   instructionsOverride?: string;
+  /** No diff: review the checkout itself rather than a range. */
+  wholeCheckout?: boolean;
 }
 
 async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
@@ -442,9 +536,27 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
 
   try {
     invocation = adapter.build({
-      operation: instructions
-        ? { kind: 'generic', target, instructions }
-        : { kind: 'review', target },
+      // With no diff there is no range for a native review to anchor to, so
+      // every entry drops to a general-purpose run — including entries that
+      // would normally use the vendor's own review workflow. A configured
+      // `instructions` still wins; it is what the user asked for either way.
+      operation: args.wholeCheckout
+        ? {
+            kind: 'generic',
+            target: null,
+            // `genericPrompt` appends the read-only reminder only when there
+            // is a range, so a whole-checkout run carries it itself. The
+            // sandbox flags are the real guarantee; this just stops the
+            // prompt from contradicting them.
+            instructions: instructions
+              ? `${instructions}
+
+Do not modify any files.`
+              : WHOLE_CHECKOUT_INSTRUCTIONS,
+          }
+        : instructions
+          ? { kind: 'generic', target, instructions }
+          : { kind: 'review', target },
       model: entry.model,
       ...(entry.effort ? { effort: entry.effort } : {}),
       ...(entry.vendorArgs ? { vendorArgs: entry.vendorArgs } : {}),
@@ -464,7 +576,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       };
 
       progress.line(
-        `  ${args.display} — FAILED: unsafe_invocation\n      ` +
+        `  ${args.display} - FAILED: unsafe_invocation\n      ` +
           `${firstLine(outcome.diagnostics)}`,
       );
 
@@ -475,11 +587,11 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
   }
 
   for (const warning of invocation.warnings ?? []) {
-    progress.line(`  ${args.display} — ${warning}`);
+    progress.line(`  ${args.display} - ${warning}`);
   }
 
   progress.laneStarted(args.display);
-  progress.dim(`  ${args.display} — started`);
+  progress.dim(`  ${args.display} - started`);
 
   const result = await runProcess({
     command: invocation.command,
@@ -502,12 +614,12 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
 
   const report = (outcome: RunRecord): RunRecord => {
     if (outcome.ok) {
-      progress.dim(`  ${args.display} — done in ${formatElapsed(outcome.wallClockMs)}`);
+      progress.dim(`  ${args.display} - done in ${formatElapsed(outcome.wallClockMs)}`);
     } else {
       const detail = firstLine(outcome.diagnostics);
 
       progress.line(
-        `  ${args.display} — FAILED: ${outcome.reason}${detail ? `\n      ${detail}` : ''}`,
+        `  ${args.display} - FAILED: ${outcome.reason}${detail ? `\n      ${detail}` : ''}`,
       );
     }
 
@@ -557,7 +669,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
 
   if (suspicious) {
     progress.line(
-      `  ${args.display} — warning: returned only ${output.trim().length} characters; ` +
+      `  ${args.display} - warning: returned only ${output.trim().length} characters; ` +
         `this may be a status message rather than a review.`,
     );
   }
@@ -640,6 +752,61 @@ async function confirm(question: string): Promise<boolean> {
   } finally {
     rl.close();
   }
+}
+
+/**
+ * Terminal mode. The report goes to stdout so `crbuddy go > review.md` still
+ * works, while every progress line has gone to stderr all along - the two
+ * never interleave in a redirect.
+ *
+ * Nothing here clears the screen or uses the alternate buffer, so the report
+ * stays in the scrollback after the process exits and can be selected by
+ * hand if the clipboard is unavailable.
+ */
+async function printReport(document: string): Promise<void> {
+  process.stdout.write(`
+${document.trimEnd()}
+`);
+
+  // stdout matters as much as stdin here: `select` draws its menu there, so
+  // prompting under `crbuddy go > review.md` would write the menu into the
+  // file. A redirect or a pipe wants the report and nothing else.
+  if (!process.stdin.isTTY || !process.stdout.isTTY || !process.stderr.isTTY) {
+    return;
+  }
+
+  let choice: 'copy' | 'exit';
+
+  try {
+    choice = await select<'copy' | 'exit'>(
+      'Report(s) done, pick one:',
+      [
+        { label: 'Copy to clipboard and exit', value: 'copy' },
+        { label: 'Exit', value: 'exit' },
+      ],
+      0,
+    );
+  } catch (error) {
+    // Ctrl-C at this prompt is a choice, not a failure: the report is
+    // already printed and there is nothing left to clean up.
+    if (error instanceof PromptAborted || (error as { name?: string })?.name === 'AbortError') {
+      console.error('');
+      return;
+    }
+
+    throw error;
+  }
+
+  if (choice !== 'copy') return;
+
+  const result = await copyToClipboard(document);
+
+  console.error(
+    result.ok
+      ? dim('  Copied to clipboard.')
+      : `  Could not copy: ${result.reason ?? 'unknown error'}. ` +
+          `The report is above; scroll up to select it.`,
+  );
 }
 
 /** Repo-relative if inside the repo, else ~-prefixed. Never a full path. */

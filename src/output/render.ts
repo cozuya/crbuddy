@@ -3,7 +3,7 @@ import { Finding } from '../merge/segment.js';
 import { ResolvedTarget } from '../git/target.js';
 
 /**
- * Rendering (DESIGN.md §9). Both files are rendered FROM STRUCTURED DATA —
+ * Rendering (DESIGN.md §9). Both files are rendered FROM STRUCTURED DATA -
  * the merged file is never produced by parsing markdown back out of the raw
  * one. The HTML comment markers are navigation aids for humans; a model's
  * verbatim output can contain the closing marker, so they are not a parsing
@@ -39,6 +39,12 @@ export interface ReportContext {
   /** Repo-relative or ~-prefixed; never a full machine path. */
   configSource: string;
   configScope: 'project' | 'global';
+  /**
+   * True when the target diff was empty and the panel reviewed the checkout
+   * as it stands instead. A different kind of run, so the report says so
+   * rather than reporting zero changed files as if that were normal.
+   */
+  wholeCheckout?: boolean;
   warnings: string[];
   /** Relative path of the raw file, referenced from the merged one. */
   rawPath?: string;
@@ -130,6 +136,14 @@ export function renderReportBlock(context: ReportContext): string {
     `**${succeeded} of ${total} review${total === 1 ? '' : 's'} completed.**`,
   ];
 
+  if (context.wholeCheckout) {
+    body.push(
+      '- There was no diff, so the reviews below cover the whole checkout rather than a change. ' +
+        'No vendor CLI has a native review mode for that, so every entry ran as a ' +
+        'general-purpose agent pointed at the repository.',
+    );
+  }
+
   if (context.mergeState === 'off') {
     body.push(
       '- Consolidation is off; the reviews below are unmerged, in the order they were configured.',
@@ -160,7 +174,9 @@ export function renderReportBlock(context: ReportContext): string {
 
   body.push(
     '',
-    `Reviewed \`${context.target.range}\` — ${context.target.files.length} file(s) changed.`,
+    context.wholeCheckout
+      ? `Reviewed the checkout at \`${context.target.snapshot}\` - no diff; the whole tree was the subject.`
+      : `Reviewed \`${context.target.range}\` - ${context.target.files.length} file(s) changed.`,
   );
 
   return [OPEN_REPORT, ...body, CLOSE_REPORT, ''].join('\n');
@@ -171,7 +187,7 @@ export function renderRaw(context: ReportContext): string {
   // so the heading should not call itself a secondary artifact.
   const heading =
     context.mergeState === 'ok'
-      ? '# Code review — unmerged reviews'
+      ? '# Code review - unmerged reviews'
       : '# Code review';
 
   const parts = [
@@ -185,7 +201,7 @@ export function renderRaw(context: ReportContext): string {
       `<!-- crbuddy:review id=${run.id} vendor=${run.vendor} model=${run.modelRequested} -->`,
     );
 
-    parts.push(`## ${run.id} — ${run.vendor} / ${run.modelRequested}\n`);
+    parts.push(`## ${run.id} - ${run.vendor} / ${run.modelRequested}\n`);
 
     if (run.ok) {
       parts.push(run.output.trim(), '');
@@ -214,13 +230,16 @@ export function renderMerged(
 
   const parts = [
     renderFrontmatter(context, 'merged'),
-    `# Code review — consolidated\n`,
+    `# Code review - consolidated\n`,
     renderReportBlock(context),
     `_Findings are grouped by apparent duplication and ordered by how many ` +
       `reviewers raised them. Cluster labels (C1, C2…) are crbuddy's; any ` +
       `numbering inside a finding is the reviewer's own. Agreement is a ` +
-      `priority heuristic, not a confidence score. Unmerged reviews: ` +
-      `\`${context.rawPath ?? ''}\`_\n`,
+      `priority heuristic, not a confidence score.` +
+      // Absent in terminal mode: there is no unmerged file on disk, and
+      // pointing the reader at one that does not exist is worse than
+      // saying nothing.
+      `${context.rawPath ? ` Unmerged reviews: \`${context.rawPath}\`` : ''}_\n`,
   ];
 
   const resolve = (cluster: Cluster): Finding[] =>
