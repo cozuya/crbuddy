@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 
-import { insideRepo } from '../src/config/load.js';
+import { repoRelative } from '../src/config/load.js';
 
 import {
   cleanupTemps,
@@ -137,13 +137,41 @@ test('out-of-repo output paths are excluded from git pathspecs', () => {
   // These become `:(exclude)` arguments. git aborts the entire diff on one
   // pointing outside the worktree ("is outside repository"), so an unfiltered
   // list makes every run fail rather than merely over-matching.
-  for (const outside of ['../CODE-REVIEW-HANDOFF.md', 'D:/audits/x.md', '/srv/x.md', '..']) {
-    assert.equal(insideRepo(outside), false, outside);
+  //
+  // Built from the real repo root rather than hardcoded, so the assertions
+  // mean the same thing on every platform - `D:/x` is only an absolute path
+  // on Windows.
+  const repoRoot = path.resolve(path.join('/', 'work', 'repo'));
+  const outsideRoot = path.resolve(path.join('/', 'work', 'elsewhere'));
+
+  for (const outside of [
+    '../CODE-REVIEW-HANDOFF.md',
+    '..',
+    path.join(outsideRoot, 'x.md'),
+  ]) {
+    assert.equal(repoRelative(outside, repoRoot), null, outside);
   }
 
-  for (const inside of ['CODE-REVIEW-HANDOFF.md', 'reviews/x.md', './x.md', '.crbuddy/']) {
-    assert.equal(insideRepo(inside), true, inside);
+  for (const inside of ['CODE-REVIEW-HANDOFF.md', 'reviews/x.md', './x.md']) {
+    assert.ok(repoRelative(inside, repoRoot) !== null, inside);
   }
+});
+
+test('a trailing slash survives the repo-relative rewrite', () => {
+  // `.crbuddy/` means "everything beneath"; losing the slash turns the
+  // pathspec into a single file that does not exist.
+  const repoRoot = path.resolve(path.join('/', 'work', 'repo'));
+
+  assert.equal(repoRelative('.crbuddy/', repoRoot), '.crbuddy/');
+});
+
+test('an absolute path inside the repo is still excluded, not dropped', () => {
+  // Absolute is not the same as outside. Dropping it would leave the last
+  // run's report in the snapshot, and the next panel would review it.
+  const repoRoot = path.resolve(path.join('/', 'work', 'repo'));
+  const absolute = path.join(repoRoot, 'REVIEW.md');
+
+  assert.equal(repoRelative(absolute, repoRoot), 'REVIEW.md');
 });
 
 test('a stash across filesystems falls back to copy instead of failing', async () => {

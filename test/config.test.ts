@@ -251,3 +251,19 @@ test('an output path that names no file is rejected', () => {
     );
   }
 });
+
+test('clipboard payload is encoded for the platform that reads it', async () => {
+  // Regression for silent corruption: `clip.exe` decodes stdin with the
+  // console code page, so UTF-8 turns the report's U+2026 into mojibake
+  // while still exiting 0. Asserted on the encoding, not on the real
+  // clipboard, so it means the same thing in CI.
+  const { encodeForClipboard } = await import('../src/util/clipboard.js');
+
+  const encoded = encodeForClipboard('C2…');
+
+  if (process.platform === 'win32') {
+    assert.deepEqual([...encoded], [0x43, 0x00, 0x32, 0x00, 0x26, 0x20]);
+  } else {
+    assert.deepEqual([...encoded], [0x43, 0x32, 0xe2, 0x80, 0xa6]);
+  }
+});

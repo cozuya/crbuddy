@@ -14,7 +14,15 @@ export interface Lock {
 }
 
 export async function acquireLock(workDir: string): Promise<Lock> {
-  const lockDir = path.join(workDir, 'lock');
+  return acquireLockAt(path.join(workDir, 'lock'), 'in this repository');
+}
+
+/**
+ * Same primitive, arbitrary location. Used for a lock that must coordinate
+ * runs in DIFFERENT repositories - a per-repo lock cannot see those.
+ */
+export async function acquireLockAt(lockDir: string, scope: string): Promise<Lock> {
+  await mkdir(path.dirname(lockDir), { recursive: true });
 
   try {
     await mkdir(lockDir, { recursive: false });
@@ -30,7 +38,7 @@ export async function acquireLock(workDir: string): Promise<Lock> {
     if (Number.isFinite(pid) && !isAlive(pid)) {
       // Stale lock from a crashed run.
       await rm(lockDir, { recursive: true, force: true });
-      return acquireLock(workDir);
+      return acquireLockAt(lockDir, scope);
     }
 
     throw new LockError(

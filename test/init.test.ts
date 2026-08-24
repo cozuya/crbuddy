@@ -121,3 +121,22 @@ test('re-running config keeps filenames a user already chose', () => {
 test('with no existing config the defaults are used', () => {
   assert.equal(inDirectory('.').merged, DEFAULT_OUTPUT.merged);
 });
+
+test('two same-named reports in different directories do not collapse', () => {
+  // `reports/a/REVIEW.md` + `reports/b/REVIEW.md` are two files. Keeping
+  // only the basenames would make them one, and the wizard would write a
+  // config that `crbuddy go` refuses to load.
+  const existing = {
+    destination: 'file' as const,
+    merged: 'reports/a/REVIEW.md',
+    raw: 'reports/b/REVIEW.md',
+  };
+
+  const collapsed = inDirectory('.', existing);
+
+  assert.notEqual(collapsed.merged, collapsed.raw);
+  assert.equal(collapsed.merged, 'REVIEW.md');
+  assert.equal(collapsed.raw, 'REVIEW.raw.md');
+
+  assert.doesNotThrow(() => assertUsableOutput(collapsed, 'output'));
+});

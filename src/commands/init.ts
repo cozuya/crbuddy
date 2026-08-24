@@ -18,9 +18,9 @@ import {
 import {
   assertUsableOutput,
   homeConfigPath,
-  insideRepo,
   projectConfigPath,
   readAndValidate,
+  repoRelative,
   slug,
 } from '../config/load.js';
 import { ADAPTERS, getAdapter } from '../adapters/vendors.js';
@@ -208,7 +208,11 @@ async function offerGitignore(repoRoot: string, config: Config): Promise<void> {
       ? [config.output.merged, config.output.raw]
       : [];
 
-  const wanted = [...reports, `${WORK_DIR}/`].filter((entry) => insideRepo(entry));
+  // Mapped, not filtered: an absolute path can still resolve inside the
+  // repo, and .gitignore needs the repo-relative spelling of it.
+  const wanted = [...reports, `${WORK_DIR}/`]
+    .map((entry) => repoRelative(entry, repoRoot))
+    .filter((entry): entry is string => entry !== null);
 
   if (wanted.length === 0) return;
 
@@ -579,8 +583,12 @@ async function pickOutputLocation(
     currentDir === '.' ? 0 : currentDir === '..' ? 1 : 2,
   );
 
-  if (where === 'root') return inDirectory('.', existing);
-  if (where === 'up') return inDirectory('..', existing);
+  // Validated on every branch, not just the typed one. These two build
+  // paths from an existing config, and a config can carry names that only
+  // work in the directories they came from.
+  if (where === 'root' || where === 'up') {
+    return usableOrDefault(inDirectory(where === 'root' ? '.' : '..', existing));
+  }
 
   for (;;) {
     console.log(
@@ -621,6 +629,23 @@ async function pickOutputLocation(
 }
 
 /**
+ * Last line of defence for the branches with no re-prompt loop: an
+ * unusable choice falls back to the defaults with a note, rather than
+ * throwing out of the wizard or writing a config that will not load.
+ */
+function usableOrDefault(candidate: OutputConfig): OutputConfig {
+  try {
+    assertUsableOutput(candidate, 'output');
+    return candidate;
+  } catch (error) {
+    console.log(`  ${error instanceof Error ? error.message : String(error)}`);
+    console.log(dim('  Using the default filenames instead.'));
+
+    return { ...DEFAULT_OUTPUT };
+  }
+}
+
+/**
  * Only the directory is chosen here, so a config that already names its
  * files keeps those names. Rebuilding both paths from the defaults would
  * silently rename a hand-edited `output.merged` the moment someone re-ran
@@ -628,7 +653,15 @@ async function pickOutputLocation(
  */
 export function inDirectory(directory: string, existing?: OutputConfig): OutputConfig {
   const merged = path.basename(existing?.merged ?? DEFAULT_OUTPUT.merged);
-  const raw = path.basename(existing?.raw ?? DEFAULT_OUTPUT.raw);
+  let raw = path.basename(existing?.raw ?? DEFAULT_OUTPUT.raw);
+
+  // Two directories can hold two files of the same name; collapsing them
+  // into one directory would make them one file, and the wizard would
+  // write a config that `crbuddy go` then refuses to load.
+  if (raw === merged) {
+    const extension = path.extname(merged);
+    raw = `${merged.slice(0, merged.length - extension.length)}.raw${extension}`;
+  }
 
   if (directory === '.') return { destination: 'file', merged, raw };
 

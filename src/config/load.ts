@@ -310,19 +310,37 @@ function validateDestination(value: unknown, where: string): OutputDestination {
  * about staying inside the repo.
  */
 /**
- * True for a configured path that stays inside the repository.
+ * The repository-relative spelling of a configured path, or null when it
+ * lands outside the repository.
  *
- * Output paths may now sit outside it, and an outside path is not merely
+ * Output paths may sit outside the repo, and an outside path is not merely
  * uninteresting to git — it is fatal. Passing one as a `:(exclude)`
  * pathspec makes git abort with "is outside repository", so every caller
  * that builds a pathspec or a .gitignore entry has to filter first.
+ *
+ * Absolute is NOT the same as outside. An absolute path can resolve inside
+ * the repository, and treating it as external would drop it from the
+ * exclusion — letting the last run's report be swept into the snapshot and
+ * reviewed, which is the exact thing the exclusion exists to prevent. So
+ * this resolves first and answers with the spelling git wants.
  */
-export function insideRepo(entry: string): boolean {
-  if (path.isAbsolute(entry)) return false;
+export function repoRelative(entry: string, repoRoot: string): string | null {
+  // A trailing slash means "everything beneath"; path.relative eats it.
+  const directory = entry.endsWith('/') || entry.endsWith('\\');
+  const trimmed = directory ? entry.slice(0, -1) : entry;
 
-  const normalized = path.normalize(entry).replace(/\\/g, '/');
+  const relative = path.relative(repoRoot, path.resolve(repoRoot, trimmed));
 
-  return !normalized.startsWith('../') && normalized !== '..';
+  // Segment-wise: a file legitimately named `..config` is not an escape.
+  const segments = relative.split(/[\\/]/);
+
+  if (relative === '' || segments[0] === '..' || path.isAbsolute(relative)) {
+    return null;
+  }
+
+  const posix = relative.replace(/\\/g, '/');
+
+  return directory ? `${posix}/` : posix;
 }
 
 export function assertUsableOutput(

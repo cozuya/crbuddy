@@ -18,6 +18,26 @@ interface Candidate {
 }
 
 /**
+ * A clipboard helper that never exits would hang `crbuddy go` after the
+ * report is already on screen. X11 selection ownership is the realistic
+ * case: whoever holds the selection has to stay running to serve it.
+ */
+const TIMEOUT_MS = 5_000;
+
+/**
+ * `clip.exe` decodes stdin with the console code page, not UTF-8. The
+ * consolidated report always contains U+2026 (the "C1, C2…" note), which
+ * arrives as `ΓÇª` under CP437 - a silent corruption, since clip still
+ * exits 0. UTF-16LE is decoded correctly and needs no BOM; adding one only
+ * prepends a stray U+FEFF to the paste.
+ */
+export function encodeForClipboard(text: string): Buffer {
+  return process.platform === 'win32'
+    ? Buffer.from(text, 'utf16le')
+    : Buffer.from(text, 'utf8');
+}
+
+/**
  * Ordered by likelihood, not preference. On Linux there is no single answer:
  * Wayland and X11 ship different tools and neither is guaranteed present, so
  * each is tried until one is actually installed.
@@ -78,11 +98,21 @@ function attempt(candidate: Candidate, text: string): Promise<ClipboardResult> {
 
     let settled = false;
 
-    const finish = (result: ClipboardResult) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish({ ok: false, reason: `${candidate.command} did not exit` });
+    }, TIMEOUT_MS);
+
+    // Never hold the process open on this timer alone: the report is
+    // printed and the run is otherwise finished.
+    timer.unref?.();
+
+    function finish(result: ClipboardResult): void {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       resolve(result);
-    };
+    }
 
     child.on('error', (error: NodeJS.ErrnoException) => {
       finish(error.code === 'ENOENT' ? { ok: false } : { ok: false, reason: error.message });
@@ -99,6 +129,6 @@ function attempt(candidate: Candidate, text: string): Promise<ClipboardResult> {
     // An EPIPE here is the child having died already; `close` carries the
     // real outcome, so the write error is swallowed rather than thrown.
     child.stdin?.on('error', () => {});
-    child.stdin?.end(text, 'utf8');
+    child.stdin?.end(encodeForClipboard(text));
   });
 }

@@ -1,18 +1,18 @@
-import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
+import { createHash, randomUUID } from 'node:crypto';
+import { homedir, tmpdir } from 'node:os';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
 import { Config, PanelEntry, WORK_DIR } from '../config/schema.js';
-import { LoadedConfig, insideRepo } from '../config/load.js';
+import { ConfigError, LoadedConfig, repoRelative } from '../config/load.js';
 import { ResolvedTarget, resolveTarget } from '../git/target.js';
 import { Adapter, UnsafeInvocationError } from '../adapters/types.js';
 import { getAdapter } from '../adapters/vendors.js';
 import { isVersionAtLeast } from '../adapters/version.js';
 import { Semaphore } from '../util/semaphore.js';
-import { acquireLock } from '../util/lock.js';
+import { Lock, acquireLock, acquireLockAt } from '../util/lock.js';
 import { killAll, probe, runProcess } from '../run/spawn.js';
 import { Finding, relativizePaths, segment } from '../merge/segment.js';
 import {
@@ -84,6 +84,7 @@ export async function runGo(options: GoOptions): Promise<number> {
   // before the lock lets a second invocation delete a live run's staged
   // output on its way to failing the lock check.
   const lock = await acquireLock(workDir);
+  const outputLock = await acquireOutputLock(repoRoot, config);
 
   await cleanupTemps(repoRoot, [config.output.merged, config.output.raw]);
 
@@ -166,6 +167,25 @@ export async function runGo(options: GoOptions): Promise<number> {
       supports.set(name, await flagProbe(adapter, scratch));
     }
 
+    // The config validator can only compare the two paths as written, and
+    // `same.md` and `<repo>/same.md` are the same file spelled two ways. It
+    // would survive to `commitOutputs`, which stages both under one temp
+    // path and fails the second rename - discarding an otherwise successful
+    // run's report.
+    if (config.output.destination === 'file') {
+      const merged = path.resolve(repoRoot, config.output.merged);
+      const raw = path.resolve(repoRoot, config.output.raw);
+
+      if (merged === raw) {
+        throw new ConfigError(
+          `output.merged and output.raw resolve to the same file:\n` +
+            `  ${merged}\n` +
+            `They are spelled differently in the config, but they are one ` +
+            `path. Point them at different files.`,
+        );
+      }
+    }
+
     // Nothing is replaced when the report only ever reaches the terminal.
     if (config.refuseIfOutputExists && config.output.destination === 'file') {
       const existing = [config.output.merged, config.output.raw].filter((relative) =>
@@ -199,13 +219,14 @@ export async function runGo(options: GoOptions): Promise<number> {
       // The working directory counts: it is untracked, so "all uncommitted
       // changes" would otherwise sweep the config and scratch files in.
       //
-      // Filtered, and not merely as tidiness: these become `:(exclude)`
-      // pathspecs, and git aborts the whole diff on one that points outside
-      // the worktree. A report written to `../` needs no exclusion anyway —
-      // git cannot see it.
-      exclude: [config.output.merged, config.output.raw, `${WORK_DIR}/`].filter(
-        (entry) => insideRepo(entry),
-      ),
+      // Rewritten, not merely filtered: these become `:(exclude)`
+      // pathspecs. git aborts the whole diff on one pointing outside the
+      // worktree, and an absolute path that DOES resolve inside still has
+      // to be handed over repo-relative or it is silently not excluded -
+      // which would feed the last run's report back into this one.
+      exclude: [config.output.merged, config.output.raw, `${WORK_DIR}/`]
+        .map((entry) => repoRelative(entry, repoRoot))
+        .filter((entry): entry is string => entry !== null),
     });
 
     // An empty diff is usually an accident — `go` run straight after
@@ -415,6 +436,13 @@ export async function runGo(options: GoOptions): Promise<number> {
 
       progress.bell();
 
+      // Released before the menu, not in the `finally`. These handlers
+      // suppress default termination, and with no reviewer left to stop,
+      // a SIGTERM arriving while the prompt waits would otherwise leave
+      // the process blocked on stdin holding the lock.
+      process.off('SIGINT', onInterrupt);
+      process.off('SIGTERM', onInterrupt);
+
       // The LAST entry is the deliverable in both shapes: `files` is
       // [raw, merged] when consolidation ran and [merged] when it did not.
       await printReport(files[files.length - 1]!.content);
@@ -458,6 +486,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     if (stashed) await stashed.restore().catch(() => {});
 
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    await outputLock?.release();
     await lock.release();
   }
 }
@@ -752,6 +781,46 @@ async function confirm(question: string): Promise<boolean> {
   } finally {
     rl.close();
   }
+}
+
+/**
+ * A second lock, keyed by the destination directory instead of the repo.
+ *
+ * `../CODE-REVIEW-HANDOFF.md` in two sibling repositories is ONE file, and
+ * each repo's own lock knows nothing about the other. Without this, run A
+ * can stash the previous report, run B write a fresh one, and A's restore()
+ * put the stale copy back over it.
+ *
+ * Kept in the OS temp directory, keyed by a hash of the resolved paths, so
+ * coordinating two repositories never means dropping a lock file into
+ * someone's home or parent directory. Only taken when the output actually
+ * escapes the repo; anything inside it is already covered.
+ */
+async function acquireOutputLock(
+  repoRoot: string,
+  config: Config,
+): Promise<Lock | null> {
+  if (config.output.destination !== 'file') return null;
+
+  const outside = [config.output.merged, config.output.raw]
+    .map((relative) => path.resolve(repoRoot, relative))
+    .filter((absolute) => repoRelative(absolute, repoRoot) === null);
+
+  if (outside.length === 0) return null;
+
+  const unique = [...new Set(outside.map((file) => file.replace(/\\/g, '/')))].sort();
+
+  // Case-insensitive on Windows and macOS; over-locking two paths that only
+  // differ in case is harmless, under-locking them is the bug being fixed.
+  const key = createHash('sha1')
+    .update(unique.join('\u0000').toLowerCase())
+    .digest('hex')
+    .slice(0, 16);
+
+  return acquireLockAt(
+    path.join(tmpdir(), 'crbuddy-locks', key),
+    `for the shared output location ${unique.join(', ')}`,
+  );
 }
 
 /**
