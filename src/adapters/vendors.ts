@@ -116,11 +116,14 @@ function vendorArgFlag(arg: string): string {
 
   // Long-option parsers commonly expose kebab-case and camelCase spellings
   // for the same control. Case-fold and remove separators so both forms are
-  // one key; short options remain case-sensitive (`-C` and `-c` differ for
-  // Codex).
+  // one key. Value-taking short options may attach their value directly
+  // (`-cfoo`, `-sread-only`), so classify those by the first short option;
+  // short options remain case-sensitive (`-C` and `-c` differ for Codex).
   return flag.startsWith('--')
     ? flag.slice(2).replace(/-/g, '').toLowerCase()
-    : flag;
+    : flag.startsWith('-') && flag.length > 2
+      ? flag.slice(0, 2)
+      : flag;
 }
 
 /**

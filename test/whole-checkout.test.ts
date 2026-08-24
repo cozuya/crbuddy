@@ -121,34 +121,41 @@ test('the instructions reach the reviewer intact, without diff framing', () => {
   assert.ok(!/reviewing the changes in the git range/i.test(prompt), prompt);
 });
 
-test('the report says the whole checkout was reviewed, not that nothing changed', () => {
+test('the report identifies the live whole-checkout run and its launch snapshot', () => {
   const report = renderRaw(context({ wholeCheckout: true }));
 
   assert.match(report, /no diff, so the reviews below cover the whole checkout/);
-  assert.match(report, /Reviewed the checkout at `4{40}`/);
+  assert.match(report, /Checkout snapshot captured at launch: `4{40}`/);
+  assert.match(report, /reviewers ran against the live working tree/);
 
   // "0 file(s) changed" would read as a normal run that found nothing.
   assert.ok(!report.includes('0 file(s) changed'), report);
 });
 
-test('whole-checkout reports use the sealed live-checkout snapshot', () => {
-  const reviewedSnapshot = '5555555555555555555555555555555555555555';
+test('whole-checkout reports use the launch-time live-checkout snapshot', () => {
+  const checkoutLaunchSnapshot = '5555555555555555555555555555555555555555';
   const report = renderRaw(
-    context({ wholeCheckout: true, reviewedSnapshot }),
+    context({ wholeCheckout: true, checkoutLaunchSnapshot }),
   );
 
-  assert.match(report, new RegExp(`Reviewed the checkout at \`${reviewedSnapshot}\``));
-  assert.ok(!report.includes(`checkout at \`${empty.snapshot}\``), report);
+  assert.match(
+    report,
+    new RegExp(`Checkout snapshot captured at launch: \`${checkoutLaunchSnapshot}\``),
+  );
+  assert.ok(!report.includes(`launch: \`${empty.snapshot}\``), report);
 });
 
-test('whole-checkout frontmatter does not attach empty-diff metrics to the live snapshot', () => {
-  const reviewedSnapshot = '5555555555555555555555555555555555555555';
+test('whole-checkout frontmatter labels the launch snapshot explicitly', () => {
+  const checkoutLaunchSnapshot = '5555555555555555555555555555555555555555';
   const frontmatter = renderFrontmatter(
-    context({ wholeCheckout: true, reviewedSnapshot }),
+    context({ wholeCheckout: true, checkoutLaunchSnapshot }),
   );
 
   assert.match(frontmatter, /target:\n    kind: whole-checkout\n/);
-  assert.match(frontmatter, new RegExp(`    snapshot: ${reviewedSnapshot}`));
+  assert.match(
+    frontmatter,
+    new RegExp(`    launchSnapshot: ${checkoutLaunchSnapshot}`),
+  );
   assert.match(frontmatter, /    requestedKind: uncommitted/);
   assert.match(frontmatter, new RegExp(`    requestedSnapshot: ${empty.snapshot}`));
   assert.ok(!frontmatter.includes('    digest:'), frontmatter);

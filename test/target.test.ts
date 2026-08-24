@@ -333,7 +333,7 @@ test('whole-checkout provenance captures dirty worktree bytes for a branch targe
   const branchTarget = await resolveTarget(dir, { base: 'main' });
   await writeFile(path.join(dir, 'a.txt'), 'dirty checkout bytes\n');
 
-  const reviewedSnapshot = await captureCheckoutSnapshot(dir);
+  const capturedSnapshot = await captureCheckoutSnapshot(dir);
 
   assert.equal(branchTarget.files.length, 0);
   assert.deepEqual(
@@ -341,7 +341,7 @@ test('whole-checkout provenance captures dirty worktree bytes for a branch targe
     Buffer.from('committed\n'),
   );
   assert.deepEqual(
-    snapshotFile(dir, reviewedSnapshot, 'a.txt'),
+    snapshotFile(dir, capturedSnapshot, 'a.txt'),
     Buffer.from('dirty checkout bytes\n'),
   );
 });

@@ -45,8 +45,8 @@ export interface ReportContext {
    * rather than reporting zero changed files as if that were normal.
    */
   wholeCheckout?: boolean;
-  /** Canonical live-checkout snapshot used by a whole-checkout review. */
-  reviewedSnapshot?: string;
+  /** Snapshot captured immediately before a live whole-checkout review starts. */
+  checkoutLaunchSnapshot?: string;
   warnings: string[];
   /** Relative path of the raw file, referenced from the merged one. */
   rawPath?: string;
@@ -58,7 +58,7 @@ const CLOSE_REPORT = '<!-- /crbuddy:report -->';
 export function renderFrontmatter(context: ReportContext): string {
   const succeeded = context.runs.filter((run) => run.ok).length;
   const failed = context.runs.length - succeeded;
-  const wholeCheckout = context.wholeCheckout && context.reviewedSnapshot;
+  const wholeCheckout = context.wholeCheckout && context.checkoutLaunchSnapshot;
 
   const lines: string[] = [
     '---',
@@ -75,7 +75,7 @@ export function renderFrontmatter(context: ReportContext): string {
   if (wholeCheckout) {
     lines.push(
       '    kind: whole-checkout',
-      `    snapshot: ${context.reviewedSnapshot}`,
+      `    launchSnapshot: ${context.checkoutLaunchSnapshot}`,
       `    requestedKind: ${context.target.kind}`,
       `    requestedSnapshot: ${context.target.snapshot}`,
     );
@@ -192,7 +192,7 @@ export function renderReportBlock(context: ReportContext): string {
   body.push(
     '',
     context.wholeCheckout
-      ? `Reviewed the checkout at \`${context.reviewedSnapshot ?? context.target.snapshot}\` - no diff; the whole tree was the subject.`
+      ? `Checkout snapshot captured at launch: \`${context.checkoutLaunchSnapshot ?? context.target.snapshot}\` - no diff; reviewers ran against the live working tree.`
       : `Reviewed \`${context.target.range}\` - ${context.target.files.length} file(s) changed.`,
   );
 

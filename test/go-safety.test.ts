@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -11,7 +19,6 @@ import { ConfigError, LoadedConfig } from '../src/config/load.js';
 import {
   canConfirm,
   confirm,
-  EXIT_TOTAL_FAILURE,
   PreflightError,
   repoStateDir,
   runGo,
@@ -207,7 +214,7 @@ test('terminal mode rejects merged and raw paths that resolve to one file', asyn
   );
 });
 
-test('recovered output is checked by refuseIfOutputExists before preflight', async () => {
+test('redirected refusal reports why confirmation is unavailable', async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-recovered-'));
   created.push(repoRoot);
 
@@ -219,30 +226,62 @@ test('recovered output is checked by refuseIfOutputExists before preflight', asy
 
   const originalInputTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
   const originalErrorTty = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY');
-  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
+  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
   Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: false });
 
   try {
-    const code = await runGo({
-      repoRoot,
-      loaded: loaded(
+    await assert.rejects(
+      runGo({
         repoRoot,
-        config('review.md', 'review.raw.md', true),
-        'global',
-      ),
-      version: 'test',
-      force: false,
-      wholeCheckout: false,
-      strict: false,
-    });
-
-    assert.equal(code, EXIT_TOTAL_FAILURE);
+        loaded: loaded(
+          repoRoot,
+          config('review.md', 'review.raw.md', true),
+          'global',
+        ),
+        version: 'test',
+        force: false,
+        wholeCheckout: false,
+        strict: false,
+      }),
+      (error: unknown) =>
+        error instanceof PreflightError &&
+        error.message.includes('refuseIfOutputExists') &&
+        error.message.includes('stdin and stderr'),
+    );
   } finally {
     restoreProperty(process.stdin, 'isTTY', originalInputTty);
     restoreProperty(process.stderr, 'isTTY', originalErrorTty);
   }
 
   assert.equal(await readFile(report, 'utf8'), 'previous report');
+});
+
+test('run state inside the repository is refused', async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'crbuddy-state-inside-'));
+  created.push(parent);
+  const repoRoot = path.join(parent, 'repo');
+  await mkdir(repoRoot);
+
+  assert.throws(
+    () => repoStateDir(repoRoot, path.join(repoRoot, '.crbuddy', 'state')),
+    (error: unknown) =>
+      error instanceof PreflightError &&
+      error.message.includes('inside the repository'),
+  );
+});
+
+test('a state-root symlink outside the repository remains usable', async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'crbuddy-state-link-'));
+  created.push(parent);
+  const repoRoot = path.join(parent, 'repo');
+  const outside = path.join(parent, 'outside');
+  const linkedState = path.join(repoRoot, 'state-link');
+  await mkdir(repoRoot);
+  await mkdir(outside);
+  await linkDirectory(outside, linkedState);
+
+  const stateDir = repoStateDir(repoRoot, linkedState);
+  assert.equal(path.dirname(stateDir), await realpath(outside));
 });
 
 test('confirmation requires a TTY prompt stream and writes the prompt there', async () => {

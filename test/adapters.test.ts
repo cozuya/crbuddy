@@ -296,6 +296,14 @@ test('known per-vendor safety and configuration flags are rejected in split and 
         `${vendor} should reject ${flag}=value`,
       );
 
+      if (/^-[^-]$/.test(flag)) {
+        assert.throws(
+          () => buildWithVendorArgs(vendor, [`${flag}attached-value`]),
+          UnsafeInvocationError,
+          `${vendor} should reject an attached value for ${flag}`,
+        );
+      }
+
       if (flag.startsWith('--')) {
         const camelCase = `--${flag
           .slice(2)
@@ -315,6 +323,20 @@ test('known per-vendor safety and configuration flags are rejected in split and 
         }
       }
     }
+  }
+});
+
+test('attached Codex config and sandbox values cannot bypass the guard', () => {
+  for (const arg of [
+    '-csandbox_mode=danger-full-access',
+    '-sdanger-full-access',
+    '-anever',
+  ]) {
+    assert.throws(
+      () => buildWithVendorArgs('codex', [arg]),
+      UnsafeInvocationError,
+      arg,
+    );
   }
 });
 

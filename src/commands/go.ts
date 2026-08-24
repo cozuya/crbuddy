@@ -109,6 +109,10 @@ export async function runGo(options: GoOptions): Promise<number> {
   const { repoRoot, loaded, version } = options;
   const config = loaded.config;
 
+  // Resolve and validate this before creating any per-run directory. A
+  // repository rooted at the home directory would otherwise contain the
+  // supposedly external state used to isolate concurrent review lanes.
+  const stateDir = repoStateDir(repoRoot);
   const workDir = path.join(repoRoot, WORK_DIR);
   await mkdir(workDir, { recursive: true });
 
@@ -121,7 +125,6 @@ export async function runGo(options: GoOptions): Promise<number> {
   // Under the home directory rather than the OS temp directory because a
   // crashed run's only copy of the previous report lives here until the next
   // run recovers it, and temp is not somewhere to keep the only copy.
-  const stateDir = repoStateDir(repoRoot);
   const scratch = path.join(stateDir, 'scratch');
   let mergeDir: string | null = null;
   let ownsRunState = true;
@@ -276,6 +279,15 @@ export async function runGo(options: GoOptions): Promise<number> {
       );
 
       if (existing.length > 0) {
+        if (!canConfirm()) {
+          throw new PreflightError(
+            '`refuseIfOutputExists` is enabled and review output already exists, ' +
+              'but crbuddy cannot ask for confirmation because stdin and stderr ' +
+              'are not both attached to a terminal. Run interactively with stderr ' +
+              'visible, or disable `refuseIfOutputExists` if replacement is intended.',
+          );
+        }
+
         const ok = await confirm(
           `These files already exist and will be replaced:\n` +
             existing.map((file) => `  ${file}`).join('\n') +
@@ -414,7 +426,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       );
     }
 
-    const reviewedSnapshot = wholeCheckout
+    const checkoutLaunchSnapshot = wholeCheckout
       ? target.kind === 'uncommitted'
         ? target.snapshot
         : await captureCheckoutSnapshot(repoRoot, targetOptions)
@@ -514,7 +526,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       configSource: displayPath(loaded.source, repoRoot),
       configScope: loaded.scope,
       ...(wholeCheckout ? { wholeCheckout: true } : {}),
-      ...(reviewedSnapshot ? { reviewedSnapshot } : {}),
+      ...(checkoutLaunchSnapshot ? { checkoutLaunchSnapshot } : {}),
       warnings,
       // Only a real path when one is actually written; the consolidated
       // report points at it, and pointing at a file that does not exist is
@@ -1047,7 +1059,10 @@ function lockRoot(): string {
  * share a holding directory, and so a report stranded by a crash is found
  * again by the next run in that same checkout.
  */
-export function repoStateDir(repoRoot: string): string {
+export function repoStateDir(
+  repoRoot: string,
+  stateRoot = path.join(homedir(), HOME_CONFIG_DIR, 'state'),
+): string {
   let canonical = path.resolve(repoRoot);
 
   try {
@@ -1065,7 +1080,41 @@ export function repoStateDir(repoRoot: string): string {
     : normalized;
   const key = createHash('sha1').update(identity).digest('hex').slice(0, 16);
 
-  return path.join(homedir(), HOME_CONFIG_DIR, 'state', key);
+  let canonicalStateRoot: string;
+
+  try {
+    // Follow the state directory itself when it is a symlink. A user may
+    // deliberately redirect ~/.crbuddy/state outside a home-root repository.
+    canonicalStateRoot = realpathSync.native(path.resolve(stateRoot));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
+
+    // The directory need not exist on a first run; resolve every existing
+    // parent so containment cannot be hidden behind an ancestor symlink.
+    const absoluteStateRoot = path.resolve(stateRoot);
+    canonicalStateRoot = canonicalOutputPath(
+      path.parse(absoluteStateRoot).root,
+      absoluteStateRoot,
+    );
+  }
+
+  const relativeState = path.relative(canonical, canonicalStateRoot);
+  const stateIsInsideRepository =
+    relativeState === '' ||
+    (relativeState !== '..' &&
+      !relativeState.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relativeState));
+
+  if (stateIsInsideRepository) {
+    throw new PreflightError(
+      `Cannot isolate crbuddy run state because ${canonicalStateRoot} is inside ` +
+        `the repository at ${canonical}. Repositories rooted at or above crbuddy's ` +
+        `state directory are not supported.`,
+    );
+  }
+
+  return path.join(canonicalStateRoot, key);
 }
 
 /** Probe the actual volume instead of assuming every macOS volume folds. */

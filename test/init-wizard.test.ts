@@ -135,6 +135,55 @@ test('editing an existing config preserves accepted values', async (t) => {
   assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), existing);
 });
 
+test('editing replaces an output filename that is an existing directory', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-directory-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const configPath = path.join(repo, '.crbuddy', 'config.json');
+  const reportDirectory = path.join(repo, 'reports');
+  const sentinel = path.join(reportDirectory, 'keep.txt');
+  const existing: Config = {
+    configVersion: CONFIG_VERSION,
+    output: {
+      destination: 'terminal',
+      merged: 'reports',
+      raw: 'REVIEW.raw.md',
+    },
+    target: 'uncommitted',
+    refuseIfOutputExists: false,
+    timeoutMs: DEFAULTS.timeoutMs,
+    mergeTimeoutMs: DEFAULTS.mergeTimeoutMs,
+    maxConcurrent: DEFAULTS.maxConcurrent,
+    maxDiffBytes: DEFAULTS.maxDiffBytes,
+    merge: { enabled: false, vendor: '', model: '' },
+    panel: [
+      {
+        id: 'codex-gpt-5-6-sol',
+        vendor: 'codex',
+        model: 'gpt-5.6-sol',
+        effort: 'high',
+      },
+    ],
+  };
+
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await mkdir(reportDirectory);
+  await writeFile(sentinel, 'keep', 'utf8');
+  await writeFile(configPath, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
+
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    { ui: new DefaultingUI(), detect: async () => [detection] },
+  );
+
+  assert.equal(code, 0);
+  const written = JSON.parse(await readFile(configPath, 'utf8')) as Config;
+  assert.deepEqual(written.output, {
+    ...DEFAULT_OUTPUT,
+    destination: 'terminal',
+  });
+  assert.equal(await readFile(sentinel, 'utf8'), 'keep');
+});
+
 test('late cancellation writes neither config nor planned .gitignore changes', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-abort-'));
   t.after(() => rm(repo, { recursive: true, force: true }));

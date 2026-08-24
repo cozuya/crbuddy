@@ -635,7 +635,11 @@ async function buildMerge(
   // config so switching back to "file" later restores the last choice.
   const output =
     destination === 'terminal'
-      ? { ...(existingOutput ?? DEFAULT_OUTPUT), destination: 'terminal' as const }
+      ? usableOrDefault(
+          ui,
+          { ...(existingOutput ?? DEFAULT_OUTPUT), destination: 'terminal' as const },
+          repoRoot,
+        )
       : await pickOutputLocation(ui, existingOutput, repoRoot, enabled);
 
   if (!enabled) {
@@ -707,6 +711,7 @@ async function pickOutputLocation(
     return usableOrDefault(
       ui,
       inDirectory(where === 'root' ? '.' : '..', existing),
+      repoRoot,
     );
   }
 
@@ -724,7 +729,7 @@ async function pickOutputLocation(
     const candidate = inDirectory(storedDirectory(answer, repoRoot), existing);
 
     try {
-      assertUsableOutput(candidate, 'output');
+      assertUsableOutput(candidate, 'output', repoRoot ?? undefined);
     } catch (error) {
       ui.message(error instanceof Error ? error.message : String(error), 'error');
       continue;
@@ -752,15 +757,19 @@ async function pickOutputLocation(
  * unusable choice falls back to the defaults with a note, rather than
  * throwing out of the wizard or writing a config that will not load.
  */
-function usableOrDefault(ui: WizardUI, candidate: OutputConfig): OutputConfig {
+function usableOrDefault(
+  ui: WizardUI,
+  candidate: OutputConfig,
+  repoRoot: string | null,
+): OutputConfig {
   try {
-    assertUsableOutput(candidate, 'output');
+    assertUsableOutput(candidate, 'output', repoRoot ?? undefined);
     return candidate;
   } catch (error) {
     ui.message(error instanceof Error ? error.message : String(error), 'error');
     ui.message('Using the default filenames instead.', 'warn');
 
-    return { ...DEFAULT_OUTPUT };
+    return { ...DEFAULT_OUTPUT, destination: candidate.destination };
   }
 }
 

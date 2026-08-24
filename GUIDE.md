@@ -42,6 +42,35 @@ It's blocking on purpose - run it in a spare terminal. There's no daemon, no
 `status` command, and no resumability, because a second terminal solves that
 for free.
 
+## Supported vendor CLIs
+
+crbuddy v0.1 has adapters for exactly three CLI interfaces:
+
+| Config `vendor` | Executable | Native diff review | Generic instructed lanes and consolidation |
+|---|---|---|---|
+| `claude` | Claude Code (`claude`) | Yes - `/code-review` | Yes |
+| `codex` | Codex CLI (`codex`) | Yes - `codex exec review` | Yes |
+| `gemini` | Gemini CLI (`gemini`) | No - panel `instructions` are required | Yes |
+
+An unknown `vendor` value is refused. `vendorArgs` can pass additional flags to
+one of these CLIs, but it cannot add another CLI or a direct API provider.
+Support means crbuddy knows how to probe that executable, enforce its available
+read-only controls, invoke it headlessly, and recognize a completed response.
+Authentication, entitlement, and repository/vendor configuration remain the
+user's responsibility.
+
+Support attaches to the CLI interface, not to every model backend that can be
+routed through it. For example, [DeepSeek documents pointing Claude Code at its
+Anthropic-format endpoint](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code/),
+while [Anthropic explicitly does not support using Claude Code with non-Claude
+models through a gateway](https://code.claude.com/docs/en/llm-gateway).
+crbuddy inherits the environment and may therefore launch such a setup as
+`vendor: "claude"`, but it does not detect or verify the upstream provider, its
+model mapping, or its compatibility with `/code-review`. The report records the
+Claude Code adapter and requested CLI model string, not proof that Anthropic
+served the model. Such a routed backend is therefore unverified, not a
+separately supported `deepseek` vendor.
+
 ## Commands
 
 | | |
@@ -85,8 +114,10 @@ panel entry drops to a general-purpose agent pointed at the working tree
 rather than the vendor's own review workflow. It is broader and slower than a
 diff review, the diff size limit does not apply to it, and Gemini - which
 refuses ordinary diff review because it exposes no headless native lane - can
-take part. The report records all of this in its warnings and says
-`Reviewed the checkout at <sha>` in place of a changed-file count.
+take part. The report records all of this and says `Checkout snapshot captured
+at launch: <sha>` in place of a changed-file count. Reviewers run against the
+live working tree; the hash records launch provenance rather than an isolated
+execution tree.
 
 ## Configuration
 
@@ -211,10 +242,11 @@ not a verdict.
 
 **The target is captured; native review commands differ in target syntax.**
 crbuddy resolves the intended target and captures a git snapshot for
-provenance, but vendor-native review surfaces are not identical APIs. Some can
-consume a specific range and some expose selectors such as uncommitted changes
-or a base branch. Don't edit while a panel is running; otherwise a native
-reviewer that selects live repository state may observe a different tree.
+provenance, but reviewers run against the live working tree and vendor-native
+review surfaces are not identical APIs. Some can consume a specific range and
+some expose selectors such as uncommitted changes or a base branch. Don't edit
+while a panel is running; otherwise reviewers may observe different trees and
+the launch snapshot will no longer identify the state they saw.
 
 **Repository and vendor configuration are trusted inputs.** Running inside
 your repo means each CLI loads that repo's own `CLAUDE.md`, `AGENTS.md`,
@@ -331,6 +363,11 @@ consolidator uses a separate, unique OS-temp working directory, which is
 removed when it finishes; only a report that still needs crash recovery may
 remain.
 
+If the Git root is the home directory or one of its ancestors, that state
+location would fall inside the repository and reviewers could read it. crbuddy
+refuses such a run before creating run state. A state directory deliberately
+redirected outside the repository with a symlink remains valid.
+
 Shared output paths get their own locks, one per resolved file, in the OS temp
 directory. Two sibling repositories both writing `../CODE-REVIEW-HANDOFF.md`
 are writing one file, and a per-repository lock cannot see across that.
@@ -346,9 +383,11 @@ hidden marker keeps the run ID so a raw file can be matched to its consolidated
 companion without restoring the large metadata block.
 
 For a whole-checkout fallback, the frontmatter identifies the subject as
-`whole-checkout` and records a sealed snapshot of the live worktree. The
-original empty target is retained as `requestedKind`/`requestedSnapshot`;
-diff byte and file counts are omitted because no diff was the review subject.
+`whole-checkout` and records `launchSnapshot`, a snapshot captured immediately
+before the panel starts. Reviewers still run against the original live working
+tree, so this is launch provenance rather than filesystem isolation. The
+original empty target is retained as `requestedKind`/`requestedSnapshot`; diff
+byte and file counts are omitted because no diff was the review subject.
 
 HTML comment markers delimit reviews, clusters, and findings. **They are
 navigation aids, not a parsing boundary** - a model's verbatim output can

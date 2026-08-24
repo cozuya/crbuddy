@@ -129,6 +129,9 @@ Requirements:
   instead (`--whole-checkout` opts an unattended run in). The fallback is a
   general-purpose agent run, not a native review, and `maxDiffBytes` does not
   bound it
+- whole-checkout reviewers run against the original live working tree. The
+  snapshot captured immediately before launch is provenance, not an isolated
+  execution tree; users must not edit the repository while the panel runs
 - odd filenames handled with NUL-delimited git output
 - snapshot construction does not modify the user's index or worktree
 
@@ -150,7 +153,7 @@ Use the strongest native scoping primitive the vendor exposes:
 - if native review exposes selectors such as `--uncommitted` or `--base`, use those selectors
 - do not replace native review with a generic “review this diff” prompt merely to normalize target syntax
 
-Therefore crbuddy must not claim that every native lane is cryptographically pinned to the same snapshot. A native operation that selects live repository state may observe edits made after the run starts. Users should not edit the repository while a panel is running.
+Therefore crbuddy must not claim that every lane is cryptographically pinned to the same snapshot. A native operation that selects live repository state, or a generic whole-checkout lane running in the working tree, may observe edits made after the run starts. Users should not edit the repository while a panel is running.
 
 Generic-instruction lanes are told the canonical captured range.
 
@@ -250,6 +253,10 @@ Ctrl-C aborts the run and restores prior output. A second interrupt escalates pr
 Previous output files must not become review input or break reviewer blindness.
 
 Before reviewers start, existing output files are moved out of the review universe. On success they are replaced; on total failure they are restored. The `.crbuddy/` work area is excluded from the target.
+
+Volatile state normally lives under `~/.crbuddy/state/`. After resolving
+symlinks, crbuddy refuses a repository that contains that state root; otherwise
+the location would expose previous output and concurrent lanes to reviewers.
 
 A per-repository lock prevents two simultaneous crbuddy runs from racing output lifecycle operations.
 
