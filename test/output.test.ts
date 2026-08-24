@@ -1,11 +1,23 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 
-import { repoRelative } from '../src/config/load.js';
+import {
+  assertUsableOutput,
+  canonicalOutputPath,
+  repoRelative,
+} from '../src/config/load.js';
 import { pathKey as pathKeySync } from '../src/commands/go.js';
 
 import {
@@ -40,6 +52,10 @@ async function makeTree(): Promise<{ parent: string; repoRoot: string; workDir: 
   return { parent, repoRoot, workDir };
 }
 
+async function linkDirectory(target: string, link: string): Promise<void> {
+  await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+}
+
 test('a report above the repository root is written outside it', async () => {
   const { parent, repoRoot } = await makeTree();
 
@@ -66,6 +82,105 @@ test('an absolute report path is not joined onto the repository root', async () 
   await commitOutputs(repoRoot, [{ relative: absolute, content: 'merged' }]);
 
   assert.equal(await readFile(absolute, 'utf8'), 'merged');
+});
+
+test('a symlinked output parent is classified by its real destination', async () => {
+  const { parent, repoRoot } = await makeTree();
+  const outside = path.join(parent, 'outside');
+  const alias = path.join(repoRoot, 'out');
+  await mkdir(outside);
+  await linkDirectory(outside, alias);
+
+  assert.equal(repoRelative('out/review.md', repoRoot), null);
+  assert.equal(
+    canonicalOutputPath(repoRoot, 'out/review.md'),
+    path.join(outside, 'review.md'),
+  );
+});
+
+test('a symlink alias cannot hide a reserved output directory', async () => {
+  const { parent, repoRoot } = await makeTree();
+  const gitState = path.join(parent, '.git');
+  await mkdir(gitState);
+  await linkDirectory(gitState, path.join(repoRoot, 'apparently-safe'));
+
+  assert.throws(
+    () =>
+      assertUsableOutput(
+        { merged: 'apparently-safe/config', raw: 'review.raw.md' },
+        'output',
+        repoRoot,
+      ),
+    /must not write inside/,
+  );
+});
+
+test('output lock identity follows symlinked parent directories', async () => {
+  const { parent } = await makeTree();
+  const firstRepo = path.join(parent, 'first-repo');
+  const secondRepo = path.join(parent, 'second-repo');
+  const shared = path.join(parent, 'shared-output');
+  await mkdir(firstRepo);
+  await mkdir(secondRepo);
+  await mkdir(shared);
+  await linkDirectory(shared, path.join(firstRepo, 'out'));
+  await linkDirectory(shared, path.join(secondRepo, 'elsewhere'));
+
+  assert.equal(
+    pathKeySync(path.join(firstRepo, 'out', 'review.md')),
+    pathKeySync(path.join(secondRepo, 'elsewhere', 'review.md')),
+  );
+});
+
+test('output commit refuses a parent redirected after preflight', async () => {
+  const { parent, repoRoot } = await makeTree();
+  const outputDir = path.join(repoRoot, 'reports');
+  const outside = path.join(parent, 'outside-after-preflight');
+  await mkdir(outputDir);
+  await mkdir(outside);
+
+  const approved = canonicalOutputPath(repoRoot, 'reports/review.md');
+
+  await rm(outputDir, { recursive: true });
+  await linkDirectory(outside, outputDir);
+
+  await assert.rejects(
+    commitOutputs(
+      repoRoot,
+      [{ relative: approved, content: 'new report' }],
+      { allowedPaths: [approved] },
+    ),
+    /changed after preflight/,
+  );
+  assert.ok(!existsSync(path.join(outside, 'review.md')));
+});
+
+test('restore keeps its only copy when a parent is redirected mid-review', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const outputDir = path.join(repoRoot, 'reports');
+  const report = path.join(outputDir, 'review.md');
+  const outside = path.join(parent, 'outside-before-restore');
+  await mkdir(outputDir);
+  await mkdir(outside);
+  await writeFile(report, 'previous report', 'utf8');
+
+  const approved = canonicalOutputPath(repoRoot, 'reports/review.md');
+  const stashed = await stashExistingOutputs(
+    repoRoot,
+    workDir,
+    [approved],
+    'symlink-swap',
+    { allowedPaths: [approved] },
+  );
+
+  await rm(outputDir, { recursive: true });
+  await linkDirectory(outside, outputDir);
+
+  const stranded = await stashed.restore();
+
+  assert.equal(stranded.length, 1);
+  assert.equal(await readFile(stranded[0]!, 'utf8'), 'previous report');
+  assert.ok(!existsSync(path.join(outside, 'review.md')));
 });
 
 test('an out-of-repo report is stashed and restored on failure', async () => {

@@ -70,8 +70,8 @@ Named fields only. Model and effort identifiers are vendor-native strings.
   },
   "target": "uncommitted",
   "refuseIfOutputExists": false,
-  "timeoutMs": 1800000,
-  "mergeTimeoutMs": 600000,
+  "timeoutMs": 3600000,
+  "mergeTimeoutMs": 3600000,
   "maxConcurrent": 0,
   "maxDiffBytes": 2000000,
   "merge": {

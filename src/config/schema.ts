@@ -92,8 +92,8 @@ export const DEFAULTS = {
   configVersion: CONFIG_VERSION,
   target: 'uncommitted' as Target,
   refuseIfOutputExists: false,
-  timeoutMs: 30 * 60 * 1000,
-  mergeTimeoutMs: 10 * 60 * 1000,
+  timeoutMs: 60 * 60 * 1000,
+  mergeTimeoutMs: 60 * 60 * 1000,
   maxConcurrent: 0,
   maxDiffBytes: 2_000_000,
 };

@@ -6,8 +6,8 @@
   },
   "target": "uncommitted",
   "refuseIfOutputExists": false,
-  "timeoutMs": 900000,
-  "mergeTimeoutMs": 600000,
+  "timeoutMs": 3600000,
+  "mergeTimeoutMs": 3600000,
   "maxConcurrent": 0,
   "maxDiffBytes": 2000000,
   "merge": {

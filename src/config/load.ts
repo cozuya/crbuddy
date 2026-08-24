@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -43,8 +43,11 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
   const projectPath = projectConfigPath(repoRoot);
 
   if (existsSync(projectPath)) {
+    const config = await readAndValidate(projectPath);
+    assertUsableOutput(config.output, `${projectPath}.output`, repoRoot);
+
     return {
-      config: await readAndValidate(projectPath),
+      config,
       source: projectPath,
       scope: 'project',
     };
@@ -53,8 +56,11 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
   const globalPath = homeConfigPath();
 
   if (existsSync(globalPath)) {
+    const config = await readAndValidate(globalPath);
+    assertUsableOutput(config.output, `${globalPath}.output`, repoRoot);
+
     return {
-      config: await readAndValidate(globalPath),
+      config,
       source: globalPath,
       scope: 'global',
     };
@@ -329,7 +335,12 @@ export function repoRelative(entry: string, repoRoot: string): string | null {
   const directory = entry.endsWith('/') || entry.endsWith('\\');
   const trimmed = directory ? entry.slice(0, -1) : entry;
 
-  const relative = path.relative(repoRoot, path.resolve(repoRoot, trimmed));
+  const canonicalRoot = canonicalizeExistingAncestors(path.resolve(repoRoot));
+  const absolute = path.resolve(repoRoot, trimmed);
+  const canonical = directory
+    ? canonicalizeExistingAncestors(absolute)
+    : canonicalOutputPath(repoRoot, trimmed);
+  const relative = path.relative(canonicalRoot, canonical);
 
   // Segment-wise: a file legitimately named `..config` is not an escape.
   const segments = relative.split(/[\\/]/);
@@ -346,6 +357,7 @@ export function repoRelative(entry: string, repoRoot: string): string | null {
 export function assertUsableOutput(
   output: { merged: string; raw: string },
   where: string,
+  repoRoot?: string,
 ): void {
   const normalizedPaths: string[] = [];
 
@@ -355,7 +367,10 @@ export function assertUsableOutput(
   ] as const) {
     // Normalize before every check: `a/../../b` and `./.git/config` both
     // slip past naive prefix tests.
-    const normalized = path.normalize(candidate).replace(/\\/g, '/');
+    const concrete = repoRoot
+      ? canonicalOutputPath(repoRoot, candidate)
+      : candidate;
+    const normalized = path.normalize(concrete).replace(/\\/g, '/');
 
     // Segment-wise, not prefix-wise: now that a path may start outside the
     // repository, `../.git/HEAD` is the same hazard as `.git/HEAD` and a
@@ -389,6 +404,80 @@ export function assertUsableOutput(
     throw new ConfigError(
       `${where}.merged and ${where}.raw resolve to the same file.`,
     );
+  }
+}
+
+/**
+ * Resolve an output destination through every existing PARENT directory.
+ *
+ * The final path component is deliberately not dereferenced. Stashing and
+ * committing use rename(2)-style operations, which move or replace a final
+ * symlink directory entry rather than writing through it. Parent symlinks,
+ * however, redirect every one of those operations and must be frozen to
+ * their real destination before consent, locking, or mutation.
+ */
+export function canonicalOutputPath(repoRoot: string, entry: string): string {
+  const absolute = path.resolve(repoRoot, entry);
+  const parent = canonicalizeExistingAncestors(path.dirname(absolute));
+  return path.join(parent, path.basename(absolute));
+}
+
+export function resolveOutputPaths(
+  repoRoot: string,
+  output: { merged: string; raw: string },
+): { merged: string; raw: string } {
+  return {
+    merged: canonicalOutputPath(repoRoot, output.merged),
+    raw: canonicalOutputPath(repoRoot, output.raw),
+  };
+}
+
+/** Resolve the longest existing prefix and preserve any missing suffix. */
+function canonicalizeExistingAncestors(candidate: string): string {
+  let current = path.resolve(candidate);
+  const missing: string[] = [];
+
+  while (true) {
+    try {
+      return path.join(realpathSync.native(current), ...missing);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        throw new ConfigError(
+          `Cannot resolve output path ancestor ${current}: ${String(error)}`,
+        );
+      }
+
+      // realpath reports ENOENT for a dangling symlink even though the
+      // directory entry itself exists. Treat it as unusable rather than
+      // lexically classifying it inside the repository.
+      try {
+        if (lstatSync(current).isSymbolicLink()) {
+          throw new ConfigError(
+            `Output path contains a dangling symlink at ${current}.`,
+          );
+        }
+      } catch (lstatError) {
+        if (lstatError instanceof ConfigError) throw lstatError;
+
+        const lstatCode = (lstatError as NodeJS.ErrnoException).code;
+        if (lstatCode !== 'ENOENT' && lstatCode !== 'ENOTDIR') {
+          throw new ConfigError(
+            `Cannot inspect output path ancestor ${current}: ${String(lstatError)}`,
+          );
+        }
+      }
+
+      const parent = path.dirname(current);
+
+      if (parent === current) {
+        throw new ConfigError(`Cannot resolve output path ancestor ${candidate}.`);
+      }
+
+      missing.unshift(path.basename(current));
+      current = parent;
+    }
   }
 }
 

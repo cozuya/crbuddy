@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -56,6 +56,10 @@ function loaded(
     source: path.join(repoRoot, '.crbuddy', 'config.json'),
     scope,
   };
+}
+
+async function linkDirectory(target: string, link: string): Promise<void> {
+  await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
 }
 
 test('a contending run cannot clear the active run scratch directory', async () => {
@@ -140,6 +144,46 @@ test('external-output refusal happens before temp cleanup and recovery', async (
   assert.equal(await readFile(litter, 'utf8'), 'unfinished report');
   assert.ok(!existsSync(raw), 'stranded output must not be recovered before consent');
   assert.equal(await readFile(stored, 'utf8'), 'previous raw report');
+});
+
+test('a project output hidden behind an in-repo symlink requires external consent', async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-symlink-output-'));
+  created.push(parent);
+
+  const repoRoot = path.join(parent, 'repo');
+  const outside = path.join(parent, 'outside');
+  await mkdir(repoRoot);
+  await mkdir(outside);
+  await linkDirectory(outside, path.join(repoRoot, 'out'));
+
+  const originalTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', {
+    configurable: true,
+    value: false,
+  });
+
+  try {
+    await assert.rejects(
+      runGo({
+        repoRoot,
+        loaded: loaded(
+          repoRoot,
+          config('out/review.md', 'out/review.raw.md'),
+          'project',
+        ),
+        version: 'test',
+        force: false,
+        wholeCheckout: false,
+        strict: false,
+      }),
+      PreflightError,
+    );
+  } finally {
+    restoreProperty(process.stdin, 'isTTY', originalTty);
+  }
+
+  assert.ok(!existsSync(path.join(outside, 'review.md')));
+  assert.ok(!existsSync(path.join(outside, 'review.raw.md')));
 });
 
 test('terminal mode rejects merged and raw paths that resolve to one file', async () => {

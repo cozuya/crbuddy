@@ -2,6 +2,8 @@ import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { canonicalOutputPath } from '../config/load.js';
+
 /**
  * Output handling (DESIGN.md §6).
  *
@@ -60,6 +62,8 @@ export interface StashedOutputs {
 interface StashOperations {
   moveFile?: (from: string, to: string) => Promise<void>;
   writeManifest?: (file: string, content: string) => Promise<void>;
+  /** Canonical destinations approved before any output mutation. */
+  allowedPaths?: string[];
 }
 
 export async function stashExistingOutputs(
@@ -77,11 +81,19 @@ export async function stashExistingOutputs(
   const holding = path.join(previous, runId);
   await mkdir(previous, { recursive: true });
   await mkdir(holding);
+  const allowed = operations.allowedPaths
+    ? new Set(operations.allowedPaths.map((entry) => path.resolve(repoRoot, entry)))
+    : null;
 
   const planned: Array<{ from: string; to: string; relative: string }> = [];
 
   for (const [index, relative] of relativePaths.entries()) {
-    const from = path.resolve(repoRoot, relative);
+    const from = canonicalOutputPath(repoRoot, relative);
+
+    if (allowed && !allowed.has(from)) {
+      await rm(holding, { recursive: true, force: true }).catch(() => {});
+      throw new Error(`Output path changed after preflight: ${relative}`);
+    }
 
     if (!existsSync(from)) continue;
 
@@ -157,6 +169,13 @@ export async function stashExistingOutputs(
 
       for (const entry of pending) {
         try {
+          // A review can run for an hour. If a parent directory was replaced
+          // by a symlink during that time, do not restore through its new
+          // destination; keep the only copy in the holding directory.
+          if (canonicalOutputPath(repoRoot, entry.from) !== entry.from) {
+            throw new Error('output path changed while reviewers were running');
+          }
+
           await mkdir(path.dirname(entry.from), { recursive: true });
           await move(entry.to, entry.from);
         } catch {
@@ -197,11 +216,20 @@ export async function stashExistingOutputs(
 export async function commitOutputs(
   repoRoot: string,
   files: Array<{ relative: string; content: string }>,
+  options: { allowedPaths?: string[] } = {},
 ): Promise<string[]> {
   const staged: Array<{ temp: string; final: string }> = [];
+  const allowed = options.allowedPaths
+    ? new Set(options.allowedPaths.map((entry) => path.resolve(repoRoot, entry)))
+    : null;
 
   for (const file of files) {
-    const final = path.resolve(repoRoot, file.relative);
+    const final = canonicalOutputPath(repoRoot, file.relative);
+
+    if (allowed && !allowed.has(final)) {
+      throw new Error(`Output path changed after preflight: ${file.relative}`);
+    }
+
     const temp = `${final}.crbuddy-tmp-${process.pid}`;
 
     await mkdir(path.dirname(final), { recursive: true });
@@ -290,7 +318,7 @@ export async function recoverStrandedOutputs(
           throw new Error('invalid recovery entry');
         }
 
-        const destination = path.resolve(repoRoot, relative);
+        const destination = canonicalOutputPath(repoRoot, relative);
 
         // Repository-local state is legacy and can arrive in a clone. Its
         // manifest is therefore untrusted: validate the ENTIRE batch against
@@ -330,8 +358,9 @@ export async function recoverStrandedOutputs(
 /** Sweep temp litter left by a crashed run. */
 export async function cleanupTemps(repoRoot: string, relativePaths: string[]): Promise<void> {
   for (const relative of relativePaths) {
-    const dir = path.dirname(path.resolve(repoRoot, relative));
-    const base = path.basename(relative);
+    const destination = canonicalOutputPath(repoRoot, relative);
+    const dir = path.dirname(destination);
+    const base = path.basename(destination);
 
     try {
       const entries = await readdir(dir);

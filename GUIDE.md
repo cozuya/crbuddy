@@ -136,7 +136,8 @@ ambiguous and makes "which panel actually ran?" hard to answer.
 ```
 
 Other keys, all optional: `refuseIfOutputExists` (default `false`),
-`timeoutMs`, `mergeTimeoutMs`, `maxConcurrent` (`0` = unlimited),
+`timeoutMs` and `mergeTimeoutMs` (both default to one hour),
+`maxConcurrent` (`0` = unlimited),
 `maxDiffBytes`.
 
 Unknown keys are a hard error. A typo that silently does nothing is worse

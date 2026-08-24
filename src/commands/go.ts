@@ -5,8 +5,15 @@ import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
-import { Config, HOME_CONFIG_DIR, PanelEntry, WORK_DIR } from '../config/schema.js';
-import { ConfigError, LoadedConfig, repoRelative } from '../config/load.js';
+import { HOME_CONFIG_DIR, PanelEntry, WORK_DIR } from '../config/schema.js';
+import {
+  assertUsableOutput,
+  canonicalOutputPath,
+  ConfigError,
+  LoadedConfig,
+  repoRelative,
+  resolveOutputPaths,
+} from '../config/load.js';
 import {
   captureCheckoutSnapshot,
   ResolvedTarget,
@@ -151,12 +158,19 @@ export async function runGo(options: GoOptions): Promise<number> {
   process.on('SIGTERM', onInterrupt);
 
   try {
+    // Freeze the real destinations before making any safety decision. Every
+    // later output operation receives these same canonical absolute paths,
+    // so a parent-directory symlink cannot be "inside" for consent but
+    // somewhere else for locking or writes.
+    assertUsableOutput(config.output, 'output', repoRoot);
+    const outputPaths = resolveOutputPaths(repoRoot, config.output);
+
     // The config validator can only compare the two paths as written, and
     // `same.md` and `<repo>/same.md` are the same file spelled two ways.
     // Terminal mode also stashes both paths for reviewer blindness, so this
     // is an invalid configuration regardless of the final destination.
-    const mergedOutput = path.resolve(repoRoot, config.output.merged);
-    const rawOutput = path.resolve(repoRoot, config.output.raw);
+    const mergedOutput = outputPaths.merged;
+    const rawOutput = outputPaths.raw;
 
     if (pathKey(mergedOutput) === pathKey(rawOutput)) {
       throw new ConfigError(
@@ -170,8 +184,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     // A project-local config is a file that ships with a repository, so a
     // repository you merely cloned can choose where crbuddy writes. Obtain
     // consent before cleanup or crash recovery touches any such path.
-    const external = [config.output.merged, config.output.raw]
-      .map((relative) => path.resolve(repoRoot, relative))
+    const external = [outputPaths.merged, outputPaths.raw]
       .filter((absolute) => repoRelative(absolute, repoRoot) === null);
 
     if (loaded.scope === 'project' && external.length > 0) {
@@ -209,7 +222,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     // Hold the destination locks while checking whether existing files may
     // be replaced. Otherwise another repository sharing an output path can
     // change that answer between confirmation and commit.
-    outputLocks = await acquireOutputLocks(repoRoot, config);
+    outputLocks = await acquireOutputLocks(outputPaths);
 
     // Recover anything a crashed run left in a holding directory before
     // deciding whether an existing report may be replaced. Otherwise the
@@ -217,9 +230,11 @@ export async function runGo(options: GoOptions): Promise<number> {
     // and this run overwrites it without the configured confirmation.
     // External project-config paths have already passed their separate gate.
     const recovered = [
-      ...(await recoverStrandedOutputs(repoRoot, stateDir)),
+      ...(await recoverStrandedOutputs(repoRoot, stateDir, {
+        allowedPaths: [outputPaths.merged, outputPaths.raw],
+      })),
       ...(await recoverStrandedOutputs(repoRoot, workDir, {
-        allowedPaths: [config.output.merged, config.output.raw],
+        allowedPaths: [outputPaths.merged, outputPaths.raw],
       })),
     ];
 
@@ -231,8 +246,8 @@ export async function runGo(options: GoOptions): Promise<number> {
 
     // Nothing is replaced when the report only ever reaches the terminal.
     if (config.refuseIfOutputExists && config.output.destination === 'file') {
-      const existing = [config.output.merged, config.output.raw].filter((relative) =>
-        existsSync(path.resolve(repoRoot, relative)),
+      const existing = [outputPaths.merged, outputPaths.raw].filter((absolute) =>
+        existsSync(absolute),
       );
 
       if (existing.length > 0) {
@@ -255,7 +270,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     await rm(scratch, { recursive: true, force: true });
     await mkdir(scratch, { recursive: true });
 
-    await cleanupTemps(repoRoot, [config.output.merged, config.output.raw]);
+    await cleanupTemps(repoRoot, [outputPaths.merged, outputPaths.raw]);
 
     // --- preflight -------------------------------------------------------
 
@@ -324,7 +339,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       // worktree, and an absolute path that DOES resolve inside still has
       // to be handed over repo-relative or it is silently not excluded -
       // which would feed the last run's report back into this one.
-      exclude: [config.output.merged, config.output.raw, `${WORK_DIR}/`]
+      exclude: [outputPaths.merged, outputPaths.raw, `${WORK_DIR}/`]
         .map((entry) => repoRelative(entry, repoRoot))
         .filter((entry): entry is string => entry !== null),
     };
@@ -395,8 +410,9 @@ export async function runGo(options: GoOptions): Promise<number> {
     stashed = await stashExistingOutputs(
       repoRoot,
       stateDir,
-      [config.output.merged, config.output.raw],
+      [outputPaths.merged, outputPaths.raw],
       runId,
+      { allowedPaths: [outputPaths.merged, outputPaths.raw] },
     );
 
     // --- panel -----------------------------------------------------------
@@ -458,7 +474,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     const succeeded = records.filter((record) => record.ok);
     const rawPath =
       config.output.destination === 'file'
-        ? reportRelativePath(repoRoot, config.output.merged, config.output.raw)
+        ? reportRelativePath(repoRoot, outputPaths.merged, outputPaths.raw)
         : null;
 
     const context: ReportContext = {
@@ -580,12 +596,14 @@ export async function runGo(options: GoOptions): Promise<number> {
       const files =
         context.mergeState === 'ok'
           ? [
-              { relative: config.output.raw, content: renderRaw(context) },
-              { relative: config.output.merged, content: deliverable },
+              { relative: outputPaths.raw, content: renderRaw(context) },
+              { relative: outputPaths.merged, content: deliverable },
             ]
-          : [{ relative: config.output.merged, content: deliverable }];
+          : [{ relative: outputPaths.merged, content: deliverable }];
 
-      await commitOutputs(repoRoot, files);
+      await commitOutputs(repoRoot, files, {
+        allowedPaths: [outputPaths.merged, outputPaths.raw],
+      });
       await stashed.discard();
       stashed = null;
 
@@ -969,7 +987,9 @@ function reportStranded(stranded: string[]): void {
 const CASE_INSENSITIVE = process.platform === 'win32' || process.platform === 'darwin';
 
 export function pathKey(file: string): string {
-  const normalized = file.replace(/\\/g, '/');
+  const absolute = path.resolve(file);
+  const canonical = canonicalOutputPath(path.parse(absolute).root, absolute);
+  const normalized = canonical.replace(/\\/g, '/');
 
   return CASE_INSENSITIVE ? normalized.toLowerCase() : normalized;
 }
@@ -1077,12 +1097,9 @@ function filesystemFoldsCase(canonical: string): boolean {
  * means dropping a lock file into someone's home or parent directory.
  */
 async function acquireOutputLocks(
-  repoRoot: string,
-  config: Config,
+  output: { merged: string; raw: string },
 ): Promise<Lock[]> {
-  const files = [config.output.merged, config.output.raw].map((relative) =>
-    path.resolve(repoRoot, relative),
-  );
+  const files = [output.merged, output.raw];
 
   // Keyed by the same string that decides identity, so two spellings can
   // never collapse to one key while still counting as two locks to take.
