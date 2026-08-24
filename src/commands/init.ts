@@ -86,7 +86,7 @@ async function wizard(
       : await ui.select<'global' | 'project'>(
           'Where should this config live? Local overrides global.',
           scopeChoices,
-          0,
+          options.repoRoot ? 1 : 0,
         ));
 
   const effectiveScope = effectiveInitScope(scope, options.repoRoot);

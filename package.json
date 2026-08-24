@@ -4,7 +4,7 @@
   "description": "Fan one code review out across several vendor coding agents in parallel, then consolidate.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cozuya/crbuddy.git"
+    "url": "git+https://github.com/cozuya/crbuddy.git"
   },
   "homepage": "https://github.com/cozuya/crbuddy#readme",
   "bugs": {
@@ -13,8 +13,8 @@
   "author": "Chris Ozols <chris.v.ozols@gmail.com>",
   "type": "module",
   "bin": {
-    "crbuddy": "./dist/index.js",
-    "crb": "./dist/index.js"
+    "crbuddy": "dist/index.js",
+    "crb": "dist/index.js"
   },
   "files": [
     "dist",
@@ -28,7 +28,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "prepare": "npm run build",
-    "test": "npm run build:test && node --test \"dist-test/test/*.test.js\"",
+    "test": "npm run build:test && node scripts/test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:test": "tsc -p tsconfig.test.json",
     "prepublishOnly": "npm test && npm run typecheck"

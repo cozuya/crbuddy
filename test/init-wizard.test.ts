@@ -32,6 +32,19 @@ test('project scope without a repository normalizes to global', () => {
   assert.equal(effectiveInitScope('global', null), 'global');
 });
 
+test('init defaults to the repository config when a repository is available', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-local-default-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+
+  const code = await runInit(
+    { repoRoot: repo },
+    { ui: new DefaultingUI(), detect: async () => [detection] },
+  );
+
+  assert.equal(code, 0);
+  assert.equal(existsSync(path.join(repo, '.crbuddy', 'config.json')), true);
+});
+
 test('equivalent wizard answers produce the unchanged config schema', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-init-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
