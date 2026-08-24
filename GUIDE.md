@@ -61,8 +61,9 @@ The optional positional argument to `go` overrides the review instructions on
 crbuddy go "focus only on error handling and resource cleanup"
 ```
 
-Flags: `--force` runs despite an oversized diff and opts an unattended run
-into the whole-checkout fallback below, `--strict` exits 2 on partial success.
+Flags: `--force` runs despite an oversized diff, `--whole-checkout` opts an
+unattended run into the whole-checkout fallback below, and `--strict` exits 2
+on partial success.
 
 ### When there is no diff
 
@@ -74,7 +75,9 @@ That only happens when a terminal is attached. The warning is the safeguard,
 and an unattended caller has nobody to read it: a hook or CI job on a clean
 tree would otherwise spend one full agent run per panel entry with no diff
 size limit bounding any of them. Without a terminal, `go` prints the reason
-and exits 1, as it always did. Pass `--force` to ask for the fallback anyway.
+and exits 1, as it always did. Pass `--whole-checkout` to ask for the fallback
+anyway. `--force` only waives `maxDiffBytes`; it does not opt into this broader
+run.
 
 That is a materially different run, so it is worth recognizing in the output.
 No vendor CLI has a native review mode for "the entire repository", so every

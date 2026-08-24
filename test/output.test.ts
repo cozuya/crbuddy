@@ -238,6 +238,24 @@ test('a clean restore still reports nothing stranded', async () => {
   assert.equal(await readFile(report, 'utf8'), 'previous run');
 });
 
+test('restoring twice does not invent a stranded holding path', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
+
+  await writeFile(report, 'previous run', 'utf8');
+
+  const stashed = await stashExistingOutputs(
+    repoRoot,
+    workDir,
+    ['../CODE-REVIEW-HANDOFF.md'],
+    'runid',
+  );
+
+  assert.deepEqual(await stashed.restore(), []);
+  assert.deepEqual(await stashed.restore(), []);
+  assert.equal(await readFile(report, 'utf8'), 'previous run');
+});
+
 test('two spellings of one path never become two colliding lock keys', async () => {
   // Folding unconditionally made `Review.md` and `review.md` two entries
   // with ONE key on Linux: the second acquisition found the first lock

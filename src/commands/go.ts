@@ -90,6 +90,7 @@ export interface GoOptions {
   /** Positional argument: overrides `instructions` on EVERY panel entry. */
   instructionsOverride?: string;
   force: boolean;
+  wholeCheckout: boolean;
   strict: boolean;
 }
 
@@ -110,50 +111,14 @@ export async function runGo(options: GoOptions): Promise<number> {
   // crashed run's only copy of the previous report lives here until the next
   // run recovers it, and temp is not somewhere to keep the only copy.
   const stateDir = repoStateDir(repoRoot);
-
   const scratch = path.join(stateDir, 'scratch');
-  await mkdir(scratch, { recursive: true });
-
-  // The consolidator's contract is that it sees findings and nothing else,
-  // and `scratch` is where every lane spools `<id>.stdout`. Launching the
-  // merge with that as its cwd hands a general-purpose agent the verbatim
-  // reviews it is supposed to be working from summaries of.
   const mergeDir = path.join(stateDir, 'merge');
-  await rm(mergeDir, { recursive: true, force: true }).catch(() => {});
-  await mkdir(mergeDir, { recursive: true });
 
-  // Lock first. Cleanup touches `*.crbuddy-tmp-*` files, and doing that
-  // before the lock lets a second invocation delete a live run's staged
-  // output on its way to failing the lock check.
+  // No volatile shared state is touched until this succeeds. In particular,
+  // a second invocation must not clear the active run's merge cwd on its way
+  // to reporting lock contention.
   const lock = await acquireLock(workDir);
-
-  // Inside its own try from here on: a contended output lock throws, and
-  // letting that escape before the main try would strand `<repo>/.crbuddy/
-  // lock/` for the stale-pid check to clean up later.
   let outputLocks: Lock[] = [];
-
-  try {
-    outputLocks = await acquireOutputLocks(repoRoot, config);
-  } catch (error) {
-    await lock.release();
-    throw error;
-  }
-
-  await cleanupTemps(repoRoot, [config.output.merged, config.output.raw]);
-
-  // Recover anything a crashed run left in a holding directory before this
-  // run stashes outputs of its own.
-  //  ... and from where a pre-relocation crash would have left them.
-  const recovered = [
-    ...(await recoverStrandedOutputs(repoRoot, stateDir)),
-    ...(await recoverStrandedOutputs(repoRoot, workDir)),
-  ];
-
-  if (recovered.length > 0) {
-    progress.dim(
-      `Recovered ${recovered.join(', ')} left behind by an interrupted run.`,
-    );
-  }
 
   let stashed: Awaited<ReturnType<typeof stashExistingOutputs>> | null = null;
   let interrupted = false;
@@ -171,10 +136,113 @@ export async function runGo(options: GoOptions): Promise<number> {
     killAll('SIGTERM');
   };
 
+  const restorePreviousOutput = async (): Promise<void> => {
+    const pending = stashed;
+    stashed = null;
+
+    if (pending) reportStranded(await pending.restore());
+  };
+
   process.on('SIGINT', onInterrupt);
   process.on('SIGTERM', onInterrupt);
 
   try {
+    // A project-local config is a file that ships with a repository, so a
+    // repository you merely cloned can choose where crbuddy writes. Obtain
+    // consent before cleanup or crash recovery touches any such path.
+    const external = [config.output.merged, config.output.raw]
+      .map((relative) => path.resolve(repoRoot, relative))
+      .filter((absolute) => repoRelative(absolute, repoRoot) === null);
+
+    if (loaded.scope === 'project' && external.length > 0) {
+      progress.line('This repository’s own config writes outside the repository:');
+
+      for (const file of [...new Set(external)]) progress.line(`  ${file}`);
+
+      progress.dim(
+        '  crbuddy did not choose these paths - the config in this repository did. ' +
+          'An existing file there is moved aside and replaced by the report.',
+      );
+
+      if (!process.stdin.isTTY) {
+        throw new PreflightError(
+          'Refusing to write outside the repository from a project-local ' +
+            'config without confirmation. Move that output setting into your ' +
+            'global config (`crbuddy init --global`), or run this ' +
+            'interactively once to confirm.',
+        );
+      }
+
+      if (!(await confirm('Continue?'))) {
+        progress.line('Aborted.');
+        return EXIT_TOTAL_FAILURE;
+      }
+    }
+
+    // The config validator can only compare the two paths as written, and
+    // `same.md` and `<repo>/same.md` are the same file spelled two ways.
+    if (config.output.destination === 'file') {
+      const merged = path.resolve(repoRoot, config.output.merged);
+      const raw = path.resolve(repoRoot, config.output.raw);
+
+      if (merged === raw) {
+        throw new ConfigError(
+          `output.merged and output.raw resolve to the same file:\n` +
+            `  ${merged}\n` +
+            `They are spelled differently in the config, but they are one ` +
+            `path. Point them at different files.`,
+        );
+      }
+    }
+
+    // Hold the destination locks while checking whether existing files may
+    // be replaced. Otherwise another repository sharing an output path can
+    // change that answer between confirmation and commit.
+    outputLocks = await acquireOutputLocks(repoRoot, config);
+
+    // Nothing is replaced when the report only ever reaches the terminal.
+    if (config.refuseIfOutputExists && config.output.destination === 'file') {
+      const existing = [config.output.merged, config.output.raw].filter((relative) =>
+        existsSync(path.resolve(repoRoot, relative)),
+      );
+
+      if (existing.length > 0) {
+        const ok = await confirm(
+          `These files already exist and will be replaced:\n` +
+            existing.map((file) => `  ${file}`).join('\n') +
+            `\nContinue?`,
+        );
+
+        if (!ok) {
+          progress.line('Aborted.');
+          return EXIT_TOTAL_FAILURE;
+        }
+      }
+    }
+
+    // The consolidator's contract is that it sees findings and nothing else,
+    // and `scratch` is where every lane spools `<id>.stdout`. Launching the
+    // merge with that as its cwd hands a general-purpose agent the verbatim
+    // reviews it is supposed to be working from summaries of.
+    await mkdir(scratch, { recursive: true });
+    await rm(mergeDir, { recursive: true, force: true }).catch(() => {});
+    await mkdir(mergeDir, { recursive: true });
+
+    await cleanupTemps(repoRoot, [config.output.merged, config.output.raw]);
+
+    // Recover anything a crashed run left in a holding directory before this
+    // run stashes outputs of its own, including the pre-relocation location.
+    const recovered = [
+      ...(await recoverStrandedOutputs(repoRoot, stateDir)),
+      ...(await recoverStrandedOutputs(repoRoot, workDir)),
+    ];
+
+    if (recovered.length > 0) {
+      progress.dim(
+        `Recovered ${recovered.join(', ')} left behind by an interrupted run.`,
+      );
+    }
+
     // --- preflight -------------------------------------------------------
 
     const adapters = new Map<string, Adapter>();
@@ -224,80 +292,6 @@ export async function runGo(options: GoOptions): Promise<number> {
       supports.set(name, await flagProbe(adapter, scratch));
     }
 
-    // A project-local config is a file that ships with a repository, so a
-    // repository you merely cloned can choose where crbuddy writes. Combined
-    // with out-of-repo output paths that means naming `~/.bashrc`: file mode
-    // moves the target aside, replaces it with the report, and discards the
-    // original - and `refuseIfOutputExists` is false by default. A global
-    // config is one the user wrote themselves, so it needs no gate.
-    const external = [config.output.merged, config.output.raw]
-      .map((relative) => path.resolve(repoRoot, relative))
-      .filter((absolute) => repoRelative(absolute, repoRoot) === null);
-
-    if (loaded.scope === 'project' && external.length > 0) {
-      progress.line('This repository’s own config writes outside the repository:');
-
-      for (const file of [...new Set(external)]) progress.line(`  ${file}`);
-
-      progress.dim(
-        '  crbuddy did not choose these paths - the config in this repository did. ' +
-          'An existing file there is moved aside and replaced by the report.',
-      );
-
-      if (!process.stdin.isTTY) {
-        throw new PreflightError(
-          'Refusing to write outside the repository from a project-local ' +
-            'config without confirmation. Move that output setting into your ' +
-            'global config (`crbuddy init --global`), or run this ' +
-            'interactively once to confirm.',
-        );
-      }
-
-      if (!(await confirm('Continue?'))) {
-        progress.line('Aborted.');
-        return EXIT_TOTAL_FAILURE;
-      }
-    }
-
-    // The config validator can only compare the two paths as written, and
-    // `same.md` and `<repo>/same.md` are the same file spelled two ways. It
-    // would survive to `commitOutputs`, which stages both under one temp
-    // path and fails the second rename - discarding an otherwise successful
-    // run's report.
-    if (config.output.destination === 'file') {
-      const merged = path.resolve(repoRoot, config.output.merged);
-      const raw = path.resolve(repoRoot, config.output.raw);
-
-      if (merged === raw) {
-        throw new ConfigError(
-          `output.merged and output.raw resolve to the same file:\n` +
-            `  ${merged}\n` +
-            `They are spelled differently in the config, but they are one ` +
-            `path. Point them at different files.`,
-        );
-      }
-    }
-
-    // Nothing is replaced when the report only ever reaches the terminal.
-    if (config.refuseIfOutputExists && config.output.destination === 'file') {
-      const existing = [config.output.merged, config.output.raw].filter((relative) =>
-        existsSync(path.resolve(repoRoot, relative)),
-      );
-
-      if (existing.length > 0) {
-        const ok = await confirm(
-          `These files already exist and will be replaced:\n` +
-            existing.map((file) => `  ${file}`).join('\n') +
-            `\nContinue?`,
-        );
-
-        if (!ok) {
-          progress.line('Aborted.');
-          return EXIT_TOTAL_FAILURE;
-        }
-      }
-    }
-
     // --- target ----------------------------------------------------------
 
     const runId = randomUUID().slice(0, 8);
@@ -334,14 +328,18 @@ export async function runGo(options: GoOptions): Promise<number> {
     // for rather than inferred.
     const emptyDiff = target.files.length === 0;
     const attended = Boolean(process.stdin.isTTY);
-    const wholeCheckout = emptyDiff && (attended || options.force);
+    const wholeCheckout = shouldReviewWholeCheckout(
+      emptyDiff,
+      attended,
+      options.wholeCheckout,
+    );
 
     if (emptyDiff && !wholeCheckout) {
       progress.line('Nothing to review — the target diff is empty.');
       progress.dim(
-        '  Reviewing the whole checkout instead is possible, but it is broader, ' +
+          '  Reviewing the whole checkout instead is possible, but it is broader, ' +
           'slower, and unbounded by the diff size limit, so it is not done ' +
-          'unattended. Re-run with --force to ask for it.',
+          'unattended. Re-run with --whole-checkout to ask for it.',
       );
 
       return EXIT_TOTAL_FAILURE;
@@ -418,12 +416,16 @@ export async function runGo(options: GoOptions): Promise<number> {
     progress.stopPulse();
 
     if (interrupted) {
-      reportStranded(await stashed.restore());
+      await restorePreviousOutput();
       progress.line('No output written.');
       return 130;
     }
 
     const succeeded = records.filter((record) => record.ok);
+    const rawPath =
+      config.output.destination === 'file'
+        ? reportRelativePath(repoRoot, config.output.merged, config.output.raw)
+        : null;
 
     const context: ReportContext = {
       version,
@@ -441,16 +443,15 @@ export async function runGo(options: GoOptions): Promise<number> {
       // Only a real path when one is actually written; the consolidated
       // report points at it, and pointing at a file that does not exist is
       // worse than not mentioning it.
-      // Displayed, not absolute, for the same reason as configSource: an
-       // absolute output directory would otherwise put the machine's layout
-       // into a file people paste into issues.
-      ...(config.output.destination === 'file'
-        ? { rawPath: displayPath(path.resolve(repoRoot, config.output.raw), repoRoot) }
-        : {}),
+      // Relative to the consolidated report itself, so the reference still
+      // resolves when the configured output files are outside the repository
+      // or in different directories. Omitted across filesystem roots, where
+      // no relative reference exists.
+      ...(rawPath ? { rawPath } : {}),
     };
 
     if (succeeded.length === 0) {
-      reportStranded(await stashed.restore());
+      await restorePreviousOutput();
       progress.dim('');
       progress.line('Every review failed. Previous output left in place.');
       return EXIT_TOTAL_FAILURE;
@@ -499,7 +500,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     // consolidation surfaces as a merge failure, and execution would
     // otherwise carry straight on and replace the report anyway.
     if (interrupted) {
-      reportStranded(await stashed.restore());
+      await restorePreviousOutput();
       progress.line('No output written.');
       return 130;
     }
@@ -517,8 +518,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       // Restored, not discarded: this run wrote nothing, so a report left by
       // an earlier file-mode run is still the newest copy on disk and was
       // only moved aside to keep it out of the reviewers' sight.
-      reportStranded(await stashed.restore());
-      stashed = null;
+      await restorePreviousOutput();
 
       progress.bell();
 
@@ -578,7 +578,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     process.off('SIGINT', onInterrupt);
     process.off('SIGTERM', onInterrupt);
 
-    if (stashed) reportStranded(await stashed.restore().catch(() => []));
+    await restorePreviousOutput().catch(() => {});
 
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
     await releaseAll(outputLocks);
@@ -587,6 +587,14 @@ export async function runGo(options: GoOptions): Promise<number> {
 }
 
 export class PreflightError extends Error {}
+
+export function shouldReviewWholeCheckout(
+  emptyDiff: boolean,
+  attended: boolean,
+  explicitlyRequested: boolean,
+): boolean {
+  return emptyDiff && (attended || explicitlyRequested);
+}
 
 async function detectVersion(adapter: Adapter, scratch: string): Promise<string | null> {
   const result = await runProcess({
@@ -932,7 +940,7 @@ function lockRoot(): string {
  * share a holding directory, and so a report stranded by a crash is found
  * again by the next run in that same checkout.
  */
-function repoStateDir(repoRoot: string): string {
+export function repoStateDir(repoRoot: string): string {
   const key = createHash('sha1').update(pathKey(repoRoot)).digest('hex').slice(0, 16);
 
   return path.join(homedir(), HOME_CONFIG_DIR, 'state', key);
@@ -1073,6 +1081,28 @@ function displayPath(file: string, repoRoot: string): string {
   }
 
   return path.basename(normalized);
+}
+
+/**
+ * A link from the consolidated report to its raw companion.
+ *
+ * Configured paths are resolved independently, so basename-only display can
+ * point nowhere when the two outputs live in different directories. A path
+ * relative to the consolidated report remains valid after both are written.
+ * Different Windows drives have no relative spelling; omit the link there.
+ */
+export function reportRelativePath(
+  repoRoot: string,
+  merged: string,
+  raw: string,
+): string | null {
+  const mergedFile = path.resolve(repoRoot, merged);
+  const rawFile = path.resolve(repoRoot, raw);
+  const relative = path.relative(path.dirname(mergedFile), rawFile);
+
+  if (relative === '' || path.isAbsolute(relative)) return null;
+
+  return relative.replace(/\\/g, '/');
 }
 
 /** First meaningful line of a CLI's error output, for the terminal. */

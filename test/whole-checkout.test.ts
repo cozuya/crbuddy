@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { test } from 'node:test';
 
 import { claudeAdapter, codexAdapter, geminiAdapter } from '../src/adapters/vendors.js';
@@ -9,8 +10,19 @@ import {
   renderMerged,
   renderRaw,
 } from '../src/output/render.js';
+import {
+  reportRelativePath,
+  shouldReviewWholeCheckout,
+} from '../src/commands/go.js';
 
 const supports = () => true;
+
+test('unattended whole-checkout review requires its dedicated opt-in', () => {
+  assert.equal(shouldReviewWholeCheckout(true, false, false), false);
+  assert.equal(shouldReviewWholeCheckout(true, false, true), true);
+  assert.equal(shouldReviewWholeCheckout(true, true, false), true);
+  assert.equal(shouldReviewWholeCheckout(false, false, true), false);
+});
 
 /**
  * What `resolveTarget` returns when nothing has changed: a real snapshot at
@@ -199,6 +211,26 @@ test('the consolidated report links to the unmerged file only when one exists', 
 
   assert.ok(!printed.includes('Unmerged reviews'), printed);
   assert.ok(!printed.includes('``'), printed);
+});
+
+test('the raw-report link resolves from the consolidated report directory', () => {
+  const repoRoot = path.resolve('repo');
+  const merged = path.resolve('outside', 'deliverable', 'review.md');
+  const raw = path.resolve('outside', 'audit', 'review.raw.md');
+
+  assert.equal(
+    reportRelativePath(repoRoot, merged, raw),
+    '../audit/review.raw.md',
+  );
+});
+
+test('the raw-report link is omitted when filesystem roots differ', {
+  skip: process.platform !== 'win32',
+}, () => {
+  assert.equal(
+    reportRelativePath('C:\\repo', 'D:\\reports\\review.md', 'E:\\audit\\raw.md'),
+    null,
+  );
 });
 
 test('custom instructions still say what the subject is', async () => {

@@ -6,6 +6,7 @@ import { ConfigError, loadConfig } from './config/load.js';
 import { GitError, findRepoRoot } from './git/target.js';
 import { LockError } from './util/lock.js';
 import { PreflightError, runGo } from './commands/go.js';
+import { parseGoArguments } from './commands/go-options.js';
 import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
 
@@ -18,10 +19,10 @@ Usage:
   crbuddy doctor               Report which vendor CLIs are usable, and why not.
 
 Options for \`go\`:
-  --force      Run even if the diff exceeds maxDiffBytes. Without a
-               terminal, also opts into the whole-checkout review
-               when the diff is empty.
-  --strict     Exit 2 when any run or the merge fails (default: exit 0).
+  --force           Run even if the diff exceeds maxDiffBytes.
+  --whole-checkout  Review the whole checkout when the target diff is empty;
+                    required when running without a terminal.
+  --strict          Exit 2 when any run or the merge fails (default: exit 0).
 
 Other:
   --help, -h   This text.
@@ -91,19 +92,14 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
-  const flags = new Set(rest.filter((arg) => arg.startsWith('--')));
-  const positional = rest.filter((arg) => !arg.startsWith('--'));
+  const go = parseGoArguments(rest);
 
-  const unknownFlags = [...flags].filter(
-    (flag) => !['--force', '--strict'].includes(flag),
-  );
-
-  if (unknownFlags.length > 0) {
-    console.error(`Unknown option(s): ${unknownFlags.join(', ')}`);
+  if (go.unknownFlags.length > 0) {
+    console.error(`Unknown option(s): ${go.unknownFlags.join(', ')}`);
     return 1;
   }
 
-  if (positional.length > 1) {
+  if (go.positional.length > 1) {
     console.error(
       'crbuddy go takes at most one positional argument (the review instructions).\n' +
         'Quote it if it contains spaces.',
@@ -117,9 +113,10 @@ async function main(argv: string[]): Promise<number> {
     repoRoot,
     loaded,
     version: await version(),
-    ...(positional[0] ? { instructionsOverride: positional[0] } : {}),
-    force: flags.has('--force'),
-    strict: flags.has('--strict'),
+    ...(go.positional[0] ? { instructionsOverride: go.positional[0] } : {}),
+    force: go.force,
+    wholeCheckout: go.wholeCheckout,
+    strict: go.strict,
   });
 }
 

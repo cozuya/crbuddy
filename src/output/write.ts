@@ -92,20 +92,29 @@ export async function stashExistingOutputs(
     'utf8',
   );
 
+  // Restore is retryable for entries that genuinely remain stranded, but a
+  // successfully restored entry is retired immediately. Calling restore a
+  // second time must not report its now-absent holding path as a new failure.
+  let pending = [...moved];
+
   return {
     moved: moved.map((entry) => entry.relative),
 
     async restore() {
       const stranded: string[] = [];
+      const stillPending: typeof pending = [];
 
-      for (const entry of moved) {
+      for (const entry of pending) {
         try {
           await mkdir(path.dirname(entry.from), { recursive: true });
           await moveFile(entry.to, entry.from);
         } catch {
           stranded.push(entry.to);
+          stillPending.push(entry);
         }
       }
+
+      pending = stillPending;
 
       // The holding directory is deleted only when everything made it back.
       // Since the state directory moved out of the repository, this is a
@@ -120,6 +129,7 @@ export async function stashExistingOutputs(
     },
 
     async discard() {
+      pending = [];
       await rm(holding, { recursive: true, force: true }).catch(() => {});
     },
   };
