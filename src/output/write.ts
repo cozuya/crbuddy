@@ -50,7 +50,8 @@ async function moveFile(from: string, to: string): Promise<void> {
 }
 
 export interface StashedOutputs {
-  restore(): Promise<void>;
+  /** Paths still sitting in the holding directory, if any move back failed. */
+  restore(): Promise<string[]>;
   discard(): Promise<void>;
   /** Paths that existed and were moved out of the way. */
   moved: string[];
@@ -95,12 +96,27 @@ export async function stashExistingOutputs(
     moved: moved.map((entry) => entry.relative),
 
     async restore() {
+      const stranded: string[] = [];
+
       for (const entry of moved) {
-        await mkdir(path.dirname(entry.from), { recursive: true });
-        await moveFile(entry.to, entry.from).catch(() => {});
+        try {
+          await mkdir(path.dirname(entry.from), { recursive: true });
+          await moveFile(entry.to, entry.from);
+        } catch {
+          stranded.push(entry.to);
+        }
       }
 
+      // The holding directory is deleted only when everything made it back.
+      // Since the state directory moved out of the repository, this is a
+      // cross-filesystem copy wherever the repo and $HOME differ, and
+      // swallowing the failure then deleting the source destroyed the only
+      // copy of the previous report while reporting success.
+      if (stranded.length > 0) return stranded;
+
       await rm(holding, { recursive: true, force: true }).catch(() => {});
+
+      return [];
     },
 
     async discard() {

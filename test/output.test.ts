@@ -6,6 +6,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 
 import { repoRelative } from '../src/config/load.js';
+import { pathKey as pathKeySync } from '../src/commands/go.js';
 
 import {
   cleanupTemps,
@@ -192,4 +193,64 @@ test('a stash across filesystems falls back to copy instead of failing', async (
   assert.ok(!existsSync(report));
   await stashed.restore();
   assert.equal(await readFile(report, 'utf8'), 'previous run');
+});
+
+test('a restore that cannot put a file back keeps the only copy', async () => {
+  // The state directory now lives outside the repo, so this is a
+  // cross-filesystem copy wherever $HOME and the repo differ. Swallowing the
+  // failure and deleting the holding directory destroyed the previous report
+  // while still reporting success.
+  const { parent, repoRoot, workDir } = await makeTree();
+  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
+
+  await writeFile(report, 'previous run', 'utf8');
+
+  const stashed = await stashExistingOutputs(
+    repoRoot,
+    workDir,
+    ['../CODE-REVIEW-HANDOFF.md'],
+    'runid',
+  );
+
+  // Block the move back: a directory cannot be replaced by a file rename.
+  await mkdir(report, { recursive: true });
+
+  const stranded = await stashed.restore();
+
+  assert.equal(stranded.length, 1, 'the failure is reported, not swallowed');
+  assert.ok(existsSync(stranded[0]!), 'the only copy still exists');
+});
+
+test('a clean restore still reports nothing stranded', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
+
+  await writeFile(report, 'previous run', 'utf8');
+
+  const stashed = await stashExistingOutputs(
+    repoRoot,
+    workDir,
+    ['../CODE-REVIEW-HANDOFF.md'],
+    'runid',
+  );
+
+  assert.deepEqual(await stashed.restore(), []);
+  assert.equal(await readFile(report, 'utf8'), 'previous run');
+});
+
+test('two spellings of one path never become two colliding lock keys', async () => {
+  // Folding unconditionally made `Review.md` and `review.md` two entries
+  // with ONE key on Linux: the second acquisition found the first lock
+  // holding this very pid and aborted as though another run were active.
+  const { pathKey } = await import('../src/commands/go.js');
+
+  const keys = new Set([pathKey('/w/Review.md'), pathKey('/w/review.md')]);
+  const insensitive = process.platform === 'win32' || process.platform === 'darwin';
+
+  // One file or two, but never two entries sharing a key.
+  assert.equal(keys.size, insensitive ? 1 : 2);
+});
+
+test('separators are normalized so one path has one identity', () => {
+  assert.equal(pathKeySync('C:\\w\\x.md'), pathKeySync('C:/w/x.md'));
 });

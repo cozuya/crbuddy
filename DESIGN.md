@@ -122,7 +122,10 @@ Requirements:
 - unresolved merge conflicts refuse the run
 - crbuddy output files and `.crbuddy/` excluded
 - linked worktrees supported by asking git for paths rather than assuming `.git/` is a directory
-- empty target refuses quickly
+- an empty target refuses quickly when unattended; with a terminal attached it
+  warns and reviews the whole checkout instead (`--force` opts an unattended
+  run in). The fallback is a general-purpose agent run, not a native review,
+  and `maxDiffBytes` does not bound it
 - odd filenames handled with NUL-delimited git output
 - snapshot construction does not modify the user's index or worktree
 

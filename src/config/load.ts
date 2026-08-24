@@ -365,8 +365,13 @@ export function assertUsableOutput(
     for (const reserved of ['.git', PROJECT_CONFIG_DIR]) {
       if (segments.includes(reserved)) {
         throw new ConfigError(
-          `${where}.${key}: must not write inside ${reserved}/. ` +
-            `crbuddy overwrites its output paths.`,
+          `${where}.${key}: must not write inside a "${reserved}" directory. ` +
+            `crbuddy moves its output paths aside and overwrites them, and ` +
+            `"${reserved}" holds git's or crbuddy's own state - including ` +
+            `crbuddy's stash of your previous report. This applies anywhere ` +
+            `in the path, not just at the repository root, because an ` +
+            `output path may now point outside the repository. Choose a ` +
+            `directory that is not named "${reserved}".`,
         );
       }
     }

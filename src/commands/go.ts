@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -114,6 +114,14 @@ export async function runGo(options: GoOptions): Promise<number> {
   const scratch = path.join(stateDir, 'scratch');
   await mkdir(scratch, { recursive: true });
 
+  // The consolidator's contract is that it sees findings and nothing else,
+  // and `scratch` is where every lane spools `<id>.stdout`. Launching the
+  // merge with that as its cwd hands a general-purpose agent the verbatim
+  // reviews it is supposed to be working from summaries of.
+  const mergeDir = path.join(stateDir, 'merge');
+  await rm(mergeDir, { recursive: true, force: true }).catch(() => {});
+  await mkdir(mergeDir, { recursive: true });
+
   // Lock first. Cleanup touches `*.crbuddy-tmp-*` files, and doing that
   // before the lock lets a second invocation delete a live run's staged
   // output on its way to failing the lock check.
@@ -135,7 +143,11 @@ export async function runGo(options: GoOptions): Promise<number> {
 
   // Recover anything a crashed run left in a holding directory before this
   // run stashes outputs of its own.
-  const recovered = await recoverStrandedOutputs(repoRoot, stateDir);
+  //  ... and from where a pre-relocation crash would have left them.
+  const recovered = [
+    ...(await recoverStrandedOutputs(repoRoot, stateDir)),
+    ...(await recoverStrandedOutputs(repoRoot, workDir)),
+  ];
 
   if (recovered.length > 0) {
     progress.dim(
@@ -210,6 +222,41 @@ export async function runGo(options: GoOptions): Promise<number> {
 
       versions.set(name, detected);
       supports.set(name, await flagProbe(adapter, scratch));
+    }
+
+    // A project-local config is a file that ships with a repository, so a
+    // repository you merely cloned can choose where crbuddy writes. Combined
+    // with out-of-repo output paths that means naming `~/.bashrc`: file mode
+    // moves the target aside, replaces it with the report, and discards the
+    // original - and `refuseIfOutputExists` is false by default. A global
+    // config is one the user wrote themselves, so it needs no gate.
+    const external = [config.output.merged, config.output.raw]
+      .map((relative) => path.resolve(repoRoot, relative))
+      .filter((absolute) => repoRelative(absolute, repoRoot) === null);
+
+    if (loaded.scope === 'project' && external.length > 0) {
+      progress.line('This repository’s own config writes outside the repository:');
+
+      for (const file of [...new Set(external)]) progress.line(`  ${file}`);
+
+      progress.dim(
+        '  crbuddy did not choose these paths - the config in this repository did. ' +
+          'An existing file there is moved aside and replaced by the report.',
+      );
+
+      if (!process.stdin.isTTY) {
+        throw new PreflightError(
+          'Refusing to write outside the repository from a project-local ' +
+            'config without confirmation. Move that output setting into your ' +
+            'global config (`crbuddy init --global`), or run this ' +
+            'interactively once to confirm.',
+        );
+      }
+
+      if (!(await confirm('Continue?'))) {
+        progress.line('Aborted.');
+        return EXIT_TOTAL_FAILURE;
+      }
     }
 
     // The config validator can only compare the two paths as written, and
@@ -371,7 +418,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     progress.stopPulse();
 
     if (interrupted) {
-      await stashed.restore();
+      reportStranded(await stashed.restore());
       progress.line('No output written.');
       return 130;
     }
@@ -403,7 +450,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     };
 
     if (succeeded.length === 0) {
-      await stashed.restore();
+      reportStranded(await stashed.restore());
       progress.dim('');
       progress.line('Every review failed. Previous output left in place.');
       return EXIT_TOTAL_FAILURE;
@@ -431,7 +478,7 @@ export async function runGo(options: GoOptions): Promise<number> {
           findings,
           target,
           repoRoot,
-          scratch,
+          scratch: mergeDir,
           timeoutMs: config.mergeTimeoutMs,
         });
 
@@ -452,7 +499,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     // consolidation surfaces as a merge failure, and execution would
     // otherwise carry straight on and replace the report anyway.
     if (interrupted) {
-      await stashed.restore();
+      reportStranded(await stashed.restore());
       progress.line('No output written.');
       return 130;
     }
@@ -461,22 +508,16 @@ export async function runGo(options: GoOptions): Promise<number> {
     // consolidation. Anything else means the filename a user points an agent
     // at sometimes does not exist — or worse, is left over from a previous
     // run while the fresh reviews sit under a different name.
-    const files =
+    const deliverable =
       context.mergeState === 'ok'
-        ? [
-            { relative: config.output.raw, content: renderRaw(context) },
-            {
-              relative: config.output.merged,
-              content: renderMerged(context, clusters, findings),
-            },
-          ]
-        : [{ relative: config.output.merged, content: renderRaw(context) }];
+        ? renderMerged(context, clusters, findings)
+        : renderRaw(context);
 
     if (config.output.destination === 'terminal') {
       // Restored, not discarded: this run wrote nothing, so a report left by
       // an earlier file-mode run is still the newest copy on disk and was
       // only moved aside to keep it out of the reviewers' sight.
-      await stashed.restore();
+      reportStranded(await stashed.restore());
       stashed = null;
 
       progress.bell();
@@ -488,10 +529,19 @@ export async function runGo(options: GoOptions): Promise<number> {
       process.off('SIGINT', onInterrupt);
       process.off('SIGTERM', onInterrupt);
 
-      // The LAST entry is the deliverable in both shapes: `files` is
-      // [raw, merged] when consolidation ran and [merged] when it did not.
-      await printReport(files[files.length - 1]!.content);
+      // Only the deliverable is rendered in this mode: the unmerged reviews
+      // are an audit trail worth keeping on disk, not worth doubling the
+      // scrollback for, so they are never built at all.
+      await printReport(deliverable);
     } else {
+      const files =
+        context.mergeState === 'ok'
+          ? [
+              { relative: config.output.raw, content: renderRaw(context) },
+              { relative: config.output.merged, content: deliverable },
+            ]
+          : [{ relative: config.output.merged, content: deliverable }];
+
       await commitOutputs(repoRoot, files);
       await stashed.discard();
       stashed = null;
@@ -528,7 +578,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     process.off('SIGINT', onInterrupt);
     process.off('SIGTERM', onInterrupt);
 
-    if (stashed) await stashed.restore().catch(() => {});
+    if (stashed) reportStranded(await stashed.restore().catch(() => []));
 
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
     await releaseAll(outputLocks);
@@ -780,9 +830,10 @@ async function runMerge(args: MergeArgs) {
   const result = await runProcess({
     command: invocation.command,
     args: invocation.args,
-    // Deliberately NOT the repository. The consolidator's contract is that
-    // it sees findings and nothing else; launching it with the repo as cwd
-    // handed a general-purpose agent the live tree and quietly broke that.
+    // Deliberately NOT the repository, and deliberately not the panel's
+    // scratch directory either. The consolidator's contract is that it sees
+    // findings and nothing else; the repo as cwd handed it the live tree,
+    // and the shared scratch dir handed it every lane's verbatim stdout.
     cwd: args.scratch,
     stdin: invocation.stdin,
     env: invocation.env,
@@ -825,6 +876,56 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 /**
+ * A restore that could not put everything back is not a quiet event: the
+ * previous report is still sitting in the holding directory and nothing
+ * else will mention it.
+ */
+function reportStranded(stranded: string[]): void {
+  if (stranded.length === 0) return;
+
+  progress.line('Could not move the previous output back into place.');
+
+  for (const file of stranded) progress.line(`  it is still at ${file}`);
+}
+
+/**
+ * Whether the filesystem treats two spellings as one file.
+ *
+ * Folding unconditionally is wrong in both directions. On Linux `Review.md`
+ * and `review.md` are two files that would share one lock key - and since
+ * the second acquisition then finds the first lock holding this very pid,
+ * the run deadlocks against itself. Not folding on Windows would let two
+ * spellings of one file run unlocked.
+ */
+const CASE_INSENSITIVE = process.platform === 'win32' || process.platform === 'darwin';
+
+export function pathKey(file: string): string {
+  const normalized = file.replace(/\\/g, '/');
+
+  return CASE_INSENSITIVE ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Output locks are shared between repositories, so they cannot live in the
+ * repository - but a world-writable `/tmp/crbuddy-locks` is shared between
+ * USERS too, and the second user to run would hit EACCES on a directory
+ * owned by the first. Per-user, so that never happens.
+ */
+function lockRoot(): string {
+  let who = 'shared';
+
+  try {
+    const info = userInfo();
+    who = info.uid >= 0 ? String(info.uid) : info.username;
+  } catch {
+    // No account information available; the shared name still works for a
+    // single-user machine, which is the case that has no uid to read.
+  }
+
+  return path.join(tmpdir(), `crbuddy-locks-${who}`);
+}
+
+/**
  * Per-repository scratch and stash, outside the repository.
  *
  * Keyed by the repo's own path so two checkouts of the same project do not
@@ -832,10 +933,7 @@ async function confirm(question: string): Promise<boolean> {
  * again by the next run in that same checkout.
  */
 function repoStateDir(repoRoot: string): string {
-  const key = createHash('sha1')
-    .update(repoRoot.replace(/\\/g, '/').toLowerCase())
-    .digest('hex')
-    .slice(0, 16);
+  const key = createHash('sha1').update(pathKey(repoRoot)).digest('hex').slice(0, 16);
 
   return path.join(homedir(), HOME_CONFIG_DIR, 'state', key);
 }
@@ -866,26 +964,23 @@ async function acquireOutputLocks(
   config: Config,
 ): Promise<Lock[]> {
   const files = [config.output.merged, config.output.raw].map((relative) =>
-    path.resolve(repoRoot, relative).replace(/\\/g, '/'),
+    path.resolve(repoRoot, relative),
   );
 
-  const unique = [...new Set(files)].sort();
+  // Keyed by the same string that decides identity, so two spellings can
+  // never collapse to one key while still counting as two locks to take.
+  const byKey = new Map<string, string>();
+
+  for (const file of files) byKey.set(pathKey(file), file);
+
   const held: Lock[] = [];
 
   try {
-    for (const file of unique) {
-      // Case-insensitive on Windows and macOS. Over-locking two paths that
-      // differ only in case is harmless; under-locking them is the bug.
-      const key = createHash('sha1')
-        .update(file.toLowerCase())
-        .digest('hex')
-        .slice(0, 16);
+    for (const [identity, file] of [...byKey].sort(([a], [b]) => (a < b ? -1 : 1))) {
+      const key = createHash('sha1').update(identity).digest('hex').slice(0, 16);
 
       held.push(
-        await acquireLockAt(
-          path.join(tmpdir(), 'crbuddy-locks', key),
-          `for the output file ${file}`,
-        ),
+        await acquireLockAt(path.join(lockRoot(), key), `for the output file ${file}`),
       );
     }
   } catch (error) {
