@@ -312,10 +312,11 @@ are writing one file, and a per-repository lock cannot see across that.
 
 ## How output is structured
 
-YAML frontmatter carries provenance: the captured snapshot and base SHAs, the
-diff digest, per-run CLI versions and applied effort, failures with reasons,
-and consolidation state. A visible report block summarizes the same thing for
-a human skimming rendered markdown.
+Consolidated reports carry YAML frontmatter with the captured snapshot and
+base SHAs, diff digest, per-run CLI versions and applied effort, failures with
+reasons, and consolidation state. Unconsolidated reports omit that verbose
+block and begin with the review itself. Their visible report block still gives
+the review count, failures, warnings, target range, and file count.
 
 HTML comment markers delimit reviews, clusters, and findings. **They are
 navigation aids, not a parsing boundary** - a model's verbatim output can

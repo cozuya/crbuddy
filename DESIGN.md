@@ -68,7 +68,7 @@ Named fields only. Model and effort identifiers are vendor-native strings.
   },
   "target": "uncommitted",
   "refuseIfOutputExists": false,
-  "timeoutMs": 900000,
+  "timeoutMs": 1800000,
   "mergeTimeoutMs": 600000,
   "maxConcurrent": 0,
   "maxDiffBytes": 2000000,
@@ -310,7 +310,7 @@ Clusters are ordered by the number of distinct successful review lanes represent
 
 Both merged and raw output are rendered from structured in-memory data. Markdown is never parsed back into internal state.
 
-Frontmatter records at least:
+Consolidated output has YAML frontmatter recording at least:
 
 - crbuddy version and run ID
 - generated timestamp
@@ -319,6 +319,10 @@ Frontmatter records at least:
 - lane failures
 - per-lane CLI version, model, applied effort, and wall-clock time
 - consolidation state and failure reason when applicable
+
+Unconsolidated output omits the verbose frontmatter. Its visible report block
+retains the review count, failures, warnings, target range, and file count; the
+per-review markers retain vendor, model, and stable lane IDs.
 
 HTML comments delimit human-navigation sections, but they are not parser boundaries because verbatim model output can contain the same strings.
 

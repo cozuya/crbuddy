@@ -53,10 +53,7 @@ export interface ReportContext {
 const OPEN_REPORT = '<!-- crbuddy:report -->';
 const CLOSE_REPORT = '<!-- /crbuddy:report -->';
 
-export function renderFrontmatter(
-  context: ReportContext,
-  kind: 'merged' | 'raw',
-): string {
+export function renderFrontmatter(context: ReportContext): string {
   const succeeded = context.runs.filter((run) => run.ok).length;
   const failed = context.runs.length - succeeded;
 
@@ -64,7 +61,7 @@ export function renderFrontmatter(
     '---',
     'crbuddy:',
     `  version: ${context.version}`,
-    `  kind: ${kind}`,
+    '  kind: consolidated',
     `  runId: ${context.runId}`,
     `  generated: ${context.generated}`,
     `  configSource: ${yamlString(context.configSource)}`,
@@ -191,7 +188,6 @@ export function renderRaw(context: ReportContext): string {
       : '# Code review';
 
   const parts = [
-    renderFrontmatter(context, context.mergeState === 'ok' ? 'raw' : 'merged'),
     `${heading}\n`,
     renderReportBlock(context),
   ];
@@ -211,7 +207,13 @@ export function renderRaw(context: ReportContext): string {
       );
 
       if (run.diagnostics) {
-        parts.push('```', run.diagnostics.trim(), '```', '');
+        parts.push(
+          diagnosticsLabel(run),
+          '```text',
+          run.diagnostics.trim(),
+          '```',
+          '',
+        );
       }
     }
 
@@ -229,7 +231,7 @@ export function renderMerged(
   const byId = new Map(findings.map((finding) => [finding.id, finding]));
 
   const parts = [
-    renderFrontmatter(context, 'merged'),
+    renderFrontmatter(context),
     `# Code review - consolidated\n`,
     renderReportBlock(context),
     `_Findings are grouped by apparent duplication and ordered by how many ` +
@@ -310,6 +312,12 @@ export function renderMerged(
   }
 
   return parts.join('\n');
+}
+
+function diagnosticsLabel(run: RunRecord): string {
+  return run.reason === 'timeout'
+    ? 'Last stderr captured before crbuddy terminated the timed-out process:'
+    : 'Failure diagnostics:';
 }
 
 function countRuns(context: ReportContext): number {

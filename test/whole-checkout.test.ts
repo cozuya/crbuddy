@@ -129,6 +129,47 @@ test('an ordinary run still reports its range and file count', () => {
   assert.ok(!report.includes('whole checkout'), report);
 });
 
+test('unconsolidated reports omit verbose provenance frontmatter', () => {
+  const deliverable = renderRaw(context());
+  const auditTrail = renderRaw(context({ mergeState: 'ok' }));
+  const mergeFallback = renderRaw(
+    context({ mergeState: 'failed', mergeReason: 'invalid clusters' }),
+  );
+
+  assert.ok(deliverable.startsWith('# Code review\n'));
+  assert.ok(auditTrail.startsWith('# Code review - unmerged reviews\n'));
+  assert.ok(mergeFallback.startsWith('# Code review\n'));
+
+  for (const report of [deliverable, auditTrail, mergeFallback]) {
+    assert.ok(!report.startsWith('---\n'), report);
+    assert.ok(!report.includes('\ncrbuddy:\n'), report);
+    assert.match(report, /<!-- crbuddy:report -->/);
+    assert.match(report, /Reviewed `/);
+  }
+});
+
+test(
+  'timeout output is labelled as the final stderr captured before termination',
+  () => {
+    const failed: RunRecord = {
+      ...run,
+      ok: false,
+      reason: 'timeout',
+      output: '',
+      diagnostics: 'Usage: codex exec resume [OPTIONS]',
+    };
+
+    const report = renderRaw(context({ runs: [failed] }));
+
+    assert.match(report, /This run did not complete: timeout/);
+    assert.match(
+      report,
+      /Last stderr captured before crbuddy terminated the timed-out process:/,
+    );
+    assert.match(report, /```text\nUsage: codex exec resume \[OPTIONS\]\n```/);
+  },
+);
+
 test('the consolidated report links to the unmerged file only when one exists', () => {
   const clusters = [{ findingIds: ['claude-opus:1'] }];
   const findings = [
@@ -148,6 +189,9 @@ test('the consolidated report links to the unmerged file only when one exists', 
   );
 
   assert.match(onDisk, /Unmerged reviews: `CODE-REVIEW-HANDOFF\.raw\.md`/);
+  assert.match(onDisk, /^---\ncrbuddy:\n/);
+  assert.match(onDisk, /\n  kind: consolidated\n/);
+  assert.ok(!onDisk.includes('kind: merged'), onDisk);
 
   // Terminal mode writes no raw file, so the sentence has to go entirely
   // rather than render as an empty pair of backticks.
