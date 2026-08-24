@@ -17,40 +17,65 @@ const DIM = '\u001B[2m';
 const RESET = '\u001B[0m';
 const CLEAR_LINE = '\u001B[2K\r';
 
-const FRAMES = ['\u280B', '\u2819', '\u2839', '\u2838', '\u283C', '\u2834', '\u2826', '\u2827', '\u2807', '\u280F'];
+const FRAMES = [
+  '\u280B',
+  '\u2819',
+  '\u2839',
+  '\u2838',
+  '\u283C',
+  '\u2834',
+  '\u2826',
+  '\u2827',
+  '\u2807',
+  '\u280F',
+];
 const FRAME_MS = 100;
 
-class Progress {
+interface ProgressOutput {
+  readonly isTTY?: boolean;
+  readonly columns?: number;
+  write(text: string): unknown;
+}
+
+export class Progress {
   private timer: NodeJS.Timeout | null = null;
   private frame = 0;
   private statusVisible = false;
+  private statusOutput: ProgressOutput | null = null;
   private startedAt = 0;
   private active = new Set<string>();
 
-  private get tty(): boolean {
-    return Boolean(process.stderr.isTTY);
-  }
+  constructor(
+    private readonly errorOutput: ProgressOutput = process.stderr,
+    private readonly standardOutput: ProgressOutput = process.stdout,
+  ) {}
 
   /** Full brightness. Reserved for state changes worth noticing. */
   line(text: string): void {
-    this.withStatusHidden(() => process.stderr.write(`${text}\n`));
+    this.withStatusHidden(() => this.errorOutput.write(`${text}\n`));
   }
 
   /** Context: everything the user does not need to act on. */
   dim(text: string): void {
     this.withStatusHidden(() =>
-      process.stderr.write(this.tty ? `${DIM}${text}${RESET}\n` : `${text}\n`),
+      this.errorOutput.write(
+        this.errorOutput.isTTY ? `${DIM}${text}${RESET}\n` : `${text}\n`,
+      ),
     );
   }
 
-  /** Begin the live status line. No-op off a TTY. */
+  /** Begin the live status line on whichever user-facing stream is a TTY. */
   startPulse(startedAt: number): void {
     this.startedAt = startedAt;
 
-    if (!this.tty || this.timer) return;
+    if (this.timer) return;
+
+    this.statusOutput = this.terminalOutput();
+    if (!this.statusOutput) return;
 
     this.timer = setInterval(() => this.render(), FRAME_MS);
     this.timer.unref();
+    if (this.active.size > 0) this.render();
   }
 
   stopPulse(): void {
@@ -60,21 +85,24 @@ class Progress {
     }
 
     this.hideStatus();
+    this.statusOutput = null;
     this.active.clear();
   }
 
   /** Track which lanes are still running, for the status line. */
   laneStarted(name: string): void {
     this.active.add(name);
+    this.render();
   }
 
   laneFinished(name: string): void {
     this.active.delete(name);
+    this.render();
   }
 
   /** TTY only — BEL bytes in a CI log are noise. */
   bell(): void {
-    if (this.tty) process.stderr.write('\u0007');
+    this.terminalOutput()?.write('\u0007');
   }
 
   private withStatusHidden(write: () => void): void {
@@ -84,14 +112,14 @@ class Progress {
   }
 
   private hideStatus(): void {
-    if (this.statusVisible) {
-      process.stderr.write(CLEAR_LINE);
+    if (this.statusVisible && this.statusOutput) {
+      this.statusOutput.write(CLEAR_LINE);
       this.statusVisible = false;
     }
   }
 
   private render(): void {
-    if (!this.tty || !this.timer) return;
+    if (!this.statusOutput || !this.timer) return;
 
     const spinner = FRAMES[this.frame % FRAMES.length]!;
     this.frame += 1;
@@ -109,12 +137,19 @@ class Progress {
     // with a single erase and leaves debris in the scrollback.
     // Some pseudo-terminals report a nonsense width; treat anything
     // implausible as a standard 80 columns rather than truncating to noise.
-    const reported = process.stderr.columns ?? 0;
+    const reported = this.statusOutput.columns ?? 0;
     const width = reported > 30 ? reported : 80;
-    const visible = text.length > width - 1 ? `${text.slice(0, width - 2)}\u2026` : text;
+    const visible =
+      text.length > width - 1 ? `${text.slice(0, width - 2)}\u2026` : text;
 
-    process.stderr.write(`${CLEAR_LINE}${DIM}${visible}${RESET}`);
+    this.statusOutput.write(`${CLEAR_LINE}${DIM}${visible}${RESET}`);
     this.statusVisible = true;
+  }
+
+  private terminalOutput(): ProgressOutput | null {
+    if (this.errorOutput.isTTY) return this.errorOutput;
+    if (this.standardOutput.isTTY) return this.standardOutput;
+    return null;
   }
 }
 
