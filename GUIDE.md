@@ -368,9 +368,11 @@ location would fall inside the repository and reviewers could read it. crbuddy
 refuses such a run before creating run state. A state directory deliberately
 redirected outside the repository with a symlink remains valid.
 
-Shared output paths get their own locks, one per resolved file, in the OS temp
-directory. Two sibling repositories both writing `../CODE-REVIEW-HANDOFF.md`
-are writing one file, and a per-repository lock cannot see across that.
+Shared output paths get their own locks, one per resolved file, under
+`~/.crbuddy/locks`. Two sibling repositories both writing
+`../CODE-REVIEW-HANDOFF.md` are writing one file, and a per-repository lock
+cannot see across that. Keeping these locks in user-owned state avoids a
+predictable path in a shared OS temp directory.
 
 ## How output is structured
 

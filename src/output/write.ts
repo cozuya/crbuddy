@@ -1,6 +1,7 @@
-import { existsSync } from 'node:fs';
+import { constants as fsConstants, existsSync } from 'node:fs';
 import {
   copyFile,
+  link,
   lstat,
   mkdir,
   readFile,
@@ -77,6 +78,44 @@ export async function moveFile(
     await copyFile(from, to);
     await unlink(from);
   }
+}
+
+/**
+ * Put a stashed entry back only if its destination is still absent. `rename`
+ * replaces an existing file on POSIX, which is wrong after an editor or
+ * another process has recreated the report path during a long review.
+ */
+async function restoreFileNoClobber(from: string, to: string): Promise<void> {
+  const source = await lstat(from);
+
+  if (source.isSymbolicLink()) {
+    const target = await readlink(from);
+
+    // Creating the link is atomic with respect to destination existence.
+    await symlink(target, to, process.platform === 'win32' ? 'file' : undefined);
+    await unlink(from).catch(() => {});
+    return;
+  }
+
+  try {
+    // A hard link is an atomic, no-clobber move in two steps on one volume.
+    await link(from, to);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+
+    if (!['EXDEV', 'EPERM', 'ENOTSUP', 'EOPNOTSUPP'].includes(code ?? '')) {
+      throw error;
+    }
+
+    // Cross-volume and filesystems without hard links still get atomic
+    // destination exclusion, even though the copy itself is not a rename.
+    await copyFile(from, to, fsConstants.COPYFILE_EXCL);
+  }
+
+  // Once the destination exists with the complete bytes, leftover holding
+  // debris is recoverable and harmless; never undo the successful restore
+  // merely because source cleanup failed.
+  await unlink(from).catch(() => {});
 }
 
 export interface StashedOutputs {
@@ -205,7 +244,7 @@ export async function stashExistingOutputs(
           }
 
           await mkdir(path.dirname(entry.from), { recursive: true });
-          await move(entry.to, entry.from);
+          await restoreFileNoClobber(entry.to, entry.from);
         } catch {
           stranded.push(entry.to);
           stillPending.push(entry);
@@ -384,9 +423,23 @@ export async function recoverStrandedOutputs(
 }
 
 /** Sweep temp litter left by a crashed run. */
-export async function cleanupTemps(repoRoot: string, relativePaths: string[]): Promise<void> {
+export async function cleanupTemps(
+  repoRoot: string,
+  relativePaths: string[],
+  options: { allowedPaths?: string[] } = {},
+): Promise<void> {
+  const allowed = options.allowedPaths
+    ? new Set(options.allowedPaths.map((entry) => path.resolve(repoRoot, entry)))
+    : null;
+
   for (const relative of relativePaths) {
+    const expected = path.resolve(repoRoot, relative);
     const destination = canonicalOutputPath(repoRoot, relative);
+
+    if (allowed && (!allowed.has(expected) || destination !== expected)) {
+      throw new Error(`Output path changed after preflight: ${relative}`);
+    }
+
     const dir = path.dirname(destination);
     const base = path.basename(destination);
 
@@ -395,11 +448,20 @@ export async function cleanupTemps(repoRoot: string, relativePaths: string[]): P
 
       for (const entry of entries) {
         if (entry.startsWith(`${base}.crbuddy-tmp-`)) {
+          // Recheck immediately before mutation. Reading a redirected
+          // directory is harmless; deleting from it is not.
+          if (allowed && canonicalOutputPath(repoRoot, expected) !== expected) {
+            throw new Error(`Output path changed after preflight: ${relative}`);
+          }
+
           await rm(path.join(dir, entry), { force: true }).catch(() => {});
         }
       }
-    } catch {
-      // Directory may not exist yet.
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+
+      // A destination directory may legitimately not exist on the first run.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
     }
   }
 }

@@ -274,6 +274,10 @@ are rejected before any stash or commit operation.
 Before moving an existing report aside, persist a recovery manifest. A
 partial stash failure rolls completed moves back immediately; if that rollback
 also fails, the manifest remains for the next run to recover.
+Restoration is no-clobber: if another process recreates an output path while
+reviewers run, keep the previous report in its holding directory rather than
+replace the newer file. Temp-litter cleanup is likewise restricted to the
+canonical destinations approved during preflight and refuses path redirection.
 
 Panel spool files are removed before consolidation starts. The consolidator
 gets a fresh, unique working directory in the OS temp area rather than a

@@ -228,6 +228,7 @@ test('known per-vendor safety and configuration flags are rejected in split and 
   const blocked: Record<VendorName, string[]> = {
     claude: [
       '--permission-mode',
+      '--permission-prompt-tool',
       '--dangerously-skip-permissions',
       '--allow-dangerously-skip-permissions',
       '--allowedTools',

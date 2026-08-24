@@ -372,10 +372,13 @@ export function assertUsableOutput(
       : candidate;
     const normalized = path.normalize(concrete).replace(/\\/g, '/');
 
-    // Segment-wise, not prefix-wise: now that a path may start outside the
-    // repository, `../.git/HEAD` is the same hazard as `.git/HEAD` and a
-    // check anchored at the repository root would miss it.
-    const segments = normalized.split('/').filter((part) => part !== '');
+    // For a path inside the repository, inspect only the part below the Git
+    // root: a checkout may itself live beneath an unrelated ancestor named
+    // `.crbuddy`. For an external path retain the full absolute check, since
+    // `../other/.git/HEAD` is still a destructive destination.
+    const relativeToRepo = repoRoot ? repoRelative(concrete, repoRoot) : null;
+    const reservedPath = relativeToRepo ?? normalized;
+    const segments = reservedPath.split('/').filter((part) => part !== '');
 
     for (const reserved of ['.git', PROJECT_CONFIG_DIR]) {
       if (segments.includes(reserved)) {

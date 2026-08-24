@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { homedir, tmpdir, userInfo } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
@@ -307,7 +307,9 @@ export async function runGo(options: GoOptions): Promise<number> {
     await rm(scratch, { recursive: true, force: true });
     await mkdir(scratch, { recursive: true });
 
-    await cleanupTemps(repoRoot, [outputPaths.merged, outputPaths.raw]);
+    await cleanupTemps(repoRoot, [outputPaths.merged, outputPaths.raw], {
+      allowedPaths: [outputPaths.merged, outputPaths.raw],
+    });
 
     // --- preflight -------------------------------------------------------
 
@@ -1032,24 +1034,9 @@ export function pathKey(file: string): string {
   return CASE_INSENSITIVE ? normalized.toLowerCase() : normalized;
 }
 
-/**
- * Output locks are shared between repositories, so they cannot live in the
- * repository - but a world-writable `/tmp/crbuddy-locks` is shared between
- * USERS too, and the second user to run would hit EACCES on a directory
- * owned by the first. Per-user, so that never happens.
- */
+/** Output locks coordinate repositories without using a predictable /tmp path. */
 function lockRoot(): string {
-  let who = 'shared';
-
-  try {
-    const info = userInfo();
-    who = info.uid >= 0 ? String(info.uid) : info.username;
-  } catch {
-    // No account information available; the shared name still works for a
-    // single-user machine, which is the case that has no uid to read.
-  }
-
-  return path.join(tmpdir(), `crbuddy-locks-${who}`);
+  return path.join(homedir(), HOME_CONFIG_DIR, 'locks');
 }
 
 /**
@@ -1168,8 +1155,8 @@ function filesystemFoldsCase(canonical: string): boolean {
  * whether it is shared. Taken in terminal mode too - that mode writes no
  * report but still runs cleanupTemps, stash and restore over these paths.
  *
- * Kept in the OS temp directory so coordinating two repositories never
- * means dropping a lock file into someone's home or parent directory.
+ * Kept in the user's crbuddy state rather than a predictable shared-temp
+ * path that another local account could pre-create or redirect.
  */
 async function acquireOutputLocks(
   output: { merged: string; raw: string },

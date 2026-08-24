@@ -236,6 +236,30 @@ test('an out-of-repo report is stashed and restored on failure', async () => {
   assert.equal(await readFile(report, 'utf8'), 'previous run');
 });
 
+test('restore never overwrites a report recreated while reviewers run', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
+
+  await writeFile(report, 'previous run', 'utf8');
+
+  const stashed = await stashExistingOutputs(
+    repoRoot,
+    workDir,
+    ['../CODE-REVIEW-HANDOFF.md'],
+    'recreated',
+  );
+
+  await writeFile(report, 'new editor content', 'utf8');
+
+  const stranded = await stashed.restore();
+
+  assert.equal(await readFile(report, 'utf8'), 'new editor content');
+  assert.equal(stranded.length, 1);
+  assert.equal(await readFile(stranded[0]!, 'utf8'), 'previous run');
+
+  await stashed.discard();
+});
+
 test('an out-of-repo report stranded by a crash is recovered', async () => {
   const { parent, repoRoot, workDir } = await makeTree();
   const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
@@ -263,6 +287,29 @@ test('temp litter is swept from the directory the report actually lives in', asy
   await cleanupTemps(repoRoot, ['../CODE-REVIEW-HANDOFF.md']);
 
   assert.ok(!existsSync(litter));
+});
+
+test('temp cleanup refuses a parent redirected after preflight', async () => {
+  const { parent, repoRoot } = await makeTree();
+  const outputDir = path.join(repoRoot, 'reports');
+  const outside = path.join(parent, 'outside-before-cleanup');
+  const configured = path.join(outputDir, 'review.md');
+  await mkdir(outputDir);
+  await mkdir(outside);
+
+  const approved = canonicalOutputPath(repoRoot, configured);
+
+  await rm(outputDir, { recursive: true });
+  await linkDirectory(outside, outputDir);
+
+  const redirectedLitter = path.join(outside, 'review.md.crbuddy-tmp-999');
+  await writeFile(redirectedLitter, 'unrelated file', 'utf8');
+
+  await assert.rejects(
+    cleanupTemps(repoRoot, [configured], { allowedPaths: [approved] }),
+    /changed after preflight/,
+  );
+  assert.equal(await readFile(redirectedLitter, 'utf8'), 'unrelated file');
 });
 
 test('a failed rename leaves neither new nor half-committed output behind', async () => {

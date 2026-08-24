@@ -52,6 +52,7 @@ function requireSafetyFlag(
 const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
   claude: blockedVendorArgs([
     '--permission-mode',
+    '--permission-prompt-tool',
     '--dangerously-skip-permissions',
     '--allow-dangerously-skip-permissions',
     '--allowedtools',

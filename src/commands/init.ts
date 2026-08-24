@@ -180,6 +180,7 @@ async function wizard(
     existing?.merge,
     existing?.output,
     options.repoRoot,
+    scope,
   );
   const reviewTarget = await buildTarget(ui, existing?.target);
 
@@ -605,6 +606,7 @@ async function buildMerge(
   existing: MergeConfig | undefined,
   existingOutput: OutputConfig | undefined,
   repoRoot: string | null,
+  scope: 'global' | 'project',
 ): Promise<{ merge: MergeConfig; output: OutputConfig }> {
   const destination = await ui.select<OutputDestination>(
     'Where should the output go?',
@@ -641,6 +643,22 @@ async function buildMerge(
           repoRoot,
         )
       : await pickOutputLocation(ui, existingOutput, repoRoot, enabled);
+
+  if (
+    scope === 'project' &&
+    repoRoot &&
+    [output.merged, output.raw].some(
+      (candidate) => repoRelative(candidate, repoRoot) === null,
+    )
+  ) {
+    ui.message(
+      'Because this repository config names output paths outside the repository, ' +
+        '`crbuddy go` will ask you to approve those paths on every interactive run ' +
+        'and will refuse them when unattended. Use a global config if you want ' +
+        'external output without that per-run confirmation.',
+      'warn',
+    );
+  }
 
   if (!enabled) {
     return { merge: { enabled: false, vendor: '', model: '' }, output };

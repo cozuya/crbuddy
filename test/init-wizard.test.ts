@@ -89,6 +89,23 @@ test('equivalent wizard answers produce the unchanged config schema', async (t) 
   assert.doesNotMatch(summary?.message ?? '', /codex-gpt-5-6-sol/);
 });
 
+test('project config warns that external output needs consent on every run', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-init-external-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const ui = new OneLevelUpUI();
+
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    { ui, detect: async () => [detection] },
+  );
+
+  assert.equal(code, 0);
+  assert.match(
+    ui.messages.map((entry) => entry.message).join('\n'),
+    /approve those paths on every interactive run.*refuse them when unattended/s,
+  );
+});
+
 test('editing an existing config preserves accepted values', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
@@ -203,6 +220,7 @@ test('late cancellation writes neither config nor planned .gitignore changes', a
 class DefaultingUI implements WizardUI {
   readonly interactive: boolean = false;
   readonly notes: Array<{ title?: string; message: string }> = [];
+  readonly messages: Array<{ kind?: MessageKind; message: string }> = [];
   readonly cancelled: string[] = [];
 
   intro(): void {}
@@ -216,7 +234,9 @@ class DefaultingUI implements WizardUI {
     this.notes.push({ message, ...(title ? { title } : {}) });
   }
 
-  message(_message: string, _kind?: MessageKind): void {}
+  message(message: string, kind?: MessageKind): void {
+    this.messages.push({ message, ...(kind ? { kind } : {}) });
+  }
 
   spinner<T>(
     _message: string,
@@ -247,6 +267,22 @@ class DefaultingUI implements WizardUI {
   async text(_question: string, fallback = ''): Promise<string> {
     if (fallback === '') throw new Error('Test UI received required text unexpectedly');
     return fallback;
+  }
+}
+
+class OneLevelUpUI extends DefaultingUI {
+  override async select<T>(
+    question: string,
+    choices: Array<Choice<T>>,
+    initialIndex = 0,
+  ): Promise<T> {
+    if (question === 'Where should the report be written?') {
+      const choice = choices.find((candidate) => candidate.value === 'up');
+      if (!choice || choice.disabled) throw new Error('Missing one-level-up choice');
+      return choice.value;
+    }
+
+    return super.select(question, choices, initialIndex);
   }
 }
 

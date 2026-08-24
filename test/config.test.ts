@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 
-import { ConfigError, stripJsonComments, validate } from '../src/config/load.js';
+import {
+  assertUsableOutput,
+  ConfigError,
+  stripJsonComments,
+  validate,
+} from '../src/config/load.js';
 
 const minimal = {
   panel: [{ vendor: 'claude', model: 'opus' }],
@@ -242,6 +249,18 @@ test('reserved directories are rejected from outside the repo too', () => {
       `expected ${bad} to be rejected`,
     );
   }
+});
+
+test('a reserved ancestor above the repository does not reject its outputs', () => {
+  const nestedRepo = path.join(tmpdir(), 'checkout-parent', '.crbuddy', 'repo');
+
+  assert.doesNotThrow(() =>
+    assertUsableOutput(
+      { merged: 'review.md', raw: 'review.raw.md' },
+      'output',
+      nestedRepo,
+    ),
+  );
 });
 
 test('an output path that names no file is rejected', () => {

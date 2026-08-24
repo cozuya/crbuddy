@@ -133,12 +133,24 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
   live.add(child);
 
   let killTimer: NodeJS.Timeout | undefined;
+  let terminating = false;
   const terminate = (): void => {
-    if (killTimer) return;
+    if (terminating) return;
+
+    terminating = true;
 
     killTree(child, 'SIGTERM');
+
+    // Windows killTree already launches `taskkill /T /F`: it is forceful on
+    // the whole tree, regardless of the signal name, so scheduling the same
+    // PID again only creates a PID-reuse window after the child closes.
+    if (isWindows) return;
+
     killTimer = setTimeout(
-      () => killTree(child, 'SIGKILL'),
+      () => {
+        killTimer = undefined;
+        killTree(child, 'SIGKILL');
+      },
       request.killGraceMs ?? 5000,
     );
     killTimer.unref();
@@ -214,9 +226,17 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
     };
   } finally {
     clearTimeout(timer);
-    // Do not clear killTimer when the direct child closes. Detached helpers
-    // can remain in its process group after the leader honors SIGTERM; the
-    // scheduled SIGKILL is what sweeps those surviving descendants.
+
+    if (killTimer) {
+      // The direct child closed before its grace period elapsed. Detached
+      // helpers may still be alive in the original process group, so sweep
+      // them now, while the group identity is fresh, rather than leaving a
+      // delayed signal that could land on a recycled process-group ID.
+      clearTimeout(killTimer);
+      killTimer = undefined;
+      killTree(child, 'SIGKILL');
+    }
+
     request.signal?.removeEventListener('abort', onAbort);
     live.delete(child);
   }
