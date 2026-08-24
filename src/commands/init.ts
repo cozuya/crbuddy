@@ -26,22 +26,32 @@ import {
 import { ADAPTERS, getAdapter } from '../adapters/vendors.js';
 import { probe } from '../run/spawn.js';
 import { Adapter } from '../adapters/types.js';
-import { PromptAborted, confirm, dim, select, text } from '../util/prompt.js';
+import { PromptAborted } from '../util/prompt.js';
+import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
 
 export interface InitOptions {
   repoRoot: string | null;
   scope?: 'global' | 'project';
 }
 
-export async function runInit(options: InitOptions): Promise<number> {
+export interface InitDependencies {
+  ui?: WizardUI;
+  detect?: (signal?: AbortSignal) => Promise<Detection[]>;
+}
+
+export async function runInit(
+  options: InitOptions,
+  dependencies: InitDependencies = {},
+): Promise<number> {
+  const ui = dependencies.ui ?? (await createWizardUI());
+
   try {
-    return await wizard(options);
+    return await wizard(options, ui, dependencies.detect ?? detectAdapters);
   } catch (error) {
     const name = (error as { name?: string })?.name;
 
     if (error instanceof PromptAborted || name === 'AbortError') {
-      console.log('');
-      console.log('crbuddy setup aborted. No config was written.');
+      ui.cancel('crbuddy setup aborted. No config was written.');
       return 130;
     }
 
@@ -49,9 +59,12 @@ export async function runInit(options: InitOptions): Promise<number> {
   }
 }
 
-async function wizard(options: InitOptions): Promise<number> {
-  console.log('');
-  console.log('crbuddy setup');
+async function wizard(
+  options: InitOptions,
+  ui: WizardUI,
+  detect: (signal?: AbortSignal) => Promise<Detection[]>,
+): Promise<number> {
+  ui.intro('crbuddy setup');
 
   const scopeChoices = [
     { label: 'Global', value: 'global' as const, hint: homeConfigPath() },
@@ -66,20 +79,25 @@ async function wizard(options: InitOptions): Promise<number> {
       : []),
   ];
 
-  const scope =
+  let scope =
     options.scope ??
     (scopeChoices.length === 1
       ? 'global'
-      : await select<'global' | 'project'>(
+      : await ui.select<'global' | 'project'>(
           'Where should this config live? Local overrides global.',
           scopeChoices,
           0,
         ));
 
-  const targetFile =
-    scope === 'project' && options.repoRoot
-      ? projectConfigPath(options.repoRoot)
-      : homeConfigPath();
+  const effectiveScope = effectiveInitScope(scope, options.repoRoot);
+
+  if (effectiveScope !== scope) {
+    scope = effectiveScope;
+    ui.message(
+      'No Git repository was found, so this config will be saved globally.',
+      'warn',
+    );
+  }
 
   // A project-local config REPLACES the global one, so editing global while
   // a local one exists here changes a file that will never be read in this
@@ -88,65 +106,62 @@ async function wizard(options: InitOptions): Promise<number> {
     const local = projectConfigPath(options.repoRoot);
 
     if (existsSync(local)) {
-      console.log('');
-      console.log(
+      ui.note(
         `Heads up: this repository has its own config at ${local}, and a ` +
-          `project config replaces the global one entirely.`,
-      );
-      console.log(
-        dim('  `crbuddy go` here will use that file, not the one you are about to edit.'),
+          `project config replaces the global one entirely.\n` +
+          '`crbuddy go` here will use that file, not the global config.',
+        'Project config takes precedence',
       );
 
-      const switchToLocal = await confirm('  Edit the repository config instead?', true);
+      const switchToLocal = await ui.confirm(
+        'Edit the repository config instead?',
+        true,
+      );
 
       if (switchToLocal) {
-        return wizard({ ...options, scope: 'project' });
+        scope = 'project';
       }
     }
   }
 
+  const targetFile =
+    scope === 'project' && options.repoRoot
+      ? projectConfigPath(options.repoRoot)
+      : homeConfigPath();
+
   let existing: Config | null = null;
 
   if (existsSync(targetFile)) {
-    console.log('');
-    console.log(`Editing the existing config at ${targetFile}.`);
+    ui.message(`Editing the existing config at ${targetFile}.`);
 
     try {
       existing = await readAndValidate(targetFile);
     } catch (error) {
-      console.log(`  (could not parse it: ${String(error)})`);
+      ui.message(`Could not parse it: ${String(error)}`, 'error');
 
-      const start = await confirm(
-        '  Start from scratch instead? The old file will be replaced.',
+      const start = await ui.confirm(
+        'Start from scratch instead? The old file will be replaced.',
         false,
       );
 
-      if (!start) return 1;
+      if (!start) {
+        ui.cancel('Existing config left unchanged.');
+        return 1;
+      }
     }
   }
 
-  console.log('');
-  console.log('Checking which vendor CLIs are installed…');
-
-  const detections = await detectAdapters();
+  const detections = await ui.spinner(
+    'Checking vendor CLIs',
+    detect,
+    'Vendor CLIs checked',
+  );
   const available = detections.filter((d) => d.present).map((d) => d.adapter);
 
-  for (const detection of detections) {
-    console.log(
-      dim(
-        `  ${detection.present ? '\u2713' : '\u00b7'} ${detection.adapter.label} ` +
-          `(${detection.adapter.command})`,
-      ),
-    );
-
-    if (detection.error) {
-      console.log(`      ${detection.error}`);
-    }
-  }
+  ui.note(detections.map(formatDetection).join('\n'), 'Vendor CLIs');
 
   if (available.length === 0) {
-    console.log('');
-    console.log(
+    ui.cancel(
       'No supported vendor CLIs are usable. crbuddy drives your own\n' +
         'installed agent CLIs, so at least one has to work here.\n' +
         'Run `crbuddy doctor` for details.',
@@ -154,19 +169,19 @@ async function wizard(options: InitOptions): Promise<number> {
     return 1;
   }
 
-  console.log('');
-  console.log(
-    dim('  (Presence only; crbuddy does not check whether they are logged in.)'),
+  ui.message(
+    'Detection checks presence only; crbuddy does not check whether CLIs are logged in.',
   );
 
-  const panel = await buildPanel(available, existing?.panel ?? []);
+  const panel = await buildPanel(ui, available, existing?.panel ?? []);
   const { merge, output } = await buildMerge(
+    ui,
     available,
     existing?.merge,
     existing?.output,
     options.repoRoot,
   );
-  const reviewTarget = await buildTarget(existing?.target);
+  const reviewTarget = await buildTarget(ui, existing?.target);
 
   const config: Config = {
     configVersion: CONFIG_VERSION,
@@ -182,22 +197,51 @@ async function wizard(options: InitOptions): Promise<number> {
     panel,
   };
 
+  const gitignorePlan =
+    scope === 'project' && options.repoRoot
+      ? await planGitignore(ui, options.repoRoot, config)
+      : null;
+
+  ui.note(
+    formatConfigSummary(scope, targetFile, config, gitignorePlan),
+    'Configuration',
+  );
+
+  // Piped setup deliberately keeps its existing answer sequence. The final
+  // confirmation is a TTY safeguard and defaults to yes there.
+  if (ui.interactive && !(await ui.confirm('Save this config?', true))) {
+    ui.cancel('Setup cancelled. No config was written.');
+    return 1;
+  }
+
   await mkdir(path.dirname(targetFile), { recursive: true });
   await writeFile(targetFile, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 
-  if (scope === 'project' && options.repoRoot) {
-    await offerGitignore(options.repoRoot, config);
-  }
+  if (gitignorePlan) await applyGitignorePlan(ui, gitignorePlan);
 
-  console.log('');
-  console.log(`Wrote ${targetFile}`);
-  console.log('');
-  console.log('Run `crbuddy go` to start a review.');
+  ui.outro(`Config saved to ${targetFile}\n   Run \`crbuddy go\` to start a review.`);
 
   return 0;
 }
 
-async function offerGitignore(repoRoot: string, config: Config): Promise<void> {
+export function effectiveInitScope(
+  requested: 'global' | 'project',
+  repoRoot: string | null,
+): 'global' | 'project' {
+  return requested === 'project' && !repoRoot ? 'global' : requested;
+}
+
+interface GitignorePlan {
+  path: string;
+  current: string;
+  missing: string[];
+}
+
+async function planGitignore(
+  ui: WizardUI,
+  repoRoot: string,
+  config: Config,
+): Promise<GitignorePlan | null> {
   // Two filters, two reasons. A report written outside the repository has
   // no .gitignore spelling and needs none; a terminal-mode config writes no
   // report at all, so offering to ignore one means editing a tracked file
@@ -214,7 +258,7 @@ async function offerGitignore(repoRoot: string, config: Config): Promise<void> {
     .map((entry) => repoRelative(entry, repoRoot))
     .filter((entry): entry is string => entry !== null);
 
-  if (wanted.length === 0) return;
+  if (wanted.length === 0) return null;
 
   const gitignorePath = path.join(repoRoot, '.gitignore');
 
@@ -234,51 +278,55 @@ async function offerGitignore(repoRoot: string, config: Config): Promise<void> {
   );
 
   const missing = wanted.filter((entry) => !lines.has(entry));
-  if (missing.length === 0) return;
+  if (missing.length === 0) return null;
 
-  console.log('');
-  console.log('crbuddy writes these into the repository:');
-
-  for (const entry of missing) {
-    console.log(dim(`  ${entry}`));
-  }
+  ui.note(missing.join('\n'), 'Files crbuddy writes into this repository');
 
   // Defaults to NO: .gitignore is usually a tracked file, and editing a
   // tracked file in the repo under review is not something to do on an
   // absent-minded Enter.
-  const add = await confirm(
+  const add = await ui.confirm(
     existsSync(gitignorePath)
       ? 'Add them to .gitignore? (this edits a tracked file)'
       : 'Create a .gitignore with them?',
     false,
   );
 
-  if (!add) return;
-
-  const needsNewline = current !== '' && !current.endsWith('\n');
-  const block =
-    `${needsNewline ? '\n' : ''}` +
-    `${current === '' ? '' : '\n'}# crbuddy\n${missing.join('\n')}\n`;
-
-  await appendFile(gitignorePath, block, 'utf8');
-  console.log(dim(`  Updated ${gitignorePath}`));
+  return add ? { path: gitignorePath, current, missing } : null;
 }
 
-interface Detection {
+async function applyGitignorePlan(
+  ui: WizardUI,
+  plan: GitignorePlan,
+): Promise<void> {
+  const needsNewline = plan.current !== '' && !plan.current.endsWith('\n');
+  const block =
+    `${needsNewline ? '\n' : ''}` +
+    `${plan.current === '' ? '' : '\n'}# crbuddy\n${plan.missing.join('\n')}\n`;
+
+  await appendFile(plan.path, block, 'utf8');
+  ui.message(`Updated ${plan.path}`, 'success');
+}
+
+export interface Detection {
   adapter: Adapter;
   present: boolean;
+  version: string | null;
   error?: string;
 }
 
-async function detectAdapters(): Promise<Detection[]> {
+async function detectAdapters(signal?: AbortSignal): Promise<Detection[]> {
   const results: Detection[] = [];
 
   for (const adapter of ADAPTERS) {
-    const result = await probe(adapter.command, adapter.versionArgs());
+    const result = await probe(adapter.command, adapter.versionArgs(), signal);
+
+    if (signal?.aborted) throw new PromptAborted();
 
     results.push({
       adapter,
       present: result.present,
+      version: result.present ? adapter.parseVersion(result.output ?? '') : null,
       ...(result.error ? { error: result.error } : {}),
     });
   }
@@ -286,9 +334,101 @@ async function detectAdapters(): Promise<Detection[]> {
   return results;
 }
 
+function formatDetection(detection: Detection): string {
+  const mark = detection.present ? '\u2713' : '\u00b7';
+  const version = detection.present
+    ? detection.version ?? 'installed; version unknown'
+    : 'unavailable';
+  const summary =
+    `${mark} ${detection.adapter.label}  ${version} ` +
+    `(${detection.adapter.command})`;
+
+  return detection.error ? `${summary}\n  ${detection.error}` : summary;
+}
+
+function formatReviewer(entry: PanelEntry): string {
+  let vendorLabel = entry.vendor;
+  let modelLabel = entry.model;
+
+  try {
+    const adapter = getAdapter(entry.vendor);
+    vendorLabel = adapter.label;
+    modelLabel =
+      adapter.models.find((model) => model.id === entry.model)?.label ?? entry.model;
+  } catch {
+    // Existing hand-edited configs may name an adapter unknown to this build.
+  }
+
+  return [
+    vendorLabel,
+    modelLabel,
+    entry.effort,
+    entry.instructions ? 'custom instructions' : undefined,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(' \u00b7 ');
+}
+
+function formatPanel(panel: PanelEntry[]): string {
+  return panel.map(formatReviewer).join('\n');
+}
+
+function formatConfigSummary(
+  scope: 'global' | 'project',
+  targetFile: string,
+  config: Config,
+  gitignorePlan: GitignorePlan | null,
+): string {
+  const lines = [
+    `Config: ${scope === 'project' ? 'This repository' : 'Global'}`,
+    `Path: ${targetFile}`,
+    '',
+    'Reviewers:',
+    ...config.panel.map((entry) => `  ${formatReviewer(entry)}`),
+    '',
+  ];
+
+  if (config.merge.enabled) {
+    const merger: PanelEntry = {
+      id: 'summary',
+      vendor: config.merge.vendor,
+      model: config.merge.model,
+      ...(config.merge.effort ? { effort: config.merge.effort } : {}),
+    };
+    lines.push(`Consolidation: Enabled \u00b7 ${formatReviewer(merger)}`);
+  } else {
+    lines.push('Consolidation: Disabled');
+  }
+
+  lines.push(
+    `Target: ${
+      config.target === 'uncommitted'
+        ? 'Uncommitted changes'
+        : `Current branch vs ${config.target.base}`
+    }`,
+  );
+
+  if (config.output.destination === 'terminal') {
+    lines.push('Output: Terminal');
+  } else {
+    lines.push(`Output: ${config.output.merged}`);
+    if (config.merge.enabled) lines.push(`Raw audit: ${config.output.raw}`);
+  }
+
+  if (gitignorePlan) {
+    lines.push(`.gitignore: Add ${gitignorePlan.missing.join(', ')}`);
+  }
+
+  return lines.join('\n');
+}
+
 const OTHER = '\u0000other';
 
-async function pickModel(adapter: Adapter, current?: string): Promise<string> {
+async function pickModel(
+  ui: WizardUI,
+  adapter: Adapter,
+  current?: string,
+): Promise<string> {
   const choices = adapter.models.map((model) => ({
     label: model.label,
     value: model.id,
@@ -304,28 +444,27 @@ async function pickModel(adapter: Adapter, current?: string): Promise<string> {
   const preferred = current ?? adapter.defaultModel;
   const index = adapter.models.findIndex((model) => model.id === preferred);
 
-  const chosen = await select(
-    `Model for ${adapter.label}?`,
+  const chosen = await ui.select(
+    `Model for ${adapter.label}`,
     choices,
     index >= 0 ? index : 0,
   );
 
   if (chosen === OTHER) {
-    console.log(
-      dim(
-        `  crbuddy passes this straight to \`${adapter.command}\` and does not ` +
-          `validate it.\n  Run \`${adapter.command} ${adapter.versionArgs().join(' ')}\`` +
-          ` or check the vendor's docs for current ids.`,
-      ),
+    ui.message(
+      `crbuddy passes this straight to \`${adapter.command}\` and does not ` +
+        `validate it. Run \`${adapter.command} ${adapter.versionArgs().join(' ')}\`` +
+        ` or check the vendor's docs for current ids.`,
     );
 
-    return text('  Model id:', current ?? '');
+    return ui.text('Model id', current ?? '');
   }
 
   return chosen;
 }
 
 async function pickEffort(
+  ui: WizardUI,
   adapter: Adapter,
   model: string,
   current?: string,
@@ -334,8 +473,7 @@ async function pickEffort(
     adapter.models.find((entry) => entry.id === model)?.efforts ?? adapter.efforts;
 
   if (efforts.length === 0) {
-    console.log('');
-    console.log(dim(`  ${adapter.label} has no thinking-effort setting; skipping.`));
+    ui.message(`${adapter.label} has no thinking-effort setting; skipping.`);
     return undefined;
   }
 
@@ -351,65 +489,47 @@ async function pickEffort(
   const preferred = current ?? adapter.defaultEffort ?? efforts[efforts.length - 1]!;
   const index = efforts.indexOf(preferred);
 
-  const chosen = await select(
-    `Thinking effort for ${adapter.label}?`,
+  const chosen = await ui.select(
+    `Thinking effort for ${adapter.label}`,
     choices,
     index >= 0 ? index : 0,
   );
 
-  return chosen === OTHER ? text('  Effort value:', current ?? '') : chosen;
+  return chosen === OTHER ? ui.text('Effort value', current ?? '') : chosen;
 }
 
 async function buildPanel(
+  ui: WizardUI,
   available: Adapter[],
   existing: PanelEntry[],
 ): Promise<PanelEntry[]> {
   const panel: PanelEntry[] = [];
 
   if (existing.length > 0) {
-    console.log('');
-    console.log('Current panel:');
+    ui.note(formatPanel(existing), 'Current panel');
 
-    existing.forEach((entry) => {
-      let label = entry.vendor;
-
-      try {
-        label = getAdapter(entry.vendor).label;
-      } catch {
-        // Unknown vendor in an existing config; show it as written.
-      }
-
-      console.log(
-        dim(
-          `  ${label}: ${entry.model}` +
-            (entry.effort ? ` - thinking level: ${entry.effort}` : '') +
-            (entry.instructions ? ' (custom instructions)' : ''),
-        ),
-      );
-    });
-
-    if (await confirm('Keep these reviewers?', true)) {
+    if (await ui.confirm('Keep these reviewers?', true)) {
       panel.push(...existing);
+      ui.note(formatPanel(panel), 'Panel');
     } else {
       // Said out loud because nothing else on screen changes: the listing
       // above stays visible, and without this the next prompt reads as if
       // it were adding to the panel still printed there.
-      console.log(dim('  Panel cleared for now.'));
+      ui.message('Panel cleared for now.');
     }
   }
 
-  console.log('');
   // "Run" is already taken: one `crbuddy go` invocation is a run, and the
   // report calls each lane's record a run too. The user-facing word for a
   // lane is "reviewer", which is also what makes the blindness legible.
-  console.log(
+  ui.message(
     'Now add the reviewers. `crbuddy go` starts all of them at once, ' +
       'each one blind to what the others find.',
   );
 
   for (;;) {
     if (panel.length > 0) {
-      const more = await confirm(
+      const more = await ui.confirm(
         `${panel.length} reviewer${panel.length === 1 ? '' : 's'} configured. ` +
           `Add another?`,
         false,
@@ -418,33 +538,31 @@ async function buildPanel(
       if (!more) break;
     }
 
-    const adapter = await select(
-      'Which CLI?',
+    const adapter = await ui.select(
+      'Add a reviewer',
       available.map((candidate) => ({ label: candidate.label, value: candidate })),
       0,
     );
 
-    const model = await pickModel(adapter);
-    const effort = await pickEffort(adapter, model);
+    const model = await pickModel(ui, adapter);
+    const effort = await pickEffort(ui, adapter, model);
 
     let instructions: string | undefined;
 
     if (!adapter.nativeReview) {
-      console.log('');
-      console.log(
-        dim(
-          `  ${adapter.label} does not expose a supported headless native code-review ` +
-            'operation, so this lane needs explicit review instructions.',
-        ),
+      ui.message(
+        `${adapter.label} does not expose a supported headless native code-review ` +
+          'operation, so this lane needs explicit review instructions.',
+        'warn',
       );
-      instructions = await text('Instructions:');
+      instructions = await ui.text('Review instructions');
     } else {
-      const custom = await confirm(
+      const custom = await ui.confirm(
         `Give this reviewer custom instructions? ` +
           `(default: ${adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'})`,
         false,
       );
-      instructions = custom ? await text('Instructions:') : undefined;
+      instructions = custom ? await ui.text('Review instructions') : undefined;
     }
 
     const seen = new Set(panel.map((entry) => entry.id));
@@ -463,7 +581,8 @@ async function buildPanel(
     if (instructions) entry.instructions = instructions;
 
     panel.push(entry);
-    console.log(`  added ${id}`);
+    ui.message(`Added ${formatReviewer(entry)}`, 'success');
+    ui.note(formatPanel(panel), 'Panel');
   }
 
   if (panel.length === 0) {
@@ -481,14 +600,13 @@ async function buildPanel(
  * silently pin those runs to the repository root.
  */
 async function buildMerge(
+  ui: WizardUI,
   available: Adapter[],
   existing: MergeConfig | undefined,
   existingOutput: OutputConfig | undefined,
   repoRoot: string | null,
 ): Promise<{ merge: MergeConfig; output: OutputConfig }> {
-  console.log('');
-
-  const destination = await select<OutputDestination>(
+  const destination = await ui.select<OutputDestination>(
     'Where should the output go?',
     [
       {
@@ -505,7 +623,7 @@ async function buildMerge(
     (existingOutput ?? DEFAULT_OUTPUT).destination === 'terminal' ? 1 : 0,
   );
 
-  const enabled = await confirm(
+  const enabled = await ui.confirm(
     'When done, run a consolidation pass to group duplicate findings? ' +
       (destination === 'terminal'
         ? '(the report is printed either way)'
@@ -518,7 +636,7 @@ async function buildMerge(
   const output =
     destination === 'terminal'
       ? { ...(existingOutput ?? DEFAULT_OUTPUT), destination: 'terminal' as const }
-      : await pickOutputLocation(existingOutput, repoRoot, enabled);
+      : await pickOutputLocation(ui, existingOutput, repoRoot, enabled);
 
   if (!enabled) {
     return { merge: { enabled: false, vendor: '', model: '' }, output };
@@ -528,14 +646,14 @@ async function buildMerge(
     (candidate) => candidate.name === existing?.vendor,
   );
 
-  const adapter = await select(
+  const adapter = await ui.select(
     'Which CLI should consolidate?',
     available.map((candidate) => ({ label: candidate.label, value: candidate })),
     currentIndex >= 0 ? currentIndex : 0,
   );
 
-  const model = await pickModel(adapter, existing?.model);
-  const effort = await pickEffort(adapter, model, existing?.effort);
+  const model = await pickModel(ui, adapter, existing?.model);
+  const effort = await pickEffort(ui, adapter, model, existing?.effort);
 
   const merge: MergeConfig = { enabled: true, vendor: adapter.name, model };
   if (effort) merge.effort = effort;
@@ -550,6 +668,7 @@ async function buildMerge(
  * absolute, which pins every repository to the same file.
  */
 async function pickOutputLocation(
+  ui: WizardUI,
   existing: OutputConfig | undefined,
   repoRoot: string | null,
   consolidating: boolean,
@@ -557,9 +676,7 @@ async function pickOutputLocation(
   const current = existing ?? DEFAULT_OUTPUT;
   const currentDir = path.dirname(current.merged).replace(/\\/g, '/');
 
-  console.log('');
-
-  const where = await select<'root' | 'up' | 'custom'>(
+  const where = await ui.select<'root' | 'up' | 'custom'>(
     'Where should the report be written?',
     [
       {
@@ -587,18 +704,19 @@ async function pickOutputLocation(
   // paths from an existing config, and a config can carry names that only
   // work in the directories they came from.
   if (where === 'root' || where === 'up') {
-    return usableOrDefault(inDirectory(where === 'root' ? '.' : '..', existing));
+    return usableOrDefault(
+      ui,
+      inDirectory(where === 'root' ? '.' : '..', existing),
+    );
   }
 
   for (;;) {
-    console.log(
-      dim(
-        '  A directory, not a filename. Absolute, or relative to the ' +
-          'repository root.',
-      ),
+    ui.message(
+      'Enter a directory, not a filename. It may be absolute or relative ' +
+        'to the repository root.',
     );
 
-    const answer = await text(
+    const answer = await ui.text(
       'Path to the directory?',
       currentDir === '.' || currentDir === '..' ? '' : currentDir,
     );
@@ -608,21 +726,22 @@ async function pickOutputLocation(
     try {
       assertUsableOutput(candidate, 'output');
     } catch (error) {
-      console.log(`  ${error instanceof Error ? error.message : String(error)}`);
+      ui.message(error instanceof Error ? error.message : String(error), 'error');
       continue;
     }
 
     // Echoed because the answer is rewritten: someone who typed an absolute
     // path should see that it became repo-relative, and vice versa.
-    console.log(dim(`  writing to ${candidate.merged}`));
+    ui.message(`Writing to ${candidate.merged}`);
 
     if (path.isAbsolute(candidate.merged)) {
-      console.log(
-        dim('  (an absolute path, so every repository shares this one file)'),
+      ui.message(
+        'This is an absolute path, so every repository shares this one file.',
+        'warn',
       );
     }
 
-    if (consolidating) console.log(dim(`  alongside ${candidate.raw}`));
+    if (consolidating) ui.message(`Raw reviews will be written to ${candidate.raw}`);
 
     return candidate;
   }
@@ -633,13 +752,13 @@ async function pickOutputLocation(
  * unusable choice falls back to the defaults with a note, rather than
  * throwing out of the wizard or writing a config that will not load.
  */
-function usableOrDefault(candidate: OutputConfig): OutputConfig {
+function usableOrDefault(ui: WizardUI, candidate: OutputConfig): OutputConfig {
   try {
     assertUsableOutput(candidate, 'output');
     return candidate;
   } catch (error) {
-    console.log(`  ${error instanceof Error ? error.message : String(error)}`);
-    console.log(dim('  Using the default filenames instead.'));
+    ui.message(error instanceof Error ? error.message : String(error), 'error');
+    ui.message('Using the default filenames instead.', 'warn');
 
     return { ...DEFAULT_OUTPUT };
   }
@@ -709,8 +828,11 @@ export function storedDirectory(answer: string, repoRoot: string | null): string
   return climbs > 1 ? posix(absolute) : posix(relative);
 }
 
-async function buildTarget(existing: Target | undefined): Promise<Target> {
-  const kind = await select<'uncommitted' | 'branch'>(
+async function buildTarget(
+  ui: WizardUI,
+  existing: Target | undefined,
+): Promise<Target> {
+  const kind = await ui.select<'uncommitted' | 'branch'>(
     'What should crbuddy review by default?',
     [
       {
@@ -729,7 +851,7 @@ async function buildTarget(existing: Target | undefined): Promise<Target> {
 
   if (kind === 'uncommitted') return 'uncommitted';
 
-  const base = await text(
+  const base = await ui.text(
     'Base branch to compare against?',
     typeof existing === 'object' ? existing.base : 'main',
   );

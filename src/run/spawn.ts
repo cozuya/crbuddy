@@ -35,6 +35,10 @@ export interface SpawnRequest {
   /** Where stdout/stderr are spooled. Large outputs never sit in memory. */
   scratchDir: string;
   id: string;
+  /** Optional caller cancellation, used by interactive setup probes. */
+  signal?: AbortSignal;
+  /** Override the termination grace period in focused process-tree tests. */
+  killGraceMs?: number;
 }
 
 export interface SpawnResult {
@@ -128,6 +132,22 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
 
   live.add(child);
 
+  let killTimer: NodeJS.Timeout | undefined;
+  const terminate = (): void => {
+    if (killTimer) return;
+
+    killTree(child, 'SIGTERM');
+    killTimer = setTimeout(
+      () => killTree(child, 'SIGKILL'),
+      request.killGraceMs ?? 5000,
+    );
+    killTimer.unref();
+  };
+
+  const onAbort = (): void => terminate();
+  request.signal?.addEventListener('abort', onAbort, { once: true });
+  if (request.signal?.aborted) terminate();
+
   // Drain both pipes continuously or the child backpressures and stalls.
   child.stdout?.pipe(outFile);
   child.stderr?.pipe(errFile);
@@ -154,10 +174,7 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
 
   const timer = setTimeout(() => {
     timedOut = true;
-    killTree(child, 'SIGTERM');
-
-    // Escalate if it ignores the polite version.
-    setTimeout(() => killTree(child, 'SIGKILL'), 5000).unref();
+    terminate();
   }, request.timeoutMs);
 
   let code: number | null = null;
@@ -197,6 +214,10 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
     };
   } finally {
     clearTimeout(timer);
+    // Do not clear killTimer when the direct child closes. Detached helpers
+    // can remain in its process group after the leader honors SIGTERM; the
+    // scheduled SIGKILL is what sweeps those surviving descendants.
+    request.signal?.removeEventListener('abort', onAbort);
     live.delete(child);
   }
 
@@ -263,14 +284,18 @@ export interface ProbeResult {
  * CLI the user demonstrably has installed is worse than offering one that
  * later fails with a clear reason.
  */
-export async function probe(command: string, args: string[]): Promise<ProbeResult> {
+export async function probe(
+  command: string,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<ProbeResult> {
   // Own the scratch directory rather than trusting the caller: passing the
   // repo here (as `init` used to) leaves `probe-*.stdout` files behind in a
   // user's working tree whenever cleanup does not run.
   const scratch = await mkdtemp(path.join(tmpdir(), 'crbuddy-probe-'));
 
   try {
-    return await runProbe(command, args, scratch);
+    return await runProbe(command, args, scratch, signal);
   } finally {
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
   }
@@ -280,6 +305,7 @@ async function runProbe(
   command: string,
   args: string[],
   scratch: string,
+  signal?: AbortSignal,
 ): Promise<ProbeResult> {
   const result = await runProcess({
     command,
@@ -288,6 +314,7 @@ async function runProbe(
     timeoutMs: 20_000,
     scratchDir: scratch,
     id: `probe-${command}-${process.pid}`,
+    signal,
   });
 
   const output = `${result.stdout}\n${result.stderr}`.trim();
