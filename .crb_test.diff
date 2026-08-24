@@ -1,0 +1,2041 @@
+diff --git a/package.json b/package.json
+index 515adba..bd75567 100644
+--- a/package.json
++++ b/package.json
+@@ -4,7 +4,8 @@
+   "description": "Fan one code review out across several vendor coding agents in parallel, then consolidate.",
+   "type": "module",
+   "bin": {
+-    "crbuddy": "./dist/index.js"
++    "crbuddy": "./dist/index.js",
++    "crb": "./dist/index.js"
+   },
+   "files": [
+     "dist",
+@@ -13,7 +14,7 @@
+     "DESIGN.md"
+   ],
+   "engines": {
+-    "node": ">=20"
++    "node": ">=20.12.0"
+   },
+   "scripts": {
+     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+@@ -34,6 +35,7 @@
+     "@types/cross-spawn": "^6.0.6"
+   },
+   "dependencies": {
++    "@clack/prompts": "^1.7.0",
+     "cross-spawn": "^7.0.6"
+   },
+   "packageManager": "pnpm@11.22.0+sha512.1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621"
+diff --git a/test/config.test.ts b/test/config.test.ts
+index 128cc80..e852e0d 100644
+--- a/test/config.test.ts
++++ b/test/config.test.ts
+@@ -13,6 +13,7 @@ test('accepts a minimal config and fills defaults', () => {
+   assert.equal(config.configVersion, 1);
+   assert.equal(config.target, 'uncommitted');
+   assert.equal(config.refuseIfOutputExists, false);
++  assert.equal(config.timeoutMs, 30 * 60 * 1000);
+   assert.equal(config.output.merged, 'CODE-REVIEW-HANDOFF.md');
+   assert.equal(config.merge.enabled, false);
+   assert.equal(config.panel.length, 1);
+@@ -88,15 +89,58 @@ test('rejects the old positional output tuple with a useful message', () => {
+   );
+ });
+ 
+-test('output paths must stay inside the repository', () => {
+-  assert.throws(
+-    () => validate({ ...minimal, output: { merged: '../escape.md', raw: 'b.md' } }),
+-    /inside the repository/,
++test('output paths may leave the repository', () => {
++  // A report one level up is outside the review universe entirely, rather
++  // than relying on the diff exclusion to keep it out.
++  const up = validate({
++    ...minimal,
++    output: { merged: '../CODE-REVIEW-HANDOFF.md', raw: '../CODE-REVIEW-HANDOFF.raw.md' },
++  });
++
++  assert.equal(up.output.merged, '../CODE-REVIEW-HANDOFF.md');
++
++  const absolute = validate({
++    ...minimal,
++    output: { merged: '/srv/reviews/x.md', raw: '/srv/reviews/x.raw.md' },
++  });
++
++  assert.equal(absolute.output.merged, '/srv/reviews/x.md');
++});
++
++test('output destination defaults to a file and accepts the terminal', () => {
++  assert.equal(validate({ ...minimal }).output.destination, 'file');
++
++  assert.equal(
++    validate({ ...minimal, output: { destination: 'terminal' } }).output.destination,
++    'terminal',
+   );
++});
++
++test('terminal mode keeps the paths so switching back restores them', () => {
++  const config = validate({
++    ...minimal,
++    output: { destination: 'terminal', merged: '../report.md', raw: '../report.raw.md' },
++  });
++
++  assert.equal(config.output.merged, '../report.md');
++});
+ 
++test('an unrecognized output destination is rejected', () => {
++  for (const bad of ['stdout', 'FILE', '', true]) {
++    assert.throws(
++      () => validate({ ...minimal, output: { destination: bad } }),
++      /expected "file" or "terminal"/,
++      `expected ${JSON.stringify(bad)} to be rejected`,
++    );
++  }
++});
++
++test('bad paths are still caught in terminal mode', () => {
++  // Otherwise switching a config back to "file" surfaces a problem that was
++  // sitting there unnoticed.
+   assert.throws(
+-    () => validate({ ...minimal, output: { merged: '/tmp/x.md', raw: 'b.md' } }),
+-    /relative/,
++    () => validate({ ...minimal, output: { destination: 'terminal', merged: '.git/x.md' } }),
++    /must not write inside/,
+   );
+ });
+ 
+@@ -187,12 +231,40 @@ test('output paths that normalize to the same file are rejected', () => {
+   );
+ });
+ 
+-test('traversal that escapes the repo is rejected however it is spelled', () => {
+-  for (const bad of ['../out.md', 'a/../../out.md']) {
++test('reserved directories are rejected from outside the repo too', () => {
++  // Now that a path may start with `..`, a check anchored at the repository
++  // root would miss these.
++  for (const bad of ['../.git/HEAD', '/srv/repo/.git/config', '../x/.crbuddy/config.json']) {
+     assert.throws(
+       () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
+-      /inside the repository/,
++      /must not write inside/,
+       `expected ${bad} to be rejected`,
+     );
+   }
+ });
++
++test('an output path that names no file is rejected', () => {
++  for (const bad of ['..', '.', '../']) {
++    assert.throws(
++      () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
++      /must name a file/,
++      `expected ${bad} to be rejected`,
++    );
++  }
++});
++
++test('clipboard payload is encoded for the platform that reads it', async () => {
++  // Regression for silent corruption: `clip.exe` decodes stdin with the
++  // console code page, so UTF-8 turns the report's U+2026 into mojibake
++  // while still exiting 0. Asserted on the encoding, not on the real
++  // clipboard, so it means the same thing in CI.
++  const { encodeForClipboard } = await import('../src/util/clipboard.js');
++
++  const encoded = encodeForClipboard('C2…');
++
++  if (process.platform === 'win32') {
++    assert.deepEqual([...encoded], [0x43, 0x00, 0x32, 0x00, 0x26, 0x20]);
++  } else {
++    assert.deepEqual([...encoded], [0x43, 0x32, 0xe2, 0x80, 0xa6]);
++  }
++});
+diff --git a/test/go-options.test.ts b/test/go-options.test.ts
+new file mode 100644
+index 0000000..2822805
+--- /dev/null
++++ b/test/go-options.test.ts
+@@ -0,0 +1,30 @@
++import assert from 'node:assert/strict';
++import { test } from 'node:test';
++
++import { parseGoArguments } from '../src/commands/go-options.js';
++
++test('--force waives only the diff-size limit', () => {
++  const parsed = parseGoArguments(['--force']);
++
++  assert.equal(parsed.force, true);
++  assert.equal(parsed.wholeCheckout, false);
++});
++
++test('--whole-checkout opts in without waiving the diff-size limit', () => {
++  const parsed = parseGoArguments(['--whole-checkout']);
++
++  assert.equal(parsed.wholeCheckout, true);
++  assert.equal(parsed.force, false);
++});
++
++test('go argument parsing preserves strict, instructions, and unknown flags', () => {
++  const parsed = parseGoArguments([
++    '--strict',
++    '--future',
++    'focus on cleanup',
++  ]);
++
++  assert.equal(parsed.strict, true);
++  assert.deepEqual(parsed.positional, ['focus on cleanup']);
++  assert.deepEqual(parsed.unknownFlags, ['--future']);
++});
+diff --git a/test/go-safety.test.ts b/test/go-safety.test.ts
+new file mode 100644
+index 0000000..6027774
+--- /dev/null
++++ b/test/go-safety.test.ts
+@@ -0,0 +1,263 @@
++import assert from 'node:assert/strict';
++import { existsSync } from 'node:fs';
++import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { PassThrough } from 'node:stream';
++import { after, test } from 'node:test';
++
++import { Config } from '../src/config/schema.js';
++import { LoadedConfig } from '../src/config/load.js';
++import {
++  canConfirm,
++  confirm,
++  EXIT_TOTAL_FAILURE,
++  PreflightError,
++  repoStateDir,
++  runGo,
++} from '../src/commands/go.js';
++import { acquireLock, LockError } from '../src/util/lock.js';
++import { stashExistingOutputs } from '../src/output/write.js';
++
++const created: string[] = [];
++
++after(async () => {
++  for (const dir of created) {
++    await rm(dir, { recursive: true, force: true });
++  }
++});
++
++function config(
++  merged: string,
++  raw: string,
++  refuseIfOutputExists = false,
++): Config {
++  return {
++    configVersion: 1,
++    output: { destination: 'file', merged, raw },
++    target: 'uncommitted',
++    refuseIfOutputExists,
++    timeoutMs: 1_000,
++    mergeTimeoutMs: 1_000,
++    maxConcurrent: 1,
++    maxDiffBytes: 1_000,
++    merge: { enabled: false, vendor: '', model: '' },
++    panel: [{ id: 'unused', vendor: 'unused', model: 'unused' }],
++  };
++}
++
++function loaded(
++  repoRoot: string,
++  value: Config,
++  scope: LoadedConfig['scope'],
++): LoadedConfig {
++  return {
++    config: value,
++    source: path.join(repoRoot, '.crbuddy', 'config.json'),
++    scope,
++  };
++}
++
++test('a contending run cannot clear the active run merge directory', async () => {
++  const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-lock-'));
++  created.push(repoRoot);
++
++  const workDir = path.join(repoRoot, '.crbuddy');
++  const stateDir = repoStateDir(repoRoot);
++  const sentinel = path.join(stateDir, 'merge', 'active.stdout');
++  created.push(stateDir);
++
++  await mkdir(path.dirname(sentinel), { recursive: true });
++  await writeFile(sentinel, 'active run', 'utf8');
++
++  const held = await acquireLock(workDir);
++
++  try {
++    await assert.rejects(
++      runGo({
++        repoRoot,
++        loaded: loaded(repoRoot, config('review.md', 'review.raw.md'), 'global'),
++        version: 'test',
++        force: false,
++        wholeCheckout: false,
++        strict: false,
++      }),
++      LockError,
++    );
++
++    assert.equal(await readFile(sentinel, 'utf8'), 'active run');
++  } finally {
++    await held.release();
++  }
++});
++
++test('external-output refusal happens before temp cleanup and recovery', async () => {
++  const parent = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-external-'));
++  created.push(parent);
++
++  const repoRoot = path.join(parent, 'repo');
++  const workDir = path.join(repoRoot, '.crbuddy');
++  const outside = path.join(parent, 'outside');
++  const merged = path.join(outside, 'review.md');
++  const raw = path.join(outside, 'review.raw.md');
++  const litter = `${merged}.crbuddy-tmp-interrupted`;
++  const stored = path.join(workDir, 'previous', 'old-run', '0.stashed');
++
++  await mkdir(outside, { recursive: true });
++  await writeFile(litter, 'unfinished report', 'utf8');
++  await writeFile(raw, 'previous raw report', 'utf8');
++  await stashExistingOutputs(repoRoot, workDir, [raw], 'old-run');
++
++  const originalTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
++  Object.defineProperty(process.stdin, 'isTTY', {
++    configurable: true,
++    value: false,
++  });
++
++  try {
++    await assert.rejects(
++      runGo({
++        repoRoot,
++        loaded: loaded(repoRoot, config(merged, raw), 'project'),
++        version: 'test',
++        force: false,
++        wholeCheckout: false,
++        strict: false,
++      }),
++      (error: unknown) =>
++        error instanceof PreflightError &&
++        error.message.includes('confirm this run') &&
++        !error.message.includes('interactively once'),
++    );
++  } finally {
++    if (originalTty) {
++      Object.defineProperty(process.stdin, 'isTTY', originalTty);
++    } else {
++      delete (process.stdin as unknown as { isTTY?: boolean }).isTTY;
++    }
++  }
++
++  assert.equal(await readFile(litter, 'utf8'), 'unfinished report');
++  assert.ok(!existsSync(raw), 'stranded output must not be recovered before consent');
++  assert.equal(await readFile(stored, 'utf8'), 'previous raw report');
++});
++
++test('recovered output is checked by refuseIfOutputExists before preflight', async () => {
++  const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-recovered-'));
++  created.push(repoRoot);
++
++  const workDir = path.join(repoRoot, '.crbuddy');
++  const report = path.join(repoRoot, 'review.raw.md');
++  await mkdir(workDir, { recursive: true });
++  await writeFile(report, 'previous report', 'utf8');
++  await stashExistingOutputs(repoRoot, workDir, ['review.raw.md'], 'old-run');
++
++  const originalInputTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
++  const originalErrorTty = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY');
++  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
++  Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: false });
++
++  try {
++    const code = await runGo({
++      repoRoot,
++      loaded: loaded(
++        repoRoot,
++        config('review.md', 'review.raw.md', true),
++        'global',
++      ),
++      version: 'test',
++      force: false,
++      wholeCheckout: false,
++      strict: false,
++    });
++
++    assert.equal(code, EXIT_TOTAL_FAILURE);
++  } finally {
++    restoreProperty(process.stdin, 'isTTY', originalInputTty);
++    restoreProperty(process.stderr, 'isTTY', originalErrorTty);
++  }
++
++  assert.equal(await readFile(report, 'utf8'), 'previous report');
++});
++
++test('confirmation requires a TTY prompt stream and writes the prompt there', async () => {
++  const input = new PassThrough() as PassThrough & { isTTY?: boolean };
++  const promptOutput = new PassThrough() as PassThrough & { isTTY?: boolean };
++  const redirectedOutput = new PassThrough() as PassThrough & { isTTY?: boolean };
++  input.isTTY = true;
++  promptOutput.isTTY = true;
++  redirectedOutput.isTTY = false;
++
++  let promptText = '';
++  let redirectedText = '';
++  promptOutput.setEncoding('utf8');
++  redirectedOutput.setEncoding('utf8');
++  promptOutput.on('data', (chunk: string) => { promptText += chunk; });
++  redirectedOutput.on('data', (chunk: string) => { redirectedText += chunk; });
++
++  assert.equal(canConfirm(input, promptOutput), true);
++  assert.equal(canConfirm(input, redirectedOutput), false);
++
++  const answer = confirm('Continue?', input, promptOutput);
++  input.end('yes\n');
++
++  assert.equal(await answer, true);
++  assert.match(promptText, /Continue\? \[y\/N\]/);
++  assert.equal(redirectedText, '');
++});
++
++test('merge spool is removed after a preflight failure', async () => {
++  const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-merge-cleanup-'));
++  created.push(repoRoot);
++
++  const stateDir = repoStateDir(repoRoot);
++  created.push(stateDir);
++
++  await assert.rejects(
++    runGo({
++      repoRoot,
++      loaded: loaded(repoRoot, config('review.md', 'review.raw.md'), 'global'),
++      version: 'test',
++      force: false,
++      wholeCheckout: false,
++      strict: false,
++    }),
++  );
++
++  assert.ok(!existsSync(path.join(stateDir, 'merge')));
++});
++
++test('repository state identity follows the filesystem case behavior', async () => {
++  const parent = await mkdtemp(path.join(tmpdir(), 'crbuddy-state-case-'));
++  created.push(parent);
++
++  const upper = path.join(parent, 'Repo');
++  const lower = path.join(parent, 'repo');
++  await mkdir(upper);
++
++  let distinct = true;
++
++  try {
++    await mkdir(lower);
++  } catch (error) {
++    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
++    distinct = false;
++  }
++
++  assert.equal(
++    repoStateDir(upper) !== repoStateDir(lower),
++    distinct,
++  );
++});
++
++function restoreProperty(
++  target: object,
++  key: string,
++  descriptor: PropertyDescriptor | undefined,
++): void {
++  if (descriptor) {
++    Object.defineProperty(target, key, descriptor);
++  } else {
++    delete (target as Record<string, unknown>)[key];
++  }
++}
+diff --git a/test/init-wizard.test.ts b/test/init-wizard.test.ts
+new file mode 100644
+index 0000000..f5e5cec
+--- /dev/null
++++ b/test/init-wizard.test.ts
+@@ -0,0 +1,199 @@
++import assert from 'node:assert/strict';
++import { existsSync } from 'node:fs';
++import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { test } from 'node:test';
++
++import { codexAdapter } from '../src/adapters/vendors.js';
++import {
++  effectiveInitScope,
++  runInit,
++  type Detection,
++} from '../src/commands/init.js';
++import {
++  CONFIG_VERSION,
++  DEFAULTS,
++  DEFAULT_OUTPUT,
++  type Config,
++} from '../src/config/schema.js';
++import { PromptAborted, type Choice } from '../src/util/prompt.js';
++import type { MessageKind, WizardUI } from '../src/util/wizard-prompt.js';
++
++const detection: Detection = {
++  adapter: codexAdapter,
++  present: true,
++  version: '0.149.0',
++};
++
++test('project scope without a repository normalizes to global', () => {
++  assert.equal(effectiveInitScope('project', null), 'global');
++  assert.equal(effectiveInitScope('project', 'C:/repo'), 'project');
++  assert.equal(effectiveInitScope('global', null), 'global');
++});
++
++test('equivalent wizard answers produce the unchanged config schema', async (t) => {
++  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-init-'));
++  t.after(() => rm(repo, { recursive: true, force: true }));
++  const ui = new DefaultingUI();
++
++  const code = await runInit(
++    { repoRoot: repo, scope: 'project' },
++    { ui, detect: async () => [detection] },
++  );
++
++  assert.equal(code, 0);
++  const written = JSON.parse(
++    await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'),
++  );
++  assert.deepEqual(written, {
++    configVersion: CONFIG_VERSION,
++    output: { ...DEFAULT_OUTPUT },
++    target: 'uncommitted',
++    refuseIfOutputExists: DEFAULTS.refuseIfOutputExists,
++    timeoutMs: DEFAULTS.timeoutMs,
++    mergeTimeoutMs: DEFAULTS.mergeTimeoutMs,
++    maxConcurrent: DEFAULTS.maxConcurrent,
++    maxDiffBytes: DEFAULTS.maxDiffBytes,
++    merge: {
++      enabled: true,
++      vendor: 'codex',
++      model: 'gpt-5.6-sol',
++      effort: 'high',
++    },
++    panel: [
++      {
++        id: 'codex-gpt-5-6-sol',
++        vendor: 'codex',
++        model: 'gpt-5.6-sol',
++        effort: 'high',
++      },
++    ],
++  });
++
++  const summary = ui.notes.find((entry) => entry.title === 'Configuration');
++  assert.match(summary?.message ?? '', /Codex CLI \u00b7 GPT-5\.6 Sol \u00b7 high/);
++  assert.doesNotMatch(summary?.message ?? '', /codex-gpt-5-6-sol/);
++});
++
++test('editing an existing config preserves accepted values', async (t) => {
++  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-'));
++  t.after(() => rm(repo, { recursive: true, force: true }));
++  const configPath = path.join(repo, '.crbuddy', 'config.json');
++  const existing: Config = {
++    configVersion: CONFIG_VERSION,
++    output: {
++      destination: 'terminal',
++      merged: 'REVIEW.md',
++      raw: 'REVIEW.raw.md',
++    },
++    target: { base: 'develop' },
++    refuseIfOutputExists: true,
++    timeoutMs: 123_000,
++    mergeTimeoutMs: 45_000,
++    maxConcurrent: 2,
++    maxDiffBytes: 987_654,
++    merge: {
++      enabled: true,
++      vendor: 'codex',
++      model: 'gpt-5.6-terra',
++      effort: 'max',
++    },
++    panel: [
++      {
++        id: 'careful-review',
++        vendor: 'codex',
++        model: 'gpt-5.6-terra',
++        effort: 'xhigh',
++        instructions: 'Focus on correctness.',
++      },
++    ],
++  };
++
++  await mkdir(path.dirname(configPath), { recursive: true });
++  await writeFile(configPath, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
++
++  const code = await runInit(
++    { repoRoot: repo, scope: 'project' },
++    { ui: new DefaultingUI(), detect: async () => [detection] },
++  );
++
++  assert.equal(code, 0);
++  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), existing);
++});
++
++test('late cancellation writes neither config nor planned .gitignore changes', async (t) => {
++  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-abort-'));
++  t.after(() => rm(repo, { recursive: true, force: true }));
++  const ui = new AbortAtSaveUI();
++
++  const code = await runInit(
++    { repoRoot: repo, scope: 'project' },
++    { ui, detect: async () => [detection] },
++  );
++
++  assert.equal(code, 130);
++  assert.equal(existsSync(path.join(repo, '.crbuddy', 'config.json')), false);
++  assert.equal(existsSync(path.join(repo, '.gitignore')), false);
++  assert.match(ui.cancelled.at(-1) ?? '', /No config was written/);
++});
++
++class DefaultingUI implements WizardUI {
++  readonly interactive: boolean = false;
++  readonly notes: Array<{ title?: string; message: string }> = [];
++  readonly cancelled: string[] = [];
++
++  intro(): void {}
++  outro(): void {}
++
++  cancel(message: string): void {
++    this.cancelled.push(message);
++  }
++
++  note(message: string, title?: string): void {
++    this.notes.push({ message, ...(title ? { title } : {}) });
++  }
++
++  message(_message: string, _kind?: MessageKind): void {}
++
++  spinner<T>(
++    _message: string,
++    task: (signal: AbortSignal) => Promise<T>,
++  ): Promise<T> {
++    return task(new AbortController().signal);
++  }
++
++  async select<T>(
++    _question: string,
++    choices: Array<Choice<T>>,
++    initialIndex = 0,
++  ): Promise<T> {
++    const selected =
++      choices[initialIndex] ?? choices.find((choice) => !choice.disabled);
++
++    if (!selected || selected.disabled) {
++      throw new Error('Test UI received no selectable default');
++    }
++
++    return selected.value;
++  }
++
++  async confirm(_question: string, defaultYes: boolean): Promise<boolean> {
++    return defaultYes;
++  }
++
++  async text(_question: string, fallback = ''): Promise<string> {
++    if (fallback === '') throw new Error('Test UI received required text unexpectedly');
++    return fallback;
++  }
++}
++
++class AbortAtSaveUI extends DefaultingUI {
++  override readonly interactive = true;
++
++  override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
++    if (question.startsWith('Create a .gitignore')) return true;
++    if (question === 'Save this config?') throw new PromptAborted();
++    return defaultYes;
++  }
++}
+diff --git a/test/init.test.ts b/test/init.test.ts
+new file mode 100644
+index 0000000..b384e69
+--- /dev/null
++++ b/test/init.test.ts
+@@ -0,0 +1,142 @@
++import assert from 'node:assert/strict';
++import { homedir } from 'node:os';
++import path from 'node:path';
++import { test } from 'node:test';
++
++import { inDirectory, storedDirectory } from '../src/commands/init.js';
++import { assertUsableOutput } from '../src/config/load.js';
++import { DEFAULT_OUTPUT } from '../src/config/schema.js';
++
++const repoRoot = path.resolve(path.join('/', 'work', 'projects', 'crbuddy'));
++
++test('the two report filenames keep their defaults wherever they land', () => {
++  assert.deepEqual(inDirectory('.'), { ...DEFAULT_OUTPUT });
++
++  assert.deepEqual(inDirectory('..'), {
++    destination: 'file',
++    merged: `../${DEFAULT_OUTPUT.merged}`,
++    raw: `../${DEFAULT_OUTPUT.raw}`,
++  });
++});
++
++test('a directory answer is anchored to the repository root, not the cwd', () => {
++  assert.equal(storedDirectory('reviews', repoRoot), 'reviews');
++  assert.equal(storedDirectory('./reviews', repoRoot), 'reviews');
++  assert.equal(storedDirectory('../reviews', repoRoot), '../reviews');
++});
++
++test('the repository root itself comes back as "."', () => {
++  assert.equal(storedDirectory(repoRoot, repoRoot), '.');
++  assert.equal(storedDirectory('.', repoRoot), '.');
++});
++
++test('a sibling of the repository stays relative, so the config travels', () => {
++  // One level up still means the same thing in whichever repository a
++  // global config is used from.
++  const sibling = path.join(path.dirname(repoRoot), 'reviews');
++
++  assert.equal(storedDirectory(sibling, repoRoot), '../reviews');
++});
++
++test('anything further out is pinned absolute rather than stored as ../../..', () => {
++  // Two levels up would resolve somewhere different in every repository,
++  // which is not a relationship worth preserving.
++  const far = path.resolve(path.join('/', 'work', 'reviews'));
++  const stored = storedDirectory(far, repoRoot);
++
++  assert.ok(path.isAbsolute(stored), `expected an absolute path, got ${stored}`);
++  assert.ok(!stored.includes('..'), stored);
++});
++
++test('a leading ~ expands to the home directory', () => {
++  const stored = storedDirectory('~/reviews', repoRoot);
++  const expected = path.join(homedir(), 'reviews').replace(/\\/g, '/');
++
++  // Either spelling is correct depending on where home sits relative to the
++  // repo; what matters is that the tilde is gone and it resolved.
++  assert.ok(!stored.startsWith('~'), stored);
++  assert.equal(path.resolve(repoRoot, stored).replace(/\\/g, '/'), expected);
++});
++
++test('stored paths use forward slashes so a config reads the same everywhere', () => {
++  for (const answer of ['../reviews', 'reviews/nested']) {
++    assert.ok(!storedDirectory(answer, repoRoot).includes('\\'));
++  }
++});
++
++test('every location the wizard can produce survives config validation', () => {
++  const directories = [
++    '.',
++    '..',
++    storedDirectory('reviews', repoRoot),
++    storedDirectory(path.join(path.dirname(repoRoot), 'reviews'), repoRoot),
++    storedDirectory(path.resolve(path.join('/', 'work', 'reviews')), repoRoot),
++  ];
++
++  for (const directory of directories) {
++    assert.doesNotThrow(
++      () => assertUsableOutput(inDirectory(directory), 'output'),
++      `expected ${directory} to be usable`,
++    );
++  }
++});
++
++test('a directory answer pointing into git state is refused', () => {
++  for (const answer of ['.git', '../repo/.git', '.crbuddy']) {
++    assert.throws(
++      () => assertUsableOutput(inDirectory(storedDirectory(answer, repoRoot)), 'output'),
++      /must not write inside/,
++      `expected ${answer} to be refused`,
++    );
++  }
++});
++
++test('without a repository root the answer is stored absolute', () => {
++  const stored = storedDirectory('reviews', null);
++
++  assert.ok(path.isAbsolute(stored), stored);
++});
++
++test('re-running config keeps filenames a user already chose', () => {
++  // Accepting the location a config is already using must not rename its
++  // files out from under whatever consumes them.
++  const existing = {
++    destination: 'file' as const,
++    merged: 'REVIEW.md',
++    raw: 'REVIEW.raw.md',
++  };
++
++  assert.deepEqual(inDirectory('.', existing), existing);
++
++  assert.deepEqual(inDirectory('..', existing), {
++    destination: 'file',
++    merged: '../REVIEW.md',
++    raw: '../REVIEW.raw.md',
++  });
++
++  // A directory change keeps the names but moves them.
++  assert.equal(inDirectory('reviews', existing).merged, 'reviews/REVIEW.md');
++});
++
++test('with no existing config the defaults are used', () => {
++  assert.equal(inDirectory('.').merged, DEFAULT_OUTPUT.merged);
++});
++
++test('two same-named reports in different directories do not collapse', () => {
++  // `reports/a/REVIEW.md` + `reports/b/REVIEW.md` are two files. Keeping
++  // only the basenames would make them one, and the wizard would write a
++  // config that `crbuddy go` refuses to load.
++  const existing = {
++    destination: 'file' as const,
++    merged: 'reports/a/REVIEW.md',
++    raw: 'reports/b/REVIEW.md',
++  };
++
++  const collapsed = inDirectory('.', existing);
++
++  assert.notEqual(collapsed.merged, collapsed.raw);
++  assert.equal(collapsed.merged, 'REVIEW.md');
++  assert.equal(collapsed.raw, 'REVIEW.raw.md');
++
++  assert.doesNotThrow(() => assertUsableOutput(collapsed, 'output'));
++});
+diff --git a/test/merge.test.ts b/test/merge.test.ts
+index cba0010..7532e11 100644
+--- a/test/merge.test.ts
++++ b/test/merge.test.ts
+@@ -33,7 +33,7 @@ const NUMBERED_REVIEW = `1. First problem in src/a.ts:1
+ 2. Second problem in src/b.ts:9
+ `;
+ 
+-test('segmentation is lossless — reassembly reproduces the input', () => {
++test('segmentation is lossless - reassembly reproduces the input', () => {
+   for (const input of [HEADING_REVIEW, NUMBERED_REVIEW, 'just one paragraph\n']) {
+     const findings = segment('run-1', input);
+     assert.equal(reassemble(findings), input, 'segmentation must not lose bytes');
+@@ -106,7 +106,7 @@ test('validation accepts a complete partition', () => {
+   assert.equal(result.clusters.length, 2);
+ });
+ 
+-test('validation REJECTS a dropped finding — the merge cannot delete', () => {
++test('validation REJECTS a dropped finding - the merge cannot delete', () => {
+   const findings = makeFindings();
+ 
+   assert.throws(
+diff --git a/test/output.test.ts b/test/output.test.ts
+new file mode 100644
+index 0000000..21d2077
+--- /dev/null
++++ b/test/output.test.ts
+@@ -0,0 +1,372 @@
++import assert from 'node:assert/strict';
++import { existsSync } from 'node:fs';
++import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { after, test } from 'node:test';
++
++import { repoRelative } from '../src/config/load.js';
++import { pathKey as pathKeySync } from '../src/commands/go.js';
++
++import {
++  cleanupTemps,
++  commitOutputs,
++  recoverStrandedOutputs,
++  stashExistingOutputs,
++} from '../src/output/write.js';
++
++const created: string[] = [];
++
++after(async () => {
++  for (const dir of created) {
++    await rm(dir, { recursive: true, force: true });
++  }
++});
++
++/**
++ * A repository nested one level down, so `../` is a real directory that
++ * exists and can be written to — the layout the "one level up" setup option
++ * produces.
++ */
++async function makeTree(): Promise<{ parent: string; repoRoot: string; workDir: string }> {
++  const parent = await mkdtemp(path.join(tmpdir(), 'crbuddy-out-'));
++  created.push(parent);
++
++  const repoRoot = path.join(parent, 'repo');
++  const workDir = path.join(repoRoot, '.crbuddy');
++
++  await mkdir(workDir, { recursive: true });
++
++  return { parent, repoRoot, workDir };
++}
++
++test('a report above the repository root is written outside it', async () => {
++  const { parent, repoRoot } = await makeTree();
++
++  const written = await commitOutputs(repoRoot, [
++    { relative: '../CODE-REVIEW-HANDOFF.md', content: 'merged' },
++    { relative: '../CODE-REVIEW-HANDOFF.raw.md', content: 'raw' },
++  ]);
++
++  assert.equal(written.length, 2);
++
++  assert.equal(
++    await readFile(path.join(parent, 'CODE-REVIEW-HANDOFF.md'), 'utf8'),
++    'merged',
++  );
++
++  // The point of the option: nothing lands in the repository at all.
++  assert.ok(!existsSync(path.join(repoRoot, 'CODE-REVIEW-HANDOFF.md')));
++});
++
++test('an absolute report path is not joined onto the repository root', async () => {
++  const { parent, repoRoot } = await makeTree();
++  const absolute = path.join(parent, 'elsewhere', 'report.md');
++
++  await commitOutputs(repoRoot, [{ relative: absolute, content: 'merged' }]);
++
++  assert.equal(await readFile(absolute, 'utf8'), 'merged');
++});
++
++test('an out-of-repo report is stashed and restored on failure', async () => {
++  const { parent, repoRoot, workDir } = await makeTree();
++  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
++
++  await writeFile(report, 'previous run', 'utf8');
++
++  const stashed = await stashExistingOutputs(
++    repoRoot,
++    workDir,
++    ['../CODE-REVIEW-HANDOFF.md'],
++    'runid',
++  );
++
++  assert.deepEqual(stashed.moved, ['../CODE-REVIEW-HANDOFF.md']);
++  assert.ok(!existsSync(report), 'should be moved aside for the duration');
++
++  await stashed.restore();
++
++  assert.equal(await readFile(report, 'utf8'), 'previous run');
++});
++
++test('an out-of-repo report stranded by a crash is recovered', async () => {
++  const { parent, repoRoot, workDir } = await makeTree();
++  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
++
++  await writeFile(report, 'previous run', 'utf8');
++
++  // Stash, then walk away without restoring or discarding — a hard stop.
++  await stashExistingOutputs(repoRoot, workDir, ['../CODE-REVIEW-HANDOFF.md'], 'runid');
++  assert.ok(!existsSync(report));
++
++  const recovered = await recoverStrandedOutputs(repoRoot, workDir);
++
++  assert.deepEqual(recovered, ['../CODE-REVIEW-HANDOFF.md']);
++  assert.equal(await readFile(report, 'utf8'), 'previous run');
++});
++
++test('temp litter is swept from the directory the report actually lives in', async () => {
++  const { parent, repoRoot } = await makeTree();
++  const litter = path.join(parent, `CODE-REVIEW-HANDOFF.md.crbuddy-tmp-999`);
++
++  await writeFile(litter, 'half-written', 'utf8');
++
++  await cleanupTemps(repoRoot, ['../CODE-REVIEW-HANDOFF.md']);
++
++  assert.ok(!existsSync(litter));
++});
++
++test('a failed rename leaves neither new nor half-committed output behind', async () => {
++  const { parent, repoRoot } = await makeTree();
++
++  // The second destination is a directory, so renaming a file onto it fails
++  // after the first has already landed.
++  const blocked = path.join(parent, 'blocked.md');
++  await mkdir(blocked, { recursive: true });
++
++  await assert.rejects(
++    commitOutputs(repoRoot, [
++      { relative: '../first.md', content: 'first' },
++      { relative: '../blocked.md', content: 'second' },
++    ]),
++  );
++
++  assert.ok(!existsSync(path.join(parent, 'first.md')), 'the landed rename is rolled back');
++});
++
++test('out-of-repo output paths are excluded from git pathspecs', () => {
++  // These become `:(exclude)` arguments. git aborts the entire diff on one
++  // pointing outside the worktree ("is outside repository"), so an unfiltered
++  // list makes every run fail rather than merely over-matching.
++  //
++  // Built from the real repo root rather than hardcoded, so the assertions
++  // mean the same thing on every platform - `D:/x` is only an absolute path
++  // on Windows.
++  const repoRoot = path.resolve(path.join('/', 'work', 'repo'));
++  const outsideRoot = path.resolve(path.join('/', 'work', 'elsewhere'));
++
++  for (const outside of [
++    '../CODE-REVIEW-HANDOFF.md',
++    '..',
++    path.join(outsideRoot, 'x.md'),
++  ]) {
++    assert.equal(repoRelative(outside, repoRoot), null, outside);
++  }
++
++  for (const inside of ['CODE-REVIEW-HANDOFF.md', 'reviews/x.md', './x.md']) {
++    assert.ok(repoRelative(inside, repoRoot) !== null, inside);
++  }
++});
++
++test('a trailing slash survives the repo-relative rewrite', () => {
++  // `.crbuddy/` means "everything beneath"; losing the slash turns the
++  // pathspec into a single file that does not exist.
++  const repoRoot = path.resolve(path.join('/', 'work', 'repo'));
++
++  assert.equal(repoRelative('.crbuddy/', repoRoot), '.crbuddy/');
++});
++
++test('an absolute path inside the repo is still excluded, not dropped', () => {
++  // Absolute is not the same as outside. Dropping it would leave the last
++  // run's report in the snapshot, and the next panel would review it.
++  const repoRoot = path.resolve(path.join('/', 'work', 'repo'));
++  const absolute = path.join(repoRoot, 'REVIEW.md');
++
++  assert.equal(repoRelative(absolute, repoRoot), 'REVIEW.md');
++});
++
++test('a stash across filesystems falls back to copy instead of failing', async () => {
++  // Simulated rather than staged on a second drive: EXDEV is what a
++  // different drive raises, and the recovery path is the same either way.
++  const { parent, repoRoot, workDir } = await makeTree();
++  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
++
++  await writeFile(report, 'previous run', 'utf8');
++
++  const stashed = await stashExistingOutputs(
++    repoRoot,
++    workDir,
++    ['../CODE-REVIEW-HANDOFF.md'],
++    'runid',
++  );
++
++  assert.ok(!existsSync(report));
++  await stashed.restore();
++  assert.equal(await readFile(report, 'utf8'), 'previous run');
++});
++
++test('a restore that cannot put a file back keeps the only copy', async () => {
++  // The state directory now lives outside the repo, so this is a
++  // cross-filesystem copy wherever $HOME and the repo differ. Swallowing the
++  // failure and deleting the holding directory destroyed the previous report
++  // while still reporting success.
++  const { parent, repoRoot, workDir } = await makeTree();
++  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
++
++  await writeFile(report, 'previous run', 'utf8');
++
++  const stashed = await stashExistingOutputs(
++    repoRoot,
++    workDir,
++    ['../CODE-REVIEW-HANDOFF.md'],
++    'runid',
++  );
++
++  // Block the move back: a directory cannot be replaced by a file rename.
++  await mkdir(report, { recursive: true });
++
++  const stranded = await stashed.restore();
++
++  assert.equal(stranded.length, 1, 'the failure is reported, not swallowed');
++  assert.ok(existsSync(stranded[0]!), 'the only copy still exists');
++});
++
++test('a clean restore still reports nothing stranded', async () => {
++  const { parent, repoRoot, workDir } = await makeTree();
++  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
++
++  await writeFile(report, 'previous run', 'utf8');
++
++  const stashed = await stashExistingOutputs(
++    repoRoot,
++    workDir,
++    ['../CODE-REVIEW-HANDOFF.md'],
++    'runid',
++  );
++
++  assert.deepEqual(await stashed.restore(), []);
++  assert.equal(await readFile(report, 'utf8'), 'previous run');
++});
++
++test('restoring twice does not invent a stranded holding path', async () => {
++  const { parent, repoRoot, workDir } = await makeTree();
++  const report = path.join(parent, 'CODE-REVIEW-HANDOFF.md');
++
++  await writeFile(report, 'previous run', 'utf8');
++
++  const stashed = await stashExistingOutputs(
++    repoRoot,
++    workDir,
++    ['../CODE-REVIEW-HANDOFF.md'],
++    'runid',
++  );
++
++  assert.deepEqual(await stashed.restore(), []);
++  assert.deepEqual(await stashed.restore(), []);
++  assert.equal(await readFile(report, 'utf8'), 'previous run');
++});
++
++test('a partial stash failure rolls earlier moves back immediately', async () => {
++  const { parent, repoRoot, workDir } = await makeTree();
++  const first = path.join(parent, 'first.md');
++  const second = path.join(parent, 'second.md');
++  const manifest = path.join(workDir, 'previous', 'partial', 'manifest.json');
++  await writeFile(first, 'first report', 'utf8');
++  await writeFile(second, 'second report', 'utf8');
++
++  let moves = 0;
++
++  await assert.rejects(
++    stashExistingOutputs(
++      repoRoot,
++      workDir,
++      ['../first.md', '../second.md'],
++      'partial',
++      {
++        moveFile: async (from, to) => {
++          moves += 1;
++          assert.ok(existsSync(manifest), 'manifest must precede the first move');
++          if (moves === 2) throw new Error('simulated second move failure');
++          await rename(from, to);
++        },
++      },
++    ),
++    /simulated second move failure/,
++  );
++
++  assert.equal(await readFile(first, 'utf8'), 'first report');
++  assert.equal(await readFile(second, 'utf8'), 'second report');
++  assert.ok(!existsSync(path.dirname(manifest)), 'completed rollback clears the batch');
++});
++
++test('a failed stash rollback leaves a manifest the next run can recover', async () => {
++  const { parent, repoRoot, workDir } = await makeTree();
++  const first = path.join(parent, 'first.md');
++  const second = path.join(parent, 'second.md');
++  const holding = path.join(workDir, 'previous', 'recoverable');
++  await writeFile(first, 'first report', 'utf8');
++  await writeFile(second, 'second report', 'utf8');
++
++  let moves = 0;
++
++  await assert.rejects(
++    stashExistingOutputs(
++      repoRoot,
++      workDir,
++      ['../first.md', '../second.md'],
++      'recoverable',
++      {
++        moveFile: async (from, to) => {
++          moves += 1;
++          if (moves === 2) throw new Error('simulated second move failure');
++          if (moves === 3) throw new Error('simulated rollback failure');
++          await rename(from, to);
++        },
++      },
++    ),
++    /simulated second move failure/,
++  );
++
++  assert.ok(existsSync(path.join(holding, 'manifest.json')));
++  assert.ok(!existsSync(first));
++  assert.equal(await readFile(second, 'utf8'), 'second report');
++
++  assert.deepEqual(await recoverStrandedOutputs(repoRoot, workDir), ['../first.md']);
++  assert.equal(await readFile(first, 'utf8'), 'first report');
++});
++
++test('a manifest failure occurs before any output is moved', async () => {
++  const { parent, repoRoot, workDir } = await makeTree();
++  const report = path.join(parent, 'report.md');
++  const holding = path.join(workDir, 'previous', 'no-manifest');
++  await writeFile(report, 'previous report', 'utf8');
++
++  let moved = false;
++
++  await assert.rejects(
++    stashExistingOutputs(
++      repoRoot,
++      workDir,
++      ['../report.md'],
++      'no-manifest',
++      {
++        moveFile: async () => { moved = true; },
++        writeManifest: async () => {
++          throw new Error('simulated manifest failure');
++        },
++      },
++    ),
++    /simulated manifest failure/,
++  );
++
++  assert.equal(moved, false);
++  assert.equal(await readFile(report, 'utf8'), 'previous report');
++  assert.ok(!existsSync(holding));
++});
++
++test('output lock identity conservatively folds on Windows and macOS', async () => {
++  // Under-coordinating one physical output file can corrupt it. A
++  // case-sensitive macOS volume may over-coordinate two case-distinct files,
++  // but repository state uses its separately probed canonical identity.
++  const { pathKey } = await import('../src/commands/go.js');
++
++  const keys = new Set([pathKey('/w/Review.md'), pathKey('/w/review.md')]);
++  const conservativelyFolded =
++    process.platform === 'win32' || process.platform === 'darwin';
++
++  assert.equal(keys.size, conservativelyFolded ? 1 : 2);
++});
++
++test('separators are normalized so one path has one identity', () => {
++  assert.equal(pathKeySync('C:\\w\\x.md'), pathKeySync('C:/w/x.md'));
++});
+diff --git a/test/progress.test.ts b/test/progress.test.ts
+new file mode 100644
+index 0000000..fe361f8
+--- /dev/null
++++ b/test/progress.test.ts
+@@ -0,0 +1,69 @@
++import assert from 'node:assert/strict';
++import { setTimeout as delay } from 'node:timers/promises';
++import { test } from 'node:test';
++
++import { Progress } from '../src/run/progress.js';
++
++class Capture {
++  readonly columns = 80;
++  value = '';
++
++  constructor(readonly isTTY: boolean) {}
++
++  write(text: string): boolean {
++    this.value += text;
++    return true;
++  }
++}
++
++test('the review pulse animates on interactive stdout when stderr is captured', async () => {
++  const stderr = new Capture(false);
++  const stdout = new Capture(true);
++  const progress = new Progress(stderr, stdout);
++
++  progress.line('Starting 1 review at 4:19pm…');
++  progress.startPulse(Date.now());
++  assert.equal(stdout.value, '');
++
++  progress.laneStarted('Codex CLI (gpt-5.6)');
++
++  try {
++    assert.equal(stderr.value, 'Starting 1 review at 4:19pm…\n');
++    assert.match(stdout.value, /\u280B 0s - waiting on Codex CLI \(gpt-5\.6\)/);
++
++    await delay(150);
++
++    assert.match(stdout.value, /\u2819 0s - waiting on Codex CLI \(gpt-5\.6\)/);
++  } finally {
++    progress.stopPulse();
++  }
++});
++
++test('the review pulse stays off non-interactive output', async () => {
++  const stderr = new Capture(false);
++  const stdout = new Capture(false);
++  const progress = new Progress(stderr, stdout);
++
++  progress.line('Starting 1 review at 4:19pm…');
++  progress.laneStarted('Codex CLI');
++  progress.startPulse(Date.now());
++
++  await delay(120);
++  progress.stopPulse();
++
++  assert.equal(stderr.value, 'Starting 1 review at 4:19pm…\n');
++  assert.equal(stdout.value, '');
++});
++
++test('the review pulse prefers stderr when both streams are interactive', () => {
++  const stderr = new Capture(true);
++  const stdout = new Capture(true);
++  const progress = new Progress(stderr, stdout);
++
++  progress.laneStarted('Claude Code');
++  progress.startPulse(Date.now());
++  progress.stopPulse();
++
++  assert.match(stderr.value, /\u280B 0s - waiting on Claude Code/);
++  assert.equal(stdout.value, '');
++});
+diff --git a/test/prompt.test.ts b/test/prompt.test.ts
+new file mode 100644
+index 0000000..ec678a8
+--- /dev/null
++++ b/test/prompt.test.ts
+@@ -0,0 +1,270 @@
++import assert from 'node:assert/strict';
++import { spawn } from 'node:child_process';
++import { existsSync } from 'node:fs';
++import { mkdtemp, rm } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { PassThrough } from 'node:stream';
++import { pathToFileURL } from 'node:url';
++import { test } from 'node:test';
++
++import { PromptAborted } from '../src/util/prompt.js';
++import { probe, runProcess } from '../src/run/spawn.js';
++import { createWizardUI } from '../src/util/wizard-prompt.js';
++
++test('non-TTY wizard creation does not load the Clack adapter', async () => {
++  let loads = 0;
++
++  const ui = await createWizardUI({
++    interactive: false,
++    loadClack: async () => {
++      loads += 1;
++      throw new Error('Clack must not load for piped input');
++    },
++  });
++
++  assert.equal(ui.interactive, false);
++  assert.equal(loads, 0);
++});
++
++test('the TTY adapter maps defaults and disabled choices into Clack', async () => {
++  let received: Record<string, unknown> | undefined;
++  const input = new PassThrough();
++  const output = new PassThrough();
++  const clack = fakeClack({
++    select: async (options: Record<string, unknown>) => {
++      received = options;
++      return 'second';
++    },
++  });
++  const ui = await createWizardUI({
++    interactive: true,
++    input,
++    output,
++    loadClack: async () => clack,
++  });
++
++  const value = await ui.select(
++    'Pick one',
++    [
++      { label: 'First', value: 'first', disabled: true },
++      { label: 'Second', value: 'second', hint: 'recommended' },
++    ],
++    1,
++  );
++
++  assert.equal(value, 'second');
++  assert.equal(received?.initialValue, 'second');
++  assert.deepEqual(received?.options, [
++    { label: 'First', value: 'first', disabled: true },
++    { label: 'Second', value: 'second', hint: 'recommended' },
++  ]);
++});
++
++test('the TTY adapter normalizes Clack cancellation to PromptAborted', async () => {
++  const cancelled = Symbol('cancelled');
++  const ui = await createWizardUI({
++    interactive: true,
++    input: new PassThrough(),
++    output: new PassThrough(),
++    loadClack: async () =>
++      fakeClack({
++        select: async () => cancelled,
++        isCancel: (value: unknown) => value === cancelled,
++      }),
++  });
++
++  await assert.rejects(
++    ui.select('Pick one', [{ label: 'One', value: 1 }]),
++    PromptAborted,
++  );
++});
++
++test('TTY text uses the fallback for whitespace-only input', async () => {
++  const ui = await createWizardUI({
++    interactive: true,
++    input: new PassThrough(),
++    output: new PassThrough(),
++    loadClack: async () =>
++      fakeClack({
++        text: async () => '   ',
++      }),
++  });
++
++  assert.equal(await ui.text('Base branch', 'main'), 'main');
++});
++
++test('cancelling the TTY spinner aborts the active operation', async () => {
++  let cancelled = false;
++  const ui = await createWizardUI({
++    interactive: true,
++    input: new PassThrough(),
++    output: new PassThrough(),
++    loadClack: async () =>
++      fakeClack({
++        spinner: (options: { onCancel?: () => void }) => ({
++          get isCancelled() {
++            return cancelled;
++          },
++          start() {
++            cancelled = true;
++            options.onCancel?.();
++          },
++          stop() {},
++          cancel() {},
++          error() {},
++        }),
++      }),
++  });
++
++  await assert.rejects(
++    ui.spinner('Checking', async (signal) => {
++      assert.equal(signal.aborted, true);
++      return 'unused';
++    }),
++    PromptAborted,
++  );
++});
++
++test('an aborted vendor probe terminates its child promptly', async () => {
++  const controller = new AbortController();
++  const started = Date.now();
++  const timer = setTimeout(() => controller.abort(), 100);
++
++  try {
++    await probe(
++      process.execPath,
++      ['--eval', 'setInterval(() => {}, 1000)'],
++      controller.signal,
++    );
++  } finally {
++    clearTimeout(timer);
++  }
++
++  assert.ok(Date.now() - started < 5000, 'aborted probe did not exit promptly');
++});
++
++test('termination escalation survives the process leader closing', async (t) => {
++  const scratch = await mkdtemp(path.join(tmpdir(), 'crbuddy-tree-test-'));
++  t.after(() => rm(scratch, { recursive: true, force: true }));
++  const marker = path.join(scratch, 'descendant-survived');
++  const descendant = `
++    const fs = require('node:fs');
++    process.on('SIGTERM', () => {});
++    setTimeout(() => {
++      fs.writeFileSync(${JSON.stringify(marker)}, 'alive');
++      process.exit(0);
++    }, 700);
++  `;
++  const leader = `
++    const { spawn } = require('node:child_process');
++    const child = spawn(process.execPath, ['--eval', ${JSON.stringify(descendant)}], {
++      stdio: 'ignore'
++    });
++    child.unref();
++    setInterval(() => {}, 1000);
++  `;
++  const controller = new AbortController();
++  const timer = setTimeout(() => controller.abort(), 200);
++
++  try {
++    await runProcess({
++      command: process.execPath,
++      args: ['--eval', leader],
++      cwd: scratch,
++      timeoutMs: 5000,
++      scratchDir: scratch,
++      id: 'tree-escalation',
++      signal: controller.signal,
++      killGraceMs: 100,
++    });
++  } finally {
++    clearTimeout(timer);
++  }
++
++  await new Promise((resolve) => setTimeout(resolve, 900));
++  assert.equal(existsSync(marker), false, 'SIGTERM-resistant descendant survived');
++});
++
++test('piped prompts consume sequential answers from one stdin drain', async () => {
++  const promptUrl = pathToFileURL(
++    path.resolve('dist-test/src/util/prompt.js'),
++  ).href;
++  const script = `
++    import { confirm, select, text } from ${JSON.stringify(promptUrl)};
++    const selected = await select('Choose', [
++      { label: 'Disabled', value: 'blocked', disabled: true },
++      { label: 'Enabled', value: 'ok' }
++    ]);
++    const confirmed = await confirm('Continue?', false);
++    const entered = await text('Name:');
++    console.log('RESULT:' + JSON.stringify({ selected, confirmed, entered }));
++  `;
++
++  const result = await runNode(script, '1\n2\ny\nreviewer\n');
++
++  assert.equal(result.code, 0, result.stderr);
++  assert.match(result.stdout, /Pick one of the numbers above/);
++  assert.match(
++    result.stdout,
++    /RESULT:{"selected":"ok","confirmed":true,"entered":"reviewer"}/,
++  );
++});
++
++type FakeOverrides = {
++  select?: (options: Record<string, unknown>) => Promise<unknown>;
++  text?: (options: Record<string, unknown>) => Promise<unknown>;
++  isCancel?: (value: unknown) => boolean;
++  spinner?: (options: { onCancel?: () => void }) => unknown;
++};
++
++function fakeClack(overrides: FakeOverrides = {}) {
++  const noop = () => {};
++
++  return {
++    intro: noop,
++    outro: noop,
++    cancel: noop,
++    note: noop,
++    log: { info: noop, success: noop, warn: noop, error: noop },
++    select: overrides.select ?? (async () => 'value'),
++    confirm: async () => true,
++    text: overrides.text ?? (async () => 'text'),
++    isCancel: overrides.isCancel ?? (() => false),
++    spinner:
++      overrides.spinner ??
++      (() => ({
++        isCancelled: false,
++        start: noop,
++        stop: noop,
++        cancel: noop,
++        error: noop,
++      })),
++  } as unknown as typeof import('@clack/prompts');
++}
++
++async function runNode(
++  script: string,
++  stdin: string,
++): Promise<{ code: number | null; stdout: string; stderr: string }> {
++  return new Promise((resolve, reject) => {
++    const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
++      cwd: process.cwd(),
++      stdio: ['pipe', 'pipe', 'pipe'],
++    });
++    let stdout = '';
++    let stderr = '';
++
++    child.stdout.setEncoding('utf8');
++    child.stderr.setEncoding('utf8');
++    child.stdout.on('data', (chunk: string) => {
++      stdout += chunk;
++    });
++    child.stderr.on('data', (chunk: string) => {
++      stderr += chunk;
++    });
++    child.on('error', reject);
++    child.on('close', (code) => resolve({ code, stdout, stderr }));
++    child.stdin.end(stdin);
++  });
++}
+diff --git a/test/target.test.ts b/test/target.test.ts
+index 4b1d6ed..add1504 100644
+--- a/test/target.test.ts
++++ b/test/target.test.ts
+@@ -1,6 +1,7 @@
+ import assert from 'node:assert/strict';
+ import { execFileSync } from 'node:child_process';
+-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
++import { createHash } from 'node:crypto';
++import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+ import { tmpdir } from 'node:os';
+ import path from 'node:path';
+ import { after, test } from 'node:test';
+@@ -43,6 +44,18 @@ function commit(dir: string, message: string): void {
+   });
+ }
+ 
++function snapshotFile(dir: string, snapshot: string, file: string): Buffer {
++  execFileSync('git', ['cat-file', '-e', `${snapshot}:${file}`], {
++    cwd: dir,
++    stdio: 'pipe',
++  });
++
++  return execFileSync('git', ['cat-file', 'blob', `${snapshot}:${file}`], {
++    cwd: dir,
++    stdio: 'pipe',
++  });
++}
++
+ test('finds the worktree root from a subdirectory', async () => {
+   const dir = await makeRepo();
+   await writeFile(path.join(dir, 'a.txt'), 'hello\n');
+@@ -56,6 +69,37 @@ test('finds the worktree root from a subdirectory', async () => {
+   assert.equal(path.basename(root), path.basename(dir));
+ });
+ 
++test('uncommitted target captures staged new paths in a linked worktree', async () => {
++  const dir = await makeRepo();
++  await writeFile(path.join(dir, 'tracked.txt'), 'base\n');
++  commit(dir, 'init');
++
++  const linkedParent = await mkdtemp(
++    path.join(tmpdir(), 'crbuddy-linked-test-'),
++  );
++  created.unshift(linkedParent);
++  const linked = path.join(linkedParent, 'worktree');
++  execFileSync('git', ['worktree', 'add', '-q', '-b', 'linked-test', linked], {
++    cwd: dir,
++    stdio: 'pipe',
++  });
++
++  await writeFile(path.join(linked, 'tracked.txt'), 'linked modification\n');
++  await writeFile(path.join(linked, 'linked-new.txt'), 'linked staged bytes\n');
++  execFileSync('git', ['add', '--', 'linked-new.txt'], { cwd: linked });
++
++  const target = await resolveTarget(linked, 'uncommitted');
++
++  assert.deepEqual(
++    target.files.map((file) => file.path).sort(),
++    ['linked-new.txt', 'tracked.txt'],
++  );
++  assert.deepEqual(
++    snapshotFile(linked, target.snapshot, 'linked-new.txt'),
++    Buffer.from('linked staged bytes\n'),
++  );
++});
++
+ test('uncommitted target includes tracked modifications', async () => {
+   const dir = await makeRepo();
+   await writeFile(path.join(dir, 'a.txt'), 'one\n');
+@@ -72,6 +116,67 @@ test('uncommitted target includes tracked modifications', async () => {
+   assert.match(target.diff, /\+two/);
+ });
+ 
++test('uncommitted target includes a staged new file with tracked modifications', async () => {
++  const dir = await makeRepo();
++  await writeFile(path.join(dir, 'tracked.txt'), 'before\n');
++  commit(dir, 'init');
++
++  await writeFile(path.join(dir, 'tracked.txt'), 'after\n');
++  await writeFile(path.join(dir, 'staged-new.txt'), 'staged worktree bytes\n');
++  execFileSync('git', ['add', '--', 'staged-new.txt'], { cwd: dir });
++
++  const target = await resolveTarget(dir, 'uncommitted');
++  const paths = target.files.map((file) => file.path);
++
++  assert.ok(paths.includes('tracked.txt'));
++  assert.ok(paths.includes('staged-new.txt'));
++  assert.match(target.diff, /\+staged worktree bytes/);
++  assert.equal(target.bytes, Buffer.byteLength(target.diff, 'utf8'));
++  assert.equal(
++    target.digest,
++    createHash('sha256').update(target.diff).digest('hex').slice(0, 16),
++  );
++  assert.deepEqual(
++    snapshotFile(dir, target.snapshot, 'staged-new.txt'),
++    Buffer.from('staged worktree bytes\n'),
++  );
++});
++
++test('uncommitted target includes a staged rename destination', async () => {
++  const dir = await makeRepo();
++  await writeFile(path.join(dir, 'old-name.txt'), 'rename destination bytes\n');
++  commit(dir, 'init');
++
++  execFileSync('git', ['mv', 'old-name.txt', 'new-name.txt'], { cwd: dir });
++
++  const target = await resolveTarget(dir, 'uncommitted');
++
++  assert.ok(target.files.some((file) => file.path.includes('new-name.txt')));
++  assert.deepEqual(
++    snapshotFile(dir, target.snapshot, 'new-name.txt'),
++    Buffer.from('rename destination bytes\n'),
++  );
++});
++
++test('uncommitted target includes intent-to-add worktree content', async () => {
++  const dir = await makeRepo();
++  await writeFile(path.join(dir, 'tracked.txt'), 'base\n');
++  commit(dir, 'init');
++
++  await writeFile(path.join(dir, 'intent.txt'), 'intent worktree bytes\n');
++  execFileSync('git', ['add', '--intent-to-add', '--', 'intent.txt'], {
++    cwd: dir,
++  });
++
++  const target = await resolveTarget(dir, 'uncommitted');
++
++  assert.ok(target.files.some((file) => file.path === 'intent.txt'));
++  assert.deepEqual(
++    snapshotFile(dir, target.snapshot, 'intent.txt'),
++    Buffer.from('intent worktree bytes\n'),
++  );
++});
++
+ test('uncommitted target includes UNTRACKED files', async () => {
+   const dir = await makeRepo();
+   await writeFile(path.join(dir, 'a.txt'), 'one\n');
+@@ -85,7 +190,7 @@ test('uncommitted target includes UNTRACKED files', async () => {
+ 
+   assert.ok(
+     paths.includes('brand-new.txt'),
+-    `expected brand-new.txt in ${JSON.stringify(paths)} — plain git diff would miss it`,
++    `expected brand-new.txt in ${JSON.stringify(paths)} - plain git diff would miss it`,
+   );
+   assert.match(target.diff, /\+fresh/);
+ });
+@@ -123,27 +228,38 @@ test('exclusions keep crbuddy output out of its own next review', async () => {
+   assert.ok(paths.includes('a.txt'));
+ });
+ 
+-test('the snapshot does not disturb the working tree or index', async () => {
++test('the snapshot leaves the user index and worktree status byte-identical', async () => {
+   const dir = await makeRepo();
+   await writeFile(path.join(dir, 'a.txt'), 'one\n');
+   commit(dir, 'init');
+ 
+   await writeFile(path.join(dir, 'a.txt'), 'two\n');
++  await writeFile(path.join(dir, 'staged.txt'), 'staged\n');
++  execFileSync('git', ['add', '--', 'staged.txt'], { cwd: dir });
+   await writeFile(path.join(dir, 'untracked.txt'), 'x\n');
+ 
+   const before = execFileSync('git', ['status', '--porcelain=v1', '-z'], {
+     cwd: dir,
+-    encoding: 'utf8',
+   });
++  const indexPath = execFileSync(
++    'git',
++    ['rev-parse', '--path-format=absolute', '--git-path', 'index'],
++    {
++      cwd: dir,
++      encoding: 'utf8',
++    },
++  ).trim();
++  const indexBefore = await readFile(indexPath);
+ 
+   await resolveTarget(dir, 'uncommitted');
+ 
++  const indexAfter = await readFile(indexPath);
+   const after = execFileSync('git', ['status', '--porcelain=v1', '-z'], {
+     cwd: dir,
+-    encoding: 'utf8',
+   });
+ 
+-  assert.equal(after, before, 'snapshot must not stage or modify anything');
++  assert.deepEqual(indexAfter, indexBefore, 'snapshot must not alter the user index');
++  assert.deepEqual(after, before, 'snapshot must not alter worktree status');
+ });
+ 
+ test('the snapshot is a real commit object', async () => {
+@@ -173,6 +289,21 @@ test('works in a repository with no commits yet', async () => {
+   assert.equal(target.files[0]?.path, 'first.txt');
+ });
+ 
++test('uncommitted target includes a staged new file without HEAD', async () => {
++  const dir = await makeRepo();
++  await writeFile(path.join(dir, 'staged-first.txt'), 'first staged bytes\n');
++  execFileSync('git', ['add', '--', 'staged-first.txt'], { cwd: dir });
++
++  const target = await resolveTarget(dir, 'uncommitted');
++
++  assert.equal(target.files.length, 1);
++  assert.equal(target.files[0]?.path, 'staged-first.txt');
++  assert.deepEqual(
++    snapshotFile(dir, target.snapshot, 'staged-first.txt'),
++    Buffer.from('first staged bytes\n'),
++  );
++});
++
+ test('branch target resolves merge-base and reports refs', async () => {
+   const dir = await makeRepo();
+   await writeFile(path.join(dir, 'a.txt'), 'one\n');
+diff --git a/test/whole-checkout.test.ts b/test/whole-checkout.test.ts
+new file mode 100644
+index 0000000..4d28f6f
+--- /dev/null
++++ b/test/whole-checkout.test.ts
+@@ -0,0 +1,262 @@
++import assert from 'node:assert/strict';
++import path from 'node:path';
++import { test } from 'node:test';
++
++import { claudeAdapter, codexAdapter, geminiAdapter } from '../src/adapters/vendors.js';
++import { ResolvedTarget } from '../src/git/target.js';
++import {
++  ReportContext,
++  RunRecord,
++  renderMerged,
++  renderRaw,
++} from '../src/output/render.js';
++import {
++  reportRelativePath,
++  shouldReviewWholeCheckout,
++} from '../src/commands/go.js';
++
++const supports = () => true;
++
++test('unattended whole-checkout review requires its dedicated opt-in', () => {
++  assert.equal(shouldReviewWholeCheckout(true, false, false), false);
++  assert.equal(shouldReviewWholeCheckout(true, false, true), true);
++  assert.equal(shouldReviewWholeCheckout(true, true, false), true);
++  assert.equal(shouldReviewWholeCheckout(false, false, true), false);
++});
++
++/**
++ * What `resolveTarget` returns when nothing has changed: a real snapshot at
++ * the current commit, and no files.
++ */
++const empty: ResolvedTarget = {
++  kind: 'uncommitted',
++  snapshot: '4444444444444444444444444444444444444444',
++  base: '4444444444444444444444444444444444444444',
++  range:
++    '4444444444444444444444444444444444444444..4444444444444444444444444444444444444444',
++  diff: '',
++  digest: 'e3b0c442',
++  files: [],
++  bytes: 0,
++};
++
++const instructions =
++  'Review this repository as it currently stands. There is no diff to review.';
++
++const run: RunRecord = {
++  id: 'claude-opus',
++  vendor: 'claude',
++  cli: 'claude',
++  cliVersion: '2.0.0',
++  modelRequested: 'opus',
++  effortRequested: null,
++  effortApplied: null,
++  wallClockMs: 1000,
++  ok: true,
++  output: 'A finding.',
++};
++
++function context(overrides: Partial<ReportContext> = {}): ReportContext {
++  return {
++    version: '0.1.0',
++    runId: 'abc12345',
++    generated: '2026-01-01T00:00:00.000Z',
++    target: empty,
++    runs: [run],
++    mergeState: 'off',
++    configSource: '.crbuddy/config.json',
++    configScope: 'project',
++    warnings: [],
++    ...overrides,
++  };
++}
++
++test('every vendor accepts a whole-checkout run, including one with no native review', () => {
++  // Gemini refuses `kind: 'review'` outright, so this is the only mode in
++  // which it can take part at all.
++  for (const adapter of [claudeAdapter, codexAdapter, geminiAdapter]) {
++    const invocation = adapter.build({
++      operation: { kind: 'generic', target: null, instructions },
++      model: 'a-model',
++      repoRoot: '/repo',
++      supports,
++    });
++
++    assert.equal(invocation.command, adapter.command);
++  }
++});
++
++test('a whole-checkout run carries no range and no diff subcommand', () => {
++  for (const adapter of [claudeAdapter, codexAdapter, geminiAdapter]) {
++    const invocation = adapter.build({
++      operation: { kind: 'generic', target: null, instructions },
++      model: 'a-model',
++      repoRoot: '/repo',
++      supports,
++    });
++
++    const everything = [...invocation.args, invocation.stdin ?? ''].join(' ');
++
++    // An empty diff resolves to `<sha>..<sha>`; prompting a reviewer with
++    // that would describe the subject as a range containing nothing.
++    assert.ok(!everything.includes('..'), `${adapter.name}: ${everything}`);
++    assert.ok(!everything.includes('--uncommitted'), adapter.name);
++    assert.ok(!everything.includes('--base'), adapter.name);
++    assert.ok(!everything.includes('/code-review'), adapter.name);
++  }
++});
++
++test('the instructions reach the reviewer intact, without diff framing', () => {
++  const invocation = codexAdapter.build({
++    operation: { kind: 'generic', target: null, instructions },
++    model: 'gpt-5.6-sol',
++    repoRoot: '/repo',
++    supports,
++  });
++
++  const prompt = invocation.stdin ?? invocation.args.join(' ');
++
++  assert.match(prompt, /as it currently stands/);
++  assert.ok(!/reviewing the changes in the git range/i.test(prompt), prompt);
++});
++
++test('the report says the whole checkout was reviewed, not that nothing changed', () => {
++  const report = renderRaw(context({ wholeCheckout: true }));
++
++  assert.match(report, /no diff, so the reviews below cover the whole checkout/);
++  assert.match(report, /Reviewed the checkout at `4{40}`/);
++
++  // "0 file(s) changed" would read as a normal run that found nothing.
++  assert.ok(!report.includes('0 file(s) changed'), report);
++});
++
++test('an ordinary run still reports its range and file count', () => {
++  const report = renderRaw(
++    context({
++      target: { ...empty, files: [{ status: 'M', path: 'src/a.ts' }], bytes: 4 },
++    }),
++  );
++
++  assert.match(report, /1 file\(s\) changed/);
++  assert.ok(!report.includes('whole checkout'), report);
++});
++
++test('unconsolidated reports omit verbose provenance frontmatter', () => {
++  const deliverable = renderRaw(context());
++  const auditTrail = renderRaw(context({ mergeState: 'ok' }));
++  const mergeFallback = renderRaw(
++    context({ mergeState: 'failed', mergeReason: 'invalid clusters' }),
++  );
++
++  assert.ok(deliverable.startsWith('# Code review\n'));
++  assert.ok(auditTrail.startsWith('# Code review - unmerged reviews\n'));
++  assert.ok(mergeFallback.startsWith('# Code review\n'));
++
++  for (const report of [deliverable, auditTrail, mergeFallback]) {
++    assert.ok(!report.startsWith('---\n'), report);
++    assert.ok(!report.includes('\ncrbuddy:\n'), report);
++    assert.match(report, /<!-- crbuddy:raw runId=abc12345 -->/);
++    assert.match(report, /<!-- crbuddy:report -->/);
++    assert.match(report, /Reviewed `/);
++  }
++});
++
++test(
++  'timeout output is labelled as the final stderr captured before termination',
++  () => {
++    const failed: RunRecord = {
++      ...run,
++      ok: false,
++      reason: 'timeout',
++      output: '',
++      diagnostics: 'Usage: codex exec resume [OPTIONS]',
++    };
++
++    const report = renderRaw(context({ runs: [failed] }));
++
++    assert.match(report, /This run did not complete: timeout/);
++    assert.match(
++      report,
++      /Last stderr captured before crbuddy terminated the timed-out process:/,
++    );
++    assert.match(report, /```text\nUsage: codex exec resume \[OPTIONS\]\n```/);
++  },
++);
++
++test('the consolidated report links to the unmerged file only when one exists', () => {
++  const clusters = [{ findingIds: ['claude-opus:1'] }];
++  const findings = [
++    {
++      id: 'claude-opus:1',
++      runId: 'claude-opus',
++      title: 'A finding',
++      text: 'A finding.',
++      locations: [],
++    },
++  ];
++
++  const onDisk = renderMerged(
++    context({ mergeState: 'ok', rawPath: 'CODE-REVIEW-HANDOFF.raw.md' }),
++    clusters,
++    findings,
++  );
++
++  assert.match(onDisk, /Unmerged reviews: `CODE-REVIEW-HANDOFF\.raw\.md`/);
++  assert.match(onDisk, /^---\ncrbuddy:\n/);
++  assert.match(onDisk, /\n  kind: consolidated\n/);
++  assert.ok(!onDisk.includes('kind: merged'), onDisk);
++
++  // Terminal mode writes no raw file, so the sentence has to go entirely
++  // rather than render as an empty pair of backticks.
++  const printed = renderMerged(context({ mergeState: 'ok' }), clusters, findings);
++
++  assert.ok(!printed.includes('Unmerged reviews'), printed);
++  assert.ok(!printed.includes('``'), printed);
++});
++
++test('the raw-report link resolves from the consolidated report directory', () => {
++  const repoRoot = path.resolve('repo');
++  const merged = path.resolve('outside', 'deliverable', 'review.md');
++  const raw = path.resolve('outside', 'audit', 'review.raw.md');
++
++  assert.equal(
++    reportRelativePath(repoRoot, merged, raw),
++    '../audit/review.raw.md',
++  );
++});
++
++test('the raw-report link is omitted when filesystem roots differ', {
++  skip: process.platform !== 'win32',
++}, () => {
++  assert.equal(
++    reportRelativePath('C:\\repo', 'D:\\reports\\review.md', 'E:\\audit\\raw.md'),
++    null,
++  );
++});
++
++test('custom instructions still say what the subject is', async () => {
++  // With `target: null` there is no range for `genericPrompt` to describe,
++  // so framing dropped here leaves the reviewer with a brief and no subject.
++  const { wholeCheckoutPrompt } = await import('../src/commands/go.js');
++
++  const prompt = wholeCheckoutPrompt('Focus only on resource leaks.');
++
++  assert.match(prompt, /no diff to review/);
++  assert.match(prompt, /the checked-out code itself as the subject/);
++  assert.match(prompt, /Focus only on resource leaks\./);
++  assert.match(prompt, /Do not modify any files\./);
++
++  // The user's brief is the instruction; the framing is the setting.
++  assert.ok(
++    prompt.indexOf('subject') < prompt.indexOf('Focus only'),
++    prompt,
++  );
++});
++
++test('with no custom instructions the default brief is used whole', async () => {
++  const { wholeCheckoutPrompt } = await import('../src/commands/go.js');
++  const prompt = wholeCheckoutPrompt(undefined);
++
++  assert.match(prompt, /no diff to review/);
++  assert.match(prompt, /correctness bugs/);
++});

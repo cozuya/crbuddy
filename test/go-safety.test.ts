@@ -7,7 +7,7 @@ import { PassThrough } from 'node:stream';
 import { after, test } from 'node:test';
 
 import { Config } from '../src/config/schema.js';
-import { LoadedConfig } from '../src/config/load.js';
+import { ConfigError, LoadedConfig } from '../src/config/load.js';
 import {
   canConfirm,
   confirm,
@@ -58,13 +58,13 @@ function loaded(
   };
 }
 
-test('a contending run cannot clear the active run merge directory', async () => {
+test('a contending run cannot clear the active run scratch directory', async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-lock-'));
   created.push(repoRoot);
 
   const workDir = path.join(repoRoot, '.crbuddy');
   const stateDir = repoStateDir(repoRoot);
-  const sentinel = path.join(stateDir, 'merge', 'active.stdout');
+  const sentinel = path.join(stateDir, 'scratch', 'active.stdout');
   created.push(stateDir);
 
   await mkdir(path.dirname(sentinel), { recursive: true });
@@ -142,6 +142,27 @@ test('external-output refusal happens before temp cleanup and recovery', async (
   assert.equal(await readFile(stored, 'utf8'), 'previous raw report');
 });
 
+test('terminal mode rejects merged and raw paths that resolve to one file', async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-same-output-'));
+  created.push(repoRoot);
+
+  const value = config('review.md', path.join(repoRoot, 'review.md'));
+  value.output.destination = 'terminal';
+
+  await assert.rejects(
+    runGo({
+      repoRoot,
+      loaded: loaded(repoRoot, value, 'global'),
+      version: 'test',
+      force: false,
+      wholeCheckout: false,
+      strict: false,
+    }),
+    (error: unknown) =>
+      error instanceof ConfigError && error.message.includes('same file'),
+  );
+});
+
 test('recovered output is checked by refuseIfOutputExists before preflight', async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-recovered-'));
   created.push(repoRoot);
@@ -206,7 +227,7 @@ test('confirmation requires a TTY prompt stream and writes the prompt there', as
   assert.equal(redirectedText, '');
 });
 
-test('merge spool is removed after a preflight failure', async () => {
+test('panel scratch is removed after a preflight failure', async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-merge-cleanup-'));
   created.push(repoRoot);
 
@@ -224,7 +245,7 @@ test('merge spool is removed after a preflight failure', async () => {
     }),
   );
 
-  assert.ok(!existsSync(path.join(stateDir, 'merge')));
+  assert.ok(!existsSync(path.join(stateDir, 'scratch')));
 });
 
 test('repository state identity follows the filesystem case behavior', async () => {

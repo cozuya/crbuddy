@@ -234,7 +234,7 @@ The help surface is adapter-specific. “Deepest subcommand” is not inherently
 
 ### Blocking and concurrency
 
-One `crbuddy go`, one terminal, wait. Discrete events are appended to terminal output, with a TTY-only live status line and terminal bell at completion.
+One `crbuddy go`, one terminal, wait. Discrete events are appended to terminal output, with a TTY-only live status line and terminal bell at completion. In VS Code's integrated terminal, the same pulse also sets the native indeterminate tab-progress state and clears it after consolidation and output commit finish.
 
 Panel entries run concurrently by default. `maxConcurrent: 0` means unlimited; the semaphore is still part of the execution path so a cap is a policy setting rather than an architectural rewrite.
 
@@ -264,6 +264,10 @@ Stage temp files on the destination filesystem, then rename into place.
 Before moving an existing report aside, persist a recovery manifest. A
 partial stash failure rolls completed moves back immediately; if that rollback
 also fails, the manifest remains for the next run to recover.
+
+Panel spool files are removed before consolidation starts. The consolidator
+gets a fresh, unique working directory in the OS temp area rather than a
+sibling of the panel scratch directory.
 
 ### Exit codes
 

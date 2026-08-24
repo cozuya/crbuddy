@@ -308,8 +308,10 @@ running reviewer, which breaks blindness in a way the diff pathspec cannot
 prevent - and a whole-checkout run, which has no pathspec at all, loses it
 entirely. Under the home directory rather than the OS temp directory because a
 crashed run's only copy of the previous report waits there until the next run
-recovers it. Panel and consolidation spool files are removed when the run
-ends; only a report that still needs crash recovery may remain.
+recovers it. Panel spool files are removed before consolidation starts. The
+consolidator uses a separate, unique OS-temp working directory, which is
+removed when it finishes; only a report that still needs crash recovery may
+remain.
 
 Shared output paths get their own locks, one per resolved file, in the OS temp
 directory. Two sibling repositories both writing `../CODE-REVIEW-HANDOFF.md`
@@ -324,6 +326,11 @@ block and begin with the review itself. Their visible report block still gives
 the review count, failures, warnings, target range, and file count. A compact
 hidden marker keeps the run ID so a raw file can be matched to its consolidated
 companion without restoring the large metadata block.
+
+For a whole-checkout fallback, the frontmatter identifies the subject as
+`whole-checkout` and records a sealed snapshot of the live worktree. The
+original empty target is retained as `requestedKind`/`requestedSnapshot`;
+diff byte and file counts are omitted because no diff was the review subject.
 
 HTML comment markers delimit reviews, clusters, and findings. **They are
 navigation aids, not a parsing boundary** - a model's verbatim output can

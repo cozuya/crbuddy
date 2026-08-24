@@ -7,6 +7,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 
 import {
+  captureCheckoutSnapshot,
   findRepoRoot,
   parseNameStatusZ,
   resolveTarget,
@@ -321,6 +322,27 @@ test('branch target resolves merge-base and reports refs', async () => {
   assert.deepEqual(
     target.files.map((file) => file.path),
     ['b.txt'],
+  );
+});
+
+test('whole-checkout provenance captures dirty worktree bytes for a branch target', async () => {
+  const dir = await makeRepo();
+  await writeFile(path.join(dir, 'a.txt'), 'committed\n');
+  commit(dir, 'init');
+
+  const branchTarget = await resolveTarget(dir, { base: 'main' });
+  await writeFile(path.join(dir, 'a.txt'), 'dirty checkout bytes\n');
+
+  const reviewedSnapshot = await captureCheckoutSnapshot(dir);
+
+  assert.equal(branchTarget.files.length, 0);
+  assert.deepEqual(
+    snapshotFile(dir, branchTarget.snapshot, 'a.txt'),
+    Buffer.from('committed\n'),
+  );
+  assert.deepEqual(
+    snapshotFile(dir, reviewedSnapshot, 'a.txt'),
+    Buffer.from('dirty checkout bytes\n'),
   );
 });
 

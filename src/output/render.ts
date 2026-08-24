@@ -45,6 +45,8 @@ export interface ReportContext {
    * rather than reporting zero changed files as if that were normal.
    */
   wholeCheckout?: boolean;
+  /** Canonical live-checkout snapshot used by a whole-checkout review. */
+  reviewedSnapshot?: string;
   warnings: string[];
   /** Relative path of the raw file, referenced from the merged one. */
   rawPath?: string;
@@ -56,6 +58,7 @@ const CLOSE_REPORT = '<!-- /crbuddy:report -->';
 export function renderFrontmatter(context: ReportContext): string {
   const succeeded = context.runs.filter((run) => run.ok).length;
   const failed = context.runs.length - succeeded;
+  const wholeCheckout = context.wholeCheckout && context.reviewedSnapshot;
 
   const lines: string[] = [
     '---',
@@ -67,10 +70,22 @@ export function renderFrontmatter(context: ReportContext): string {
     `  configSource: ${yamlString(context.configSource)}`,
     `  configScope: ${context.configScope}`,
     '  target:',
-    `    kind: ${context.target.kind}`,
-    `    snapshot: ${context.target.snapshot}`,
-    `    base: ${context.target.base}`,
   ];
+
+  if (wholeCheckout) {
+    lines.push(
+      '    kind: whole-checkout',
+      `    snapshot: ${context.reviewedSnapshot}`,
+      `    requestedKind: ${context.target.kind}`,
+      `    requestedSnapshot: ${context.target.snapshot}`,
+    );
+  } else {
+    lines.push(
+      `    kind: ${context.target.kind}`,
+      `    snapshot: ${context.target.snapshot}`,
+      `    base: ${context.target.base}`,
+    );
+  }
 
   if (context.target.requestedBase) {
     lines.push(`    requestedBase: ${yamlString(context.target.requestedBase)}`);
@@ -80,10 +95,15 @@ export function renderFrontmatter(context: ReportContext): string {
     lines.push(`    mergeBase: ${context.target.mergeBase}`);
   }
 
+  if (!wholeCheckout) {
+    lines.push(
+      `    digest: ${context.target.digest}`,
+      `    files: ${context.target.files.length}`,
+      `    bytes: ${context.target.bytes}`,
+    );
+  }
+
   lines.push(
-    `    digest: ${context.target.digest}`,
-    `    files: ${context.target.files.length}`,
-    `    bytes: ${context.target.bytes}`,
     '  runs:',
     `    configured: ${context.runs.length}`,
     `    succeeded: ${succeeded}`,
@@ -172,7 +192,7 @@ export function renderReportBlock(context: ReportContext): string {
   body.push(
     '',
     context.wholeCheckout
-      ? `Reviewed the checkout at \`${context.target.snapshot}\` - no diff; the whole tree was the subject.`
+      ? `Reviewed the checkout at \`${context.reviewedSnapshot ?? context.target.snapshot}\` - no diff; the whole tree was the subject.`
       : `Reviewed \`${context.target.range}\` - ${context.target.files.length} file(s) changed.`,
   );
 

@@ -99,7 +99,9 @@ test('an out-of-repo report stranded by a crash is recovered', async () => {
   await stashExistingOutputs(repoRoot, workDir, ['../CODE-REVIEW-HANDOFF.md'], 'runid');
   assert.ok(!existsSync(report));
 
-  const recovered = await recoverStrandedOutputs(repoRoot, workDir);
+  const recovered = await recoverStrandedOutputs(repoRoot, workDir, {
+    allowedPaths: ['../CODE-REVIEW-HANDOFF.md'],
+  });
 
   assert.deepEqual(recovered, ['../CODE-REVIEW-HANDOFF.md']);
   assert.equal(await readFile(report, 'utf8'), 'previous run');
@@ -321,8 +323,112 @@ test('a failed stash rollback leaves a manifest the next run can recover', async
   assert.ok(!existsSync(first));
   assert.equal(await readFile(second, 'utf8'), 'second report');
 
-  assert.deepEqual(await recoverStrandedOutputs(repoRoot, workDir), ['../first.md']);
+  assert.deepEqual(
+    await recoverStrandedOutputs(repoRoot, workDir, {
+      allowedPaths: ['../first.md', '../second.md'],
+    }),
+    ['../first.md'],
+  );
   assert.equal(await readFile(first, 'utf8'), 'first report');
+});
+
+test('a repository-local recovery manifest cannot choose another destination', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const holding = path.join(workDir, 'previous', 'untrusted');
+  const stored = path.join(holding, '0.stashed');
+  const attackerChosen = path.join(parent, 'attacker-chosen.md');
+
+  await mkdir(holding, { recursive: true });
+  await writeFile(stored, 'repository payload', 'utf8');
+  await writeFile(
+    path.join(holding, 'manifest.json'),
+    JSON.stringify([{ stored: '0.stashed', relative: attackerChosen }]),
+    'utf8',
+  );
+
+  const recovered = await recoverStrandedOutputs(repoRoot, workDir, {
+    allowedPaths: ['review.md', 'review.raw.md'],
+  });
+
+  assert.deepEqual(recovered, []);
+  assert.ok(!existsSync(attackerChosen));
+  assert.equal(await readFile(stored, 'utf8'), 'repository payload');
+  assert.ok(existsSync(holding), 'the rejected batch is left inert for inspection');
+});
+
+test('an invalid recovery entry prevents every move in its batch', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const holding = path.join(workDir, 'previous', 'mixed-trust');
+  const first = path.join(holding, '0.stashed');
+  const second = path.join(holding, '1.stashed');
+  const attackerChosen = path.join(parent, 'attacker-chosen.md');
+
+  await mkdir(holding, { recursive: true });
+  await writeFile(first, 'allowed payload', 'utf8');
+  await writeFile(second, 'untrusted payload', 'utf8');
+  await writeFile(
+    path.join(holding, 'manifest.json'),
+    JSON.stringify([
+      { stored: '0.stashed', relative: 'review.md' },
+      { stored: '1.stashed', relative: attackerChosen },
+    ]),
+    'utf8',
+  );
+
+  assert.deepEqual(
+    await recoverStrandedOutputs(repoRoot, workDir, {
+      allowedPaths: ['review.md', 'review.raw.md'],
+    }),
+    [],
+  );
+  assert.ok(!existsSync(path.join(repoRoot, 'review.md')));
+  assert.ok(!existsSync(attackerChosen));
+  assert.equal(await readFile(first, 'utf8'), 'allowed payload');
+  assert.equal(await readFile(second, 'utf8'), 'untrusted payload');
+});
+
+test('a recovery manifest cannot select a source outside its holding batch', async () => {
+  const { repoRoot, workDir } = await makeTree();
+  const holding = path.join(workDir, 'previous', 'untrusted-source');
+  const outsideSource = path.join(workDir, 'previous', 'payload.stashed');
+
+  await mkdir(holding, { recursive: true });
+  await writeFile(outsideSource, 'outside payload', 'utf8');
+  await writeFile(
+    path.join(holding, 'manifest.json'),
+    JSON.stringify([{ stored: '../payload.stashed', relative: 'review.md' }]),
+    'utf8',
+  );
+
+  assert.deepEqual(
+    await recoverStrandedOutputs(repoRoot, workDir, {
+      allowedPaths: ['review.md'],
+    }),
+    [],
+  );
+  assert.ok(!existsSync(path.join(repoRoot, 'review.md')));
+  assert.equal(await readFile(outsideSource, 'utf8'), 'outside payload');
+});
+
+test('a recovery manifest cannot use the holding parent as its source', async () => {
+  const { repoRoot, workDir } = await makeTree();
+  const holding = path.join(workDir, 'previous', 'dot-dot-source');
+
+  await mkdir(holding, { recursive: true });
+  await writeFile(
+    path.join(holding, 'manifest.json'),
+    JSON.stringify([{ stored: '..', relative: 'review.md' }]),
+    'utf8',
+  );
+
+  assert.deepEqual(
+    await recoverStrandedOutputs(repoRoot, workDir, {
+      allowedPaths: ['review.md'],
+    }),
+    [],
+  );
+  assert.ok(!existsSync(path.join(repoRoot, 'review.md')));
+  assert.ok(existsSync(holding));
 });
 
 test('a manifest failure occurs before any output is moved', async () => {

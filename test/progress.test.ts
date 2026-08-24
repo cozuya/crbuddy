@@ -19,7 +19,7 @@ class Capture {
 test('the review pulse animates on interactive stdout when stderr is captured', async () => {
   const stderr = new Capture(false);
   const stdout = new Capture(true);
-  const progress = new Progress(stderr, stdout);
+  const progress = new Progress(stderr, stdout, {});
 
   progress.line('Starting 1 review at 4:19pm…');
   progress.startPulse(Date.now());
@@ -42,7 +42,7 @@ test('the review pulse animates on interactive stdout when stderr is captured', 
 test('the review pulse stays off non-interactive output', async () => {
   const stderr = new Capture(false);
   const stdout = new Capture(false);
-  const progress = new Progress(stderr, stdout);
+  const progress = new Progress(stderr, stdout, {});
 
   progress.line('Starting 1 review at 4:19pm…');
   progress.laneStarted('Codex CLI');
@@ -58,12 +58,46 @@ test('the review pulse stays off non-interactive output', async () => {
 test('the review pulse prefers stderr when both streams are interactive', () => {
   const stderr = new Capture(true);
   const stdout = new Capture(true);
-  const progress = new Progress(stderr, stdout);
+  const progress = new Progress(stderr, stdout, {});
 
   progress.laneStarted('Claude Code');
   progress.startPulse(Date.now());
   progress.stopPulse();
 
   assert.match(stderr.value, /\u280B 0s - waiting on Claude Code/);
+  assert.equal(stdout.value, '');
+});
+
+test('VS Code terminal tabs show indeterminate progress until the pulse stops', () => {
+  const stderr = new Capture(false);
+  const stdout = new Capture(true);
+  const progress = new Progress(stderr, stdout, { TERM_PROGRAM: 'vscode' });
+
+  progress.startPulse(Date.now());
+  assert.equal(stdout.value, '\u001B]9;4;3;0\u0007');
+
+  progress.laneStarted('Codex CLI');
+  progress.pausePulse();
+  assert.ok(
+    !stdout.value.includes('\u001B]9;4;0;0\u0007'),
+    'pausing the inline animation must leave the background tab busy',
+  );
+  progress.stopPulse();
+
+  assert.ok(
+    stdout.value.endsWith('\u001B]9;4;0;0\u0007'),
+    'the tab busy state must be cleared on completion',
+  );
+});
+
+test('VS Code progress sequences stay off redirected output', () => {
+  const stderr = new Capture(false);
+  const stdout = new Capture(false);
+  const progress = new Progress(stderr, stdout, { TERM_PROGRAM: 'vscode' });
+
+  progress.startPulse(Date.now());
+  progress.stopPulse();
+
+  assert.equal(stderr.value, '');
   assert.equal(stdout.value, '');
 });

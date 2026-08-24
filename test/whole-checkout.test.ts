@@ -7,6 +7,7 @@ import { ResolvedTarget } from '../src/git/target.js';
 import {
   ReportContext,
   RunRecord,
+  renderFrontmatter,
   renderMerged,
   renderRaw,
 } from '../src/output/render.js';
@@ -128,6 +129,31 @@ test('the report says the whole checkout was reviewed, not that nothing changed'
 
   // "0 file(s) changed" would read as a normal run that found nothing.
   assert.ok(!report.includes('0 file(s) changed'), report);
+});
+
+test('whole-checkout reports use the sealed live-checkout snapshot', () => {
+  const reviewedSnapshot = '5555555555555555555555555555555555555555';
+  const report = renderRaw(
+    context({ wholeCheckout: true, reviewedSnapshot }),
+  );
+
+  assert.match(report, new RegExp(`Reviewed the checkout at \`${reviewedSnapshot}\``));
+  assert.ok(!report.includes(`checkout at \`${empty.snapshot}\``), report);
+});
+
+test('whole-checkout frontmatter does not attach empty-diff metrics to the live snapshot', () => {
+  const reviewedSnapshot = '5555555555555555555555555555555555555555';
+  const frontmatter = renderFrontmatter(
+    context({ wholeCheckout: true, reviewedSnapshot }),
+  );
+
+  assert.match(frontmatter, /target:\n    kind: whole-checkout\n/);
+  assert.match(frontmatter, new RegExp(`    snapshot: ${reviewedSnapshot}`));
+  assert.match(frontmatter, /    requestedKind: uncommitted/);
+  assert.match(frontmatter, new RegExp(`    requestedSnapshot: ${empty.snapshot}`));
+  assert.ok(!frontmatter.includes('    digest:'), frontmatter);
+  assert.ok(!frontmatter.includes('    files:'), frontmatter);
+  assert.ok(!frontmatter.includes('    bytes:'), frontmatter);
 });
 
 test('an ordinary run still reports its range and file count', () => {

@@ -214,6 +214,28 @@ async function snapshotUncommitted(
   }
 }
 
+/**
+ * Seal the checkout bytes that a whole-checkout review is about.
+ *
+ * A branch target normally points at HEAD, but the general-purpose agents
+ * used for a whole-checkout fallback read the live worktree. Reusing the
+ * uncommitted snapshot builder keeps the report's provenance honest without
+ * touching the user's index or worktree.
+ */
+export async function captureCheckoutSnapshot(
+  repoRoot: string,
+  options: { exclude?: string[] } = {},
+): Promise<string> {
+  if (await hasUnmerged(repoRoot)) {
+    throw new GitError(
+      'The working tree has unresolved merge conflicts. ' +
+        'Resolve them before running a review; "review my changes" is ambiguous mid-conflict.',
+    );
+  }
+
+  return (await snapshotUncommitted(repoRoot, options.exclude ?? [])).snapshot;
+}
+
 /** An exclude entry ending in "/" excludes everything beneath it. */
 export function isExcluded(file: string, exclude: string[]): boolean {
   return exclude.some((entry) =>

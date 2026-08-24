@@ -16,6 +16,8 @@ import { formatElapsed } from '../util/format.js';
 const DIM = '\u001B[2m';
 const RESET = '\u001B[0m';
 const CLEAR_LINE = '\u001B[2K\r';
+const TAB_PROGRESS_INDETERMINATE = '\u001B]9;4;3;0\u0007';
+const TAB_PROGRESS_CLEAR = '\u001B]9;4;0;0\u0007';
 
 const FRAMES = [
   '\u280B',
@@ -42,12 +44,14 @@ export class Progress {
   private frame = 0;
   private statusVisible = false;
   private statusOutput: ProgressOutput | null = null;
+  private tabProgressVisible = false;
   private startedAt = 0;
   private active = new Set<string>();
 
   constructor(
     private readonly errorOutput: ProgressOutput = process.stderr,
     private readonly standardOutput: ProgressOutput = process.stdout,
+    private readonly environment: NodeJS.ProcessEnv = process.env,
   ) {}
 
   /** Full brightness. Reserved for state changes worth noticing. */
@@ -73,20 +77,43 @@ export class Progress {
     this.statusOutput = this.terminalOutput();
     if (!this.statusOutput) return;
 
+    // VS Code maps OSC 9;4 progress onto the `${progress}` portion of its
+    // terminal-tab title. It is invisible in the terminal body and gives a
+    // background tab the same busy signal as a foreground Codex session.
+    if (
+      this.environment.TERM_PROGRAM === 'vscode' &&
+      !this.tabProgressVisible
+    ) {
+      this.statusOutput.write(TAB_PROGRESS_INDETERMINATE);
+      this.tabProgressVisible = true;
+    }
+
     this.timer = setInterval(() => this.render(), FRAME_MS);
     this.timer.unref();
     if (this.active.size > 0) this.render();
   }
 
-  stopPulse(): void {
+  /** Stop the in-terminal animation while leaving a background tab marked busy. */
+  pausePulse(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
 
     this.hideStatus();
-    this.statusOutput = null;
     this.active.clear();
+  }
+
+  /** Stop every progress surface, including VS Code's terminal-tab state. */
+  stopPulse(): void {
+    this.pausePulse();
+
+    if (this.tabProgressVisible && this.statusOutput) {
+      this.statusOutput.write(TAB_PROGRESS_CLEAR);
+      this.tabProgressVisible = false;
+    }
+
+    this.statusOutput = null;
   }
 
   /** Track which lanes are still running, for the status line. */

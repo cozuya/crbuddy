@@ -243,9 +243,13 @@ export async function commitOutputs(
 export async function recoverStrandedOutputs(
   repoRoot: string,
   stateDir: string,
+  options: { allowedPaths?: string[] } = {},
 ): Promise<string[]> {
   const root = path.join(stateDir, 'previous');
   const recovered: string[] = [];
+  const allowed = options.allowedPaths
+    ? new Set(options.allowedPaths.map((entry) => path.resolve(repoRoot, entry)))
+    : null;
 
   let batches: string[];
 
@@ -259,24 +263,61 @@ export async function recoverStrandedOutputs(
     const dir = path.join(root, batch);
 
     try {
-      const manifest = JSON.parse(
+      const parsed: unknown = JSON.parse(
         await readFile(path.join(dir, MANIFEST), 'utf8'),
-      ) as Array<{ stored: string; relative: string }>;
+      );
+
+      if (!Array.isArray(parsed)) throw new Error('invalid recovery manifest');
+
+      const manifest = parsed.map((value) => {
+        if (typeof value !== 'object' || value === null) {
+          throw new Error('invalid recovery entry');
+        }
+
+        const { stored, relative } = value as Record<string, unknown>;
+
+        // `stored` is generated as a basename. Refusing separators here keeps
+        // an edited manifest from turning the holding directory into an
+        // arbitrary source-file selector.
+        if (
+          typeof stored !== 'string' ||
+          stored === '' ||
+          stored === '.' ||
+          stored === '..' ||
+          path.basename(stored) !== stored ||
+          typeof relative !== 'string'
+        ) {
+          throw new Error('invalid recovery entry');
+        }
+
+        const destination = path.resolve(repoRoot, relative);
+
+        // Repository-local state is legacy and can arrive in a clone. Its
+        // manifest is therefore untrusted: validate the ENTIRE batch against
+        // the currently configured output paths before moving even one file.
+        if (allowed && !allowed.has(destination)) {
+          throw new Error('recovery destination is not configured');
+        }
+
+        return {
+          relative,
+          destination,
+          source: path.join(dir, stored),
+        };
+      });
 
       for (const entry of manifest) {
-        const destination = path.resolve(repoRoot, entry.relative);
-        const source = path.join(dir, entry.stored);
-
         // Never clobber a file that is already back in place.
-        if (existsSync(source) && !existsSync(destination)) {
-          await mkdir(path.dirname(destination), { recursive: true });
-          await moveFile(source, destination);
+        if (existsSync(entry.source) && !existsSync(entry.destination)) {
+          await mkdir(path.dirname(entry.destination), { recursive: true });
+          await moveFile(entry.source, entry.destination);
           recovered.push(entry.relative);
         }
       }
     } catch {
-      // No readable manifest: leave the batch alone rather than guess at
-      // filenames. The debris is inert; a wrong guess is not.
+      // Unreadable, invalid, or disallowed manifest: leave the batch alone
+      // rather than guess at filenames. The debris is inert; a wrong guess
+      // is not.
       continue;
     }
 

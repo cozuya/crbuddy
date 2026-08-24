@@ -1,13 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, tmpdir, userInfo } from 'node:os';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
 import { Config, HOME_CONFIG_DIR, PanelEntry, WORK_DIR } from '../config/schema.js';
 import { ConfigError, LoadedConfig, repoRelative } from '../config/load.js';
-import { ResolvedTarget, resolveTarget } from '../git/target.js';
+import {
+  captureCheckoutSnapshot,
+  ResolvedTarget,
+  resolveTarget,
+} from '../git/target.js';
 import { Adapter, UnsafeInvocationError } from '../adapters/types.js';
 import { getAdapter } from '../adapters/vendors.js';
 import { isVersionAtLeast } from '../adapters/version.js';
@@ -112,11 +116,11 @@ export async function runGo(options: GoOptions): Promise<number> {
   // run recovers it, and temp is not somewhere to keep the only copy.
   const stateDir = repoStateDir(repoRoot);
   const scratch = path.join(stateDir, 'scratch');
-  const mergeDir = path.join(stateDir, 'merge');
+  let mergeDir: string | null = null;
 
   // No volatile shared state is touched until this succeeds. In particular,
-  // a second invocation must not clear the active run's merge cwd on its way
-  // to reporting lock contention.
+  // a second invocation must not clear the active run's scratch or stash on
+  // its way to reporting lock contention.
   const lock = await acquireLock(workDir);
   let outputLocks: Lock[] = [];
 
@@ -147,6 +151,22 @@ export async function runGo(options: GoOptions): Promise<number> {
   process.on('SIGTERM', onInterrupt);
 
   try {
+    // The config validator can only compare the two paths as written, and
+    // `same.md` and `<repo>/same.md` are the same file spelled two ways.
+    // Terminal mode also stashes both paths for reviewer blindness, so this
+    // is an invalid configuration regardless of the final destination.
+    const mergedOutput = path.resolve(repoRoot, config.output.merged);
+    const rawOutput = path.resolve(repoRoot, config.output.raw);
+
+    if (pathKey(mergedOutput) === pathKey(rawOutput)) {
+      throw new ConfigError(
+        `output.merged and output.raw resolve to the same file:\n` +
+          `  ${mergedOutput}\n` +
+          `They are spelled differently in the config, but they are one ` +
+          `path. Point them at different files.`,
+      );
+    }
+
     // A project-local config is a file that ships with a repository, so a
     // repository you merely cloned can choose where crbuddy writes. Obtain
     // consent before cleanup or crash recovery touches any such path.
@@ -155,18 +175,25 @@ export async function runGo(options: GoOptions): Promise<number> {
       .filter((absolute) => repoRelative(absolute, repoRoot) === null);
 
     if (loaded.scope === 'project' && external.length > 0) {
-      progress.line('This repository’s own config writes outside the repository:');
+      progress.line(
+        config.output.destination === 'file'
+          ? 'This repository’s own config writes outside the repository:'
+          : 'This repository’s own config uses output paths outside the repository:',
+      );
 
       for (const file of [...new Set(external)]) progress.line(`  ${file}`);
 
       progress.dim(
-        '  crbuddy did not choose these paths - the config in this repository did. ' +
-          'An existing file there is moved aside and replaced by the report.',
+        config.output.destination === 'file'
+          ? '  crbuddy did not choose these paths - the config in this repository did. ' +
+            'An existing file there is moved aside and replaced by the report.'
+          : '  crbuddy did not choose these paths - the config in this repository did. ' +
+            'Existing files there may be moved aside while reviewers run, then restored.',
       );
 
       if (!canConfirm()) {
         throw new PreflightError(
-          'Refusing to write outside the repository from a project-local ' +
+          'Refusing to use output paths outside the repository from a project-local ' +
             'config without confirmation. Move that output setting into your ' +
             'global config (`crbuddy init --global`), or run interactively ' +
             'to confirm this run.',
@@ -176,22 +203,6 @@ export async function runGo(options: GoOptions): Promise<number> {
       if (!(await confirm('Continue?'))) {
         progress.line('Aborted.');
         return EXIT_TOTAL_FAILURE;
-      }
-    }
-
-    // The config validator can only compare the two paths as written, and
-    // `same.md` and `<repo>/same.md` are the same file spelled two ways.
-    if (config.output.destination === 'file') {
-      const merged = path.resolve(repoRoot, config.output.merged);
-      const raw = path.resolve(repoRoot, config.output.raw);
-
-      if (merged === raw) {
-        throw new ConfigError(
-          `output.merged and output.raw resolve to the same file:\n` +
-            `  ${merged}\n` +
-            `They are spelled differently in the config, but they are one ` +
-            `path. Point them at different files.`,
-        );
       }
     }
 
@@ -207,7 +218,9 @@ export async function runGo(options: GoOptions): Promise<number> {
     // External project-config paths have already passed their separate gate.
     const recovered = [
       ...(await recoverStrandedOutputs(repoRoot, stateDir)),
-      ...(await recoverStrandedOutputs(repoRoot, workDir)),
+      ...(await recoverStrandedOutputs(repoRoot, workDir, {
+        allowedPaths: [config.output.merged, config.output.raw],
+      })),
     ];
 
     if (recovered.length > 0) {
@@ -236,13 +249,11 @@ export async function runGo(options: GoOptions): Promise<number> {
       }
     }
 
-    // The consolidator's contract is that it sees findings and nothing else,
-    // and `scratch` is where every lane spools `<id>.stdout`. Launching the
-    // merge with that as its cwd hands a general-purpose agent the verbatim
-    // reviews it is supposed to be working from summaries of.
+    // `scratch` is where every panel lane spools `<id>.stdout`. It is removed
+    // before consolidation, and the consolidator later receives its own
+    // unique cwd outside this state tree.
+    await rm(scratch, { recursive: true, force: true });
     await mkdir(scratch, { recursive: true });
-    await rm(mergeDir, { recursive: true, force: true }).catch(() => {});
-    await mkdir(mergeDir, { recursive: true });
 
     await cleanupTemps(repoRoot, [config.output.merged, config.output.raw]);
 
@@ -303,7 +314,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       `crbuddy beginning run using ${loaded.scope === 'project' ? 'local' : 'global'} configuration`,
     );
 
-    const target = await resolveTarget(repoRoot, config.target, {
+    const targetOptions = {
       // crbuddy's own artifacts must not become the thing under review.
       // The working directory counts: it is untracked, so "all uncommitted
       // changes" would otherwise sweep the config and scratch files in.
@@ -316,7 +327,8 @@ export async function runGo(options: GoOptions): Promise<number> {
       exclude: [config.output.merged, config.output.raw, `${WORK_DIR}/`]
         .map((entry) => repoRelative(entry, repoRoot))
         .filter((entry): entry is string => entry !== null),
-    });
+    };
+    const target = await resolveTarget(repoRoot, config.target, targetOptions);
 
     // An empty diff is usually an accident — `go` run straight after
     // committing, or a base branch that resolved to the same commit — so
@@ -361,6 +373,12 @@ export async function runGo(options: GoOptions): Promise<number> {
           'review workflow it would normally use.',
       );
     }
+
+    const reviewedSnapshot = wholeCheckout
+      ? target.kind === 'uncommitted'
+        ? target.snapshot
+        : await captureCheckoutSnapshot(repoRoot, targetOptions)
+      : undefined;
 
     if (target.bytes > config.maxDiffBytes && !options.force) {
       throw new PreflightError(
@@ -416,7 +434,20 @@ export async function runGo(options: GoOptions): Promise<number> {
       ),
     );
 
-    progress.stopPulse();
+    // The per-lane terminal animation is done, but VS Code's tab stays busy
+    // through consolidation and output commit.
+    progress.pausePulse();
+
+    let mergeIsolationError: string | null = null;
+
+    try {
+      // All panel results are in memory now. Delete their verbatim spool
+      // files before a general-purpose consolidator is allowed to start.
+      await rm(scratch, { recursive: true, force: true });
+    } catch (error) {
+      mergeIsolationError =
+        `could not clear panel scratch before consolidation: ${String(error)}`;
+    }
 
     if (interrupted) {
       await restorePreviousOutput();
@@ -442,6 +473,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       configSource: displayPath(loaded.source, repoRoot),
       configScope: loaded.scope,
       ...(wholeCheckout ? { wholeCheckout: true } : {}),
+      ...(reviewedSnapshot ? { reviewedSnapshot } : {}),
       warnings,
       // Only a real path when one is actually written; the consolidated
       // report points at it, and pointing at a file that does not exist is
@@ -473,27 +505,34 @@ export async function runGo(options: GoOptions): Promise<number> {
     if (config.merge.enabled && findings.length > 1) {
       progress.dim(`Consolidating ${findings.length} findings…`);
 
-      try {
-        const merged = await runMerge({
-          adapter: adapters.get(config.merge.vendor)!,
-          supports: supports.get(config.merge.vendor)!,
-          model: config.merge.model,
-          ...(config.merge.effort ? { effort: config.merge.effort } : {}),
-          findings,
-          target,
-          repoRoot,
-          scratch: mergeDir,
-          timeoutMs: config.mergeTimeoutMs,
-        });
-
-        clusters = orderClusters(merged, findings);
-        context.mergeState = 'ok';
-      } catch (error) {
+      if (mergeIsolationError) {
         context.mergeState = 'failed';
-        context.mergeReason =
-          error instanceof MergeValidationError ? error.message : String(error);
-
+        context.mergeReason = mergeIsolationError;
         progress.line(`  Consolidation failed: ${context.mergeReason}`);
+      } else {
+        try {
+          mergeDir = await mkdtemp(path.join(tmpdir(), 'crbuddy-merge-'));
+          const merged = await runMerge({
+            adapter: adapters.get(config.merge.vendor)!,
+            supports: supports.get(config.merge.vendor)!,
+            model: config.merge.model,
+            ...(config.merge.effort ? { effort: config.merge.effort } : {}),
+            findings,
+            target,
+            repoRoot,
+            scratch: mergeDir,
+            timeoutMs: config.mergeTimeoutMs,
+          });
+
+          clusters = orderClusters(merged, findings);
+          context.mergeState = 'ok';
+        } catch (error) {
+          context.mergeState = 'failed';
+          context.mergeReason =
+            error instanceof MergeValidationError ? error.message : String(error);
+
+          progress.line(`  Consolidation failed: ${context.mergeReason}`);
+        }
       }
     }
 
@@ -523,6 +562,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       // only moved aside to keep it out of the reviewers' sight.
       await restorePreviousOutput();
 
+      progress.stopPulse();
       progress.bell();
 
       // Released before the menu, not in the `finally`. These handlers
@@ -549,6 +589,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       await stashed.discard();
       stashed = null;
 
+      progress.stopPulse();
       progress.dim('');
       progress.line(
         context.mergeState === 'ok'
@@ -584,7 +625,9 @@ export async function runGo(options: GoOptions): Promise<number> {
     await restorePreviousOutput().catch(() => {});
 
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
-    await rm(mergeDir, { recursive: true, force: true }).catch(() => {});
+    if (mergeDir) {
+      await rm(mergeDir, { recursive: true, force: true }).catch(() => {});
+    }
     await releaseAll(outputLocks);
     await lock.release();
   }
