@@ -4,7 +4,7 @@ crbuddy is a small, blocking CLI application installed globally with `npm i -g c
 
 crbuddy turns all that into one command, `crbuddy go`, and writes a file containing all of the reviews - or just one, if that's your process - to the repo root. The terminal shows the run as it happens. `crbuddy config` or `crbuddy init` interactively sets up your global or local settings for the app; do that first.
 
-More details (AI-generated) can be found in [`GUIDE.md`](GUIDE.md), but this should be enough information for most users to get started.
+More details can be found in [`GUIDE.md`](GUIDE.md), but this should be enough information for most users to get started.
 
 ## Example run
 
