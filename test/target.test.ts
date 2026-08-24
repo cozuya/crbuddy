@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -43,6 +44,18 @@ function commit(dir: string, message: string): void {
   });
 }
 
+function snapshotFile(dir: string, snapshot: string, file: string): Buffer {
+  execFileSync('git', ['cat-file', '-e', `${snapshot}:${file}`], {
+    cwd: dir,
+    stdio: 'pipe',
+  });
+
+  return execFileSync('git', ['cat-file', 'blob', `${snapshot}:${file}`], {
+    cwd: dir,
+    stdio: 'pipe',
+  });
+}
+
 test('finds the worktree root from a subdirectory', async () => {
   const dir = await makeRepo();
   await writeFile(path.join(dir, 'a.txt'), 'hello\n');
@@ -54,6 +67,37 @@ test('finds the worktree root from a subdirectory', async () => {
 
   // macOS /var -> /private/var symlinking makes a raw string compare flaky.
   assert.equal(path.basename(root), path.basename(dir));
+});
+
+test('uncommitted target captures staged new paths in a linked worktree', async () => {
+  const dir = await makeRepo();
+  await writeFile(path.join(dir, 'tracked.txt'), 'base\n');
+  commit(dir, 'init');
+
+  const linkedParent = await mkdtemp(
+    path.join(tmpdir(), 'crbuddy-linked-test-'),
+  );
+  created.unshift(linkedParent);
+  const linked = path.join(linkedParent, 'worktree');
+  execFileSync('git', ['worktree', 'add', '-q', '-b', 'linked-test', linked], {
+    cwd: dir,
+    stdio: 'pipe',
+  });
+
+  await writeFile(path.join(linked, 'tracked.txt'), 'linked modification\n');
+  await writeFile(path.join(linked, 'linked-new.txt'), 'linked staged bytes\n');
+  execFileSync('git', ['add', '--', 'linked-new.txt'], { cwd: linked });
+
+  const target = await resolveTarget(linked, 'uncommitted');
+
+  assert.deepEqual(
+    target.files.map((file) => file.path).sort(),
+    ['linked-new.txt', 'tracked.txt'],
+  );
+  assert.deepEqual(
+    snapshotFile(linked, target.snapshot, 'linked-new.txt'),
+    Buffer.from('linked staged bytes\n'),
+  );
 });
 
 test('uncommitted target includes tracked modifications', async () => {
@@ -70,6 +114,67 @@ test('uncommitted target includes tracked modifications', async () => {
   assert.equal(target.files[0]?.path, 'a.txt');
   assert.match(target.diff, /-one/);
   assert.match(target.diff, /\+two/);
+});
+
+test('uncommitted target includes a staged new file with tracked modifications', async () => {
+  const dir = await makeRepo();
+  await writeFile(path.join(dir, 'tracked.txt'), 'before\n');
+  commit(dir, 'init');
+
+  await writeFile(path.join(dir, 'tracked.txt'), 'after\n');
+  await writeFile(path.join(dir, 'staged-new.txt'), 'staged worktree bytes\n');
+  execFileSync('git', ['add', '--', 'staged-new.txt'], { cwd: dir });
+
+  const target = await resolveTarget(dir, 'uncommitted');
+  const paths = target.files.map((file) => file.path);
+
+  assert.ok(paths.includes('tracked.txt'));
+  assert.ok(paths.includes('staged-new.txt'));
+  assert.match(target.diff, /\+staged worktree bytes/);
+  assert.equal(target.bytes, Buffer.byteLength(target.diff, 'utf8'));
+  assert.equal(
+    target.digest,
+    createHash('sha256').update(target.diff).digest('hex').slice(0, 16),
+  );
+  assert.deepEqual(
+    snapshotFile(dir, target.snapshot, 'staged-new.txt'),
+    Buffer.from('staged worktree bytes\n'),
+  );
+});
+
+test('uncommitted target includes a staged rename destination', async () => {
+  const dir = await makeRepo();
+  await writeFile(path.join(dir, 'old-name.txt'), 'rename destination bytes\n');
+  commit(dir, 'init');
+
+  execFileSync('git', ['mv', 'old-name.txt', 'new-name.txt'], { cwd: dir });
+
+  const target = await resolveTarget(dir, 'uncommitted');
+
+  assert.ok(target.files.some((file) => file.path.includes('new-name.txt')));
+  assert.deepEqual(
+    snapshotFile(dir, target.snapshot, 'new-name.txt'),
+    Buffer.from('rename destination bytes\n'),
+  );
+});
+
+test('uncommitted target includes intent-to-add worktree content', async () => {
+  const dir = await makeRepo();
+  await writeFile(path.join(dir, 'tracked.txt'), 'base\n');
+  commit(dir, 'init');
+
+  await writeFile(path.join(dir, 'intent.txt'), 'intent worktree bytes\n');
+  execFileSync('git', ['add', '--intent-to-add', '--', 'intent.txt'], {
+    cwd: dir,
+  });
+
+  const target = await resolveTarget(dir, 'uncommitted');
+
+  assert.ok(target.files.some((file) => file.path === 'intent.txt'));
+  assert.deepEqual(
+    snapshotFile(dir, target.snapshot, 'intent.txt'),
+    Buffer.from('intent worktree bytes\n'),
+  );
 });
 
 test('uncommitted target includes UNTRACKED files', async () => {
@@ -123,27 +228,38 @@ test('exclusions keep crbuddy output out of its own next review', async () => {
   assert.ok(paths.includes('a.txt'));
 });
 
-test('the snapshot does not disturb the working tree or index', async () => {
+test('the snapshot leaves the user index and worktree status byte-identical', async () => {
   const dir = await makeRepo();
   await writeFile(path.join(dir, 'a.txt'), 'one\n');
   commit(dir, 'init');
 
   await writeFile(path.join(dir, 'a.txt'), 'two\n');
+  await writeFile(path.join(dir, 'staged.txt'), 'staged\n');
+  execFileSync('git', ['add', '--', 'staged.txt'], { cwd: dir });
   await writeFile(path.join(dir, 'untracked.txt'), 'x\n');
 
   const before = execFileSync('git', ['status', '--porcelain=v1', '-z'], {
     cwd: dir,
-    encoding: 'utf8',
   });
+  const indexPath = execFileSync(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--git-path', 'index'],
+    {
+      cwd: dir,
+      encoding: 'utf8',
+    },
+  ).trim();
+  const indexBefore = await readFile(indexPath);
 
   await resolveTarget(dir, 'uncommitted');
 
+  const indexAfter = await readFile(indexPath);
   const after = execFileSync('git', ['status', '--porcelain=v1', '-z'], {
     cwd: dir,
-    encoding: 'utf8',
   });
 
-  assert.equal(after, before, 'snapshot must not stage or modify anything');
+  assert.deepEqual(indexAfter, indexBefore, 'snapshot must not alter the user index');
+  assert.deepEqual(after, before, 'snapshot must not alter worktree status');
 });
 
 test('the snapshot is a real commit object', async () => {
@@ -171,6 +287,21 @@ test('works in a repository with no commits yet', async () => {
 
   assert.equal(target.files.length, 1);
   assert.equal(target.files[0]?.path, 'first.txt');
+});
+
+test('uncommitted target includes a staged new file without HEAD', async () => {
+  const dir = await makeRepo();
+  await writeFile(path.join(dir, 'staged-first.txt'), 'first staged bytes\n');
+  execFileSync('git', ['add', '--', 'staged-first.txt'], { cwd: dir });
+
+  const target = await resolveTarget(dir, 'uncommitted');
+
+  assert.equal(target.files.length, 1);
+  assert.equal(target.files[0]?.path, 'staged-first.txt');
+  assert.deepEqual(
+    snapshotFile(dir, target.snapshot, 'staged-first.txt'),
+    Buffer.from('first staged bytes\n'),
+  );
 });
 
 test('branch target resolves merge-base and reports refs', async () => {

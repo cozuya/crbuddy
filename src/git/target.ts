@@ -110,9 +110,11 @@ export async function untrackedFiles(repoRoot: string): Promise<string[]> {
  * Capture the current working state as a real commit without touching the
  * working tree or the user's index.
  *
- * `git stash create` covers tracked changes only, so untracked files are
- * added to a scratch index first. The scratch index is a temp file; the
- * user's own index is never written.
+ * The scratch index is populated directly from the worktree so paths that
+ * exist only in the user's index (staged additions, rename destinations, and
+ * intent-to-add entries) are still captured with their current worktree
+ * content. The scratch index is a temp file; the user's own index is never
+ * written.
  */
 async function snapshotUncommitted(
   repoRoot: string,
@@ -159,24 +161,12 @@ async function snapshotUncommitted(
       await withIndex(['read-tree', '--empty']);
     }
 
-    // Stage tracked modifications and deletions.
-    await withIndex(['add', '-u', '--', '.']);
-
-    // Stage untracked, non-ignored files individually so we can exclude
-    // crbuddy's own artifacts. An exclude entry ending in "/" is a prefix.
-    const untracked = (await untrackedFiles(repoRoot)).filter(
-      (file) => !isExcluded(file, exclude),
-    );
-
-    if (untracked.length > 0) {
-      // Chunk to stay clear of ARG_MAX on large untracked sets.
-      const chunkSize = 200;
-
-      for (let i = 0; i < untracked.length; i += chunkSize) {
-        const chunk = untracked.slice(i, i + chunkSize);
-        await withIndex(['add', '--', ...chunk]);
-      }
-    }
+    // Classify every worktree path relative to the scratch index. Asking the
+    // user's index for untracked paths would hide staged additions because
+    // they are already tracked there but absent from this HEAD-based index.
+    // `add -A` also captures deletions and continues to honor standard ignore
+    // rules for paths that are genuinely untracked.
+    await withIndex(['add', '-A', '--', '.']);
 
     // Drop excluded paths that were tracked.
     for (const file of exclude) {
