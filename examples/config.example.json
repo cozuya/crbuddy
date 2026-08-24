@@ -19,7 +19,11 @@
   "panel": [
     { "vendor": "claude", "model": "opus", "effort": "max" },
     { "vendor": "codex", "model": "gpt-5.6-sol", "effort": "xhigh" },
-    { "vendor": "gemini", "model": "gemini-2.5-pro" },
+    {
+      "vendor": "gemini",
+      "model": "gemini-2.5-pro",
+      "instructions": "Review the changes for correctness, regressions, and missing tests."
+    },
     {
       "id": "security",
       "vendor": "claude",

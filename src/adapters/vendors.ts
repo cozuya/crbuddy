@@ -49,32 +49,93 @@ function requireSafetyFlag(
   );
 }
 
+const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
+  claude: new Set([
+    '--permission-mode',
+    '--dangerously-skip-permissions',
+    '--allow-dangerously-skip-permissions',
+    '--allowedtools',
+    '--allowed-tools',
+    '--settings',
+    '--setting-sources',
+    '--mcp-config',
+    '--strict-mcp-config',
+    '--add-dir',
+    '--agents',
+    '--plugin-dir',
+    '--plugin-url',
+    '--tools',
+    '--system-prompt',
+    '--system-prompt-file',
+    '--append-system-prompt',
+    '--append-system-prompt-file',
+  ]),
+  codex: new Set([
+    '--config',
+    '-c',
+    '--sandbox',
+    '-s',
+    '--ask-for-approval',
+    '-a',
+    '--profile',
+    '-p',
+    '--enable',
+    '--disable',
+    '--approve-for-me',
+    '--full-auto',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--dangerously-bypass-hook-trust',
+    '--add-dir',
+    '--cd',
+    '-C',
+  ]),
+  gemini: new Set([
+    '--approval-mode',
+    '--yolo',
+    '-y',
+    '--sandbox',
+    '-s',
+    '--allowed-tools',
+    '--policy',
+    '--admin-policy',
+    '--skip-trust',
+    '--extensions',
+    '-e',
+    '--include-directories',
+    '--allowed-mcp-server-names',
+  ]),
+};
+
+function vendorArgFlag(arg: string): string {
+  const equals = arg.indexOf('=');
+  const flag = equals === -1 ? arg : arg.slice(0, equals);
+
+  // Long options are case-insensitive here so Claude's documented
+  // --allowedTools spelling and its --allowed-tools alias are both covered.
+  // Short options remain case-sensitive (`-C` and `-c` differ for Codex).
+  return flag.startsWith('--') ? flag.toLowerCase() : flag;
+}
+
 /**
- * `vendorArgs` is an escape hatch for capability flags, not a way to weaken
- * crbuddy's safety boundary. Reject anything that can plausibly change
- * sandbox / approval / permission behavior before argv is constructed.
- *
- * In particular, Codex `-c`/`--config` is blocked because arbitrary config
- * overrides can change sandbox or approval policy even if the visible argv
- * also contains `--sandbox read-only`.
+ * Best-effort guardrail for known vendor flags that can change permissions,
+ * configuration sources, loaded capabilities, or the review root. This is
+ * exact per-vendor matching, not proof that an unknown flag is inert;
+ * repository and vendor configuration remain trusted inputs.
  */
 function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void {
   if (!args || args.length === 0) return;
 
-  const forbidden = args.find((arg) => {
-    if (/permission|sandbox|approval|dangerously|\byolo\b/i.test(arg)) return true;
-    if (vendor === 'codex' && (arg === '-s' || arg === '-c' || arg === '--config')) {
-      return true;
-    }
-    if (vendor === 'codex' && (/^-s=/.test(arg) || /^-c=/.test(arg))) return true;
-    return false;
-  });
+  const blocked = BLOCKED_VENDOR_ARGS[vendor];
+  const forbidden = blocked
+    ? args.find((arg) => blocked.has(vendorArgFlag(arg)))
+    : undefined;
 
   if (forbidden) {
     throw new UnsafeInvocationError(
-      `vendorArgs may not override crbuddy safety controls (${JSON.stringify(forbidden)}). ` +
-        `Sandbox, approval, permission, dangerous-mode, and Codex config-override ` +
-        `arguments are owned by crbuddy so a project-local config cannot weaken read-only review.`,
+      `vendorArgs contains a known ${vendor} safety or configuration control ` +
+        `(${JSON.stringify(forbidden)}). crbuddy blocks known controls that can change ` +
+        `permissions, configuration sources, loaded capabilities, or the review root. ` +
+        `This filter is best-effort; use only repository and vendor configuration you trust.`,
     );
   }
 }

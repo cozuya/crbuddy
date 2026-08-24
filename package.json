@@ -18,6 +18,7 @@
   },
   "files": [
     "dist",
+    "examples",
     "README.md",
     "GUIDE.md",
     "DESIGN.md"

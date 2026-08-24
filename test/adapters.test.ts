@@ -33,6 +33,40 @@ const branch: ResolvedTarget = {
   bytes: 4,
 };
 
+type VendorName = 'claude' | 'codex' | 'gemini';
+
+function buildWithVendorArgs(vendor: VendorName, vendorArgs: string[]) {
+  const common = {
+    model: vendor === 'claude' ? 'opus' : vendor === 'codex' ? 'gpt-5.6-sol' : 'gemini-2.5-pro',
+    repoRoot: '/repo',
+    supports,
+    vendorArgs,
+  };
+
+  if (vendor === 'claude') {
+    return claudeAdapter.build({
+      ...common,
+      operation: { kind: 'review', target: uncommitted },
+    });
+  }
+
+  if (vendor === 'codex') {
+    return codexAdapter.build({
+      ...common,
+      operation: { kind: 'review', target: uncommitted },
+    });
+  }
+
+  return geminiAdapter.build({
+    ...common,
+    operation: {
+      kind: 'generic',
+      target: uncommitted,
+      instructions: 'Review for correctness.',
+    },
+  });
+}
+
 test('Claude native review invokes /code-review for uncommitted target', () => {
   const invocation = claudeAdapter.build({
     operation: { kind: 'review', target: uncommitted },
@@ -188,6 +222,88 @@ test('Codex vendorArgs cannot use arbitrary config overrides around safety', () 
       }),
     UnsafeInvocationError,
   );
+});
+
+test('known per-vendor safety and configuration flags are rejected in split and equals forms', () => {
+  const blocked: Record<VendorName, string[]> = {
+    claude: [
+      '--permission-mode',
+      '--dangerously-skip-permissions',
+      '--allow-dangerously-skip-permissions',
+      '--allowedTools',
+      '--allowed-tools',
+      '--settings',
+      '--setting-sources',
+      '--mcp-config',
+      '--strict-mcp-config',
+      '--add-dir',
+      '--agents',
+      '--plugin-dir',
+      '--plugin-url',
+      '--tools',
+      '--system-prompt',
+      '--system-prompt-file',
+      '--append-system-prompt',
+      '--append-system-prompt-file',
+    ],
+    codex: [
+      '--config',
+      '-c',
+      '--sandbox',
+      '-s',
+      '--ask-for-approval',
+      '-a',
+      '--profile',
+      '-p',
+      '--enable',
+      '--disable',
+      '--approve-for-me',
+      '--full-auto',
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--dangerously-bypass-hook-trust',
+      '--add-dir',
+      '--cd',
+      '-C',
+    ],
+    gemini: [
+      '--approval-mode',
+      '--yolo',
+      '-y',
+      '--sandbox',
+      '-s',
+      '--allowed-tools',
+      '--policy',
+      '--admin-policy',
+      '--skip-trust',
+      '--extensions',
+      '-e',
+      '--include-directories',
+      '--allowed-mcp-server-names',
+    ],
+  };
+
+  for (const vendor of Object.keys(blocked) as VendorName[]) {
+    for (const flag of blocked[vendor]) {
+      assert.throws(
+        () => buildWithVendorArgs(vendor, [flag, 'value']),
+        UnsafeInvocationError,
+        `${vendor} should reject ${flag} value`,
+      );
+
+      assert.throws(
+        () => buildWithVendorArgs(vendor, [`${flag}=value`]),
+        UnsafeInvocationError,
+        `${vendor} should reject ${flag}=value`,
+      );
+    }
+  }
+});
+
+test('an unknown vendor flag remains available as an escape hatch', () => {
+  for (const vendor of ['claude', 'codex', 'gemini'] as VendorName[]) {
+    const invocation = buildWithVendorArgs(vendor, ['--future-format=json']);
+    assert.ok(invocation.args.includes('--future-format=json'), vendor);
+  }
 });
 
 test('custom Codex instructions remain an explicit generic agent run', () => {

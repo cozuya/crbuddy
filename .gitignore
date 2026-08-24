@@ -5,4 +5,3 @@ dist-test/
 .crbuddy/
 CODE-REVIEW-HANDOFF.md
 CODE-REVIEW-HANDOFF.raw.md
-.crb_*.diff

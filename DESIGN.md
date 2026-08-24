@@ -211,8 +211,8 @@ Vendor flags churn. Read the appropriate CLI help at preflight and construct arg
 
 - optional missing flag → drop it and warn
 - required safety flag missing → refuse the lane
-- safety-sensitive `vendorArgs` → refuse them; project-local config may not override sandbox, approval, permission, dangerous-mode, or equivalent controls
-- Codex arbitrary `-c`/`--config` through `vendorArgs` → refuse, because config overrides can alter safety policy behind an apparently read-only argv
+- known safety- and configuration-sensitive `vendorArgs` → refuse them using best-effort per-vendor matching; unknown flags are not proven inert
+- Codex arbitrary `-c`/`--config` and profile selection through `vendorArgs` → refuse, because those flags select or alter configuration layers even when the constructed argv also contains `--sandbox read-only`
 - unreadable help → assume support rather than making every lane fail because help parsing failed; minimum-version enforcement still applies
 
 The help surface is adapter-specific. “Deepest subcommand” is not inherently correct; parent options may disappear from nested help output.
@@ -357,9 +357,14 @@ These are expected maintenance points rather than reasons to weaken the architec
 
 ## 11. Deliberately open
 
+Repository-local crbuddy configuration and vendor configuration are trusted
+inputs. Safe execution of configuration from an untrusted repository is not a
+design claim.
+
 - whether repeated identical model lanes should contribute equally to agreement ordering
 - whether `init` should support a non-interactive mode
 - whether model lists should stay advisory/hardcoded or be queried when vendors expose stable discovery
-- project-local configuration as a trust boundary for authenticated agents
+- whether a future design should remove project-local configuration from the trusted-input boundary for authenticated agents
+- whether `vendorArgs` should invert from a per-vendor blocked set to an allowlist of known-inert flags; this would provide a stronger boundary but require crbuddy releases for newly added vendor flags
 - whether report artifacts should eventually live outside the reviewed tree
 - empirical measurement of the incremental value of a multi-vendor panel over the best single reviewer

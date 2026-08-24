@@ -95,6 +95,9 @@ Global at `~/.crbuddy/config.json`, or per-repository at
 entirely** - there is no merging, because merging arrays of panel entries is
 ambiguous and makes "which panel actually ran?" hard to answer.
 
+A copyable configuration is shipped in
+[`examples/config.example.json`](examples/config.example.json).
+
 ```jsonc
 {
   "configVersion": 1,
@@ -160,10 +163,11 @@ Those target interfaces are not identical, which is why the snapshot is stable
 provenance rather than a claim that every native lane consumes the exact same
 SHA range.
 
-`vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not
-model. It cannot override sandbox, approval, permission, dangerous-mode, or
-Codex config controls: those are owned by crbuddy so a project-local config
-cannot weaken read-only review.
+`vendorArgs` is an escape hatch for CLI flags crbuddy does not model. crbuddy
+rejects known per-vendor flags that can select permissions or policy, load
+settings or capabilities, extend accessible roots, or choose Codex config
+layers. This is best-effort matching against changing vendor CLIs, not a
+security boundary or proof that an unknown flag is inert.
 
 ### Effort
 
@@ -211,10 +215,13 @@ consume a specific range and some expose selectors such as uncommitted changes
 or a base branch. Don't edit while a panel is running; otherwise a native
 reviewer that selects live repository state may observe a different tree.
 
-**Vendor project files are loaded by design.** Running inside your repo means
-each CLI picks up that repo's own `CLAUDE.md`, `AGENTS.md`, project-local
-commands, and settings. That's usually what you want, and it's also the most
-likely explanation for a run that behaves nothing like it does elsewhere.
+**Repository and vendor configuration are trusted inputs.** Running inside
+your repo means each CLI loads that repo's own `CLAUDE.md`, `AGENTS.md`,
+project-local commands, settings, hooks, plugins, extensions, and MCP
+configuration according to the vendor's behavior. `.crbuddy/config.json` and
+those vendor files are loaded by design; inspect them before running crbuddy
+on a repository you do not trust. Read-only agent modes do not make arbitrary
+vendor configuration safe to load.
 
 **The consolidator cannot delete anything.** It receives enumerated findings
 and returns only relationships between their IDs; crbuddy renders the groups
@@ -250,11 +257,12 @@ failure.
 That will hit per-subscription rate limits well before it hits your machine.
 Set `maxConcurrent` if it bites.
 
-**Reviewers are forced read-only, or refused.** Each adapter passes its
-vendor's read-only/sandboxing mechanism when needed, and if crbuddy cannot
-establish a safe invocation that lane is refused rather than run permissively.
-Safety-sensitive `vendorArgs` are rejected rather than allowed to override the
-enforced mode.
+**Reviewers are invoked with a probed read-only mode, or refused.** Each
+adapter passes its vendor's advertised read-only/sandboxing mechanism when
+needed, and if crbuddy cannot establish that invocation the lane is refused.
+Known safety- and configuration-sensitive `vendorArgs` are rejected with
+best-effort per-vendor matching. Because vendor flag surfaces change, this
+filter does not make untrusted repository or vendor configuration safe.
 
 **Ctrl-C aborts and writes nothing.** A partial panel is worse than no panel,
 because a consuming agent can't tell it's partial. The previous review is
