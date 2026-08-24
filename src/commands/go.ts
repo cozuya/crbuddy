@@ -124,12 +124,36 @@ export async function runGo(options: GoOptions): Promise<number> {
   const stateDir = repoStateDir(repoRoot);
   const scratch = path.join(stateDir, 'scratch');
   let mergeDir: string | null = null;
+  let ownsRunState = true;
+
+  const cleanupRunState = async (): Promise<void> => {
+    if (!ownsRunState) return;
+    ownsRunState = false;
+
+    const pendingMergeDir = mergeDir;
+    mergeDir = null;
+    await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    if (pendingMergeDir) {
+      await rm(pendingMergeDir, { recursive: true, force: true }).catch(() => {});
+    }
+  };
 
   // No volatile shared state is touched until this succeeds. In particular,
   // a second invocation must not clear the active run's scratch or stash on
   // its way to reporting lock contention.
-  const lock = await acquireLock(workDir);
+  let lock: Lock | null = await acquireLock(workDir);
   let outputLocks: Lock[] = [];
+
+  const releaseRunLocks = async (): Promise<void> => {
+    await releaseAll(outputLocks);
+    outputLocks = [];
+
+    if (lock) {
+      const held = lock;
+      lock = null;
+      await held.release();
+    }
+  };
 
   let stashed: Awaited<ReturnType<typeof stashExistingOutputs>> | null = null;
   let interrupted = false;
@@ -137,6 +161,7 @@ export async function runGo(options: GoOptions): Promise<number> {
   const onInterrupt = () => {
     if (interrupted) {
       // Second Ctrl-C: stop being polite.
+      progress.stopPulse();
       killAll('SIGKILL');
       process.exit(130);
     }
@@ -357,7 +382,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     // diff size limit to bound any of them. Unattended, that has to be asked
     // for rather than inferred.
     const emptyDiff = target.files.length === 0;
-    const attended = Boolean(process.stdin.isTTY);
+    const attended = canConfirm();
     const wholeCheckout = shouldReviewWholeCheckout(
       emptyDiff,
       attended,
@@ -581,10 +606,15 @@ export async function runGo(options: GoOptions): Promise<number> {
       progress.stopPulse();
       progress.bell();
 
-      // Released before the menu, not in the `finally`. These handlers
-      // suppress default termination, and with no reviewer left to stop,
-      // a SIGTERM arriving while the prompt waits would otherwise leave
-      // the process blocked on stdin holding the lock.
+      // Release both signal ownership and every lock before the menu. All
+      // output lifecycle work is complete, and waiting for clipboard input
+      // must not block this repository or another repository that shares an
+      // output path.
+      // Scratch has a stable per-repository name. Remove it while the repo
+      // lock is still held so this run's `finally` can never delete scratch
+      // belonging to a new run that starts while the menu is open.
+      await cleanupRunState();
+      await releaseRunLocks();
       process.off('SIGINT', onInterrupt);
       process.off('SIGTERM', onInterrupt);
 
@@ -642,12 +672,8 @@ export async function runGo(options: GoOptions): Promise<number> {
 
     await restorePreviousOutput().catch(() => {});
 
-    await rm(scratch, { recursive: true, force: true }).catch(() => {});
-    if (mergeDir) {
-      await rm(mergeDir, { recursive: true, force: true }).catch(() => {});
-    }
-    await releaseAll(outputLocks);
-    await lock.release();
+    await cleanupRunState();
+    await releaseRunLocks();
   }
 }
 

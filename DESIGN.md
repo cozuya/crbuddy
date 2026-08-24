@@ -124,10 +124,11 @@ Requirements:
 - unresolved merge conflicts refuse the run
 - crbuddy output files and `.crbuddy/` excluded
 - linked worktrees supported by asking git for paths rather than assuming `.git/` is a directory
-- an empty target refuses quickly when unattended; with a terminal attached it
-  warns and reviews the whole checkout instead (`--whole-checkout` opts an
-  unattended run in). The fallback is a general-purpose agent run, not a
-  native review, and `maxDiffBytes` does not bound it
+- an empty target refuses quickly when unattended; with terminal input and a
+  visible terminal warning stream it warns and reviews the whole checkout
+  instead (`--whole-checkout` opts an unattended run in). The fallback is a
+  general-purpose agent run, not a native review, and `maxDiffBytes` does not
+  bound it
 - odd filenames handled with NUL-delimited git output
 - snapshot construction does not modify the user's index or worktree
 
@@ -234,7 +235,7 @@ The help surface is adapter-specific. “Deepest subcommand” is not inherently
 
 ### Blocking and concurrency
 
-One `crbuddy go`, one terminal, wait. Discrete events are appended to terminal output, with a TTY-only live status line and terminal bell at completion. In VS Code's integrated terminal, the same pulse also sets the native indeterminate tab-progress state and clears it after consolidation and output commit finish.
+One `crbuddy go`, one terminal, wait. Discrete events are appended to terminal output, with a TTY-only live status line and terminal bell after successful completion. Recognized terminals with OSC 9;4 support also receive native indeterminate progress through consolidation and output commit. Detection is conservative because OSC 9;4 collides with the older OSC 9 notification protocol: Windows Terminal and ConEmu are identified by their environment markers, while iTerm2 and Ghostty are version-gated. VS Code receives the progress state, but stock VS Code does not render it unless `${progress}` is present in the configured terminal tab title or description.
 
 Panel entries run concurrently by default. `maxConcurrent: 0` means unlimited; the semaphore is still part of the execution path so a cap is a policy setting rather than an architectural rewrite.
 
@@ -261,6 +262,8 @@ A per-repository lock prevents two simultaneous crbuddy runs from racing output 
 - total reviewer failure → restore prior output and write no fresh report
 
 Stage temp files on the destination filesystem, then rename into place.
+Output destinations must name files; existing directories and filesystem roots
+are rejected before any stash or commit operation.
 Before moving an existing report aside, persist a recovery manifest. A
 partial stash failure rolls completed moves back immediately; if that rollback
 also fails, the manifest remains for the next run to recover.

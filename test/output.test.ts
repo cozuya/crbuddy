@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import {
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
+  readlink,
   rename,
   rm,
   symlink,
@@ -23,6 +25,7 @@ import { pathKey as pathKeySync } from '../src/commands/go.js';
 import {
   cleanupTemps,
   commitOutputs,
+  moveFile,
   recoverStrandedOutputs,
   stashExistingOutputs,
 } from '../src/output/write.js';
@@ -82,6 +85,35 @@ test('an absolute report path is not joined onto the repository root', async () 
   await commitOutputs(repoRoot, [{ relative: absolute, content: 'merged' }]);
 
   assert.equal(await readFile(absolute, 'utf8'), 'merged');
+});
+
+test('existing directories and filesystem roots are rejected as output files', async () => {
+  const { repoRoot } = await makeTree();
+  const reports = path.join(repoRoot, 'reports');
+  const sentinel = path.join(reports, 'keep.txt');
+  await mkdir(reports);
+  await writeFile(sentinel, 'do not delete', 'utf8');
+
+  assert.throws(
+    () =>
+      assertUsableOutput(
+        { merged: 'reports', raw: 'review.raw.md' },
+        'output',
+        repoRoot,
+      ),
+    /not a directory/,
+  );
+  assert.equal(await readFile(sentinel, 'utf8'), 'do not delete');
+
+  assert.throws(
+    () =>
+      assertUsableOutput(
+        { merged: path.parse(repoRoot).root, raw: 'review.raw.md' },
+        'output',
+        repoRoot,
+      ),
+    /filesystem root/,
+  );
 });
 
 test('a symlinked output parent is classified by its real destination', async () => {
@@ -310,6 +342,40 @@ test('a stash across filesystems falls back to copy instead of failing', async (
   assert.ok(!existsSync(report));
   await stashed.restore();
   assert.equal(await readFile(report, 'utf8'), 'previous run');
+});
+
+test('the cross-filesystem move fallback preserves a file symlink', async (context) => {
+  const { parent } = await makeTree();
+  const target = path.join(parent, 'target.md');
+  const link = path.join(parent, 'review.md');
+  const holding = path.join(parent, 'holding');
+  const stored = path.join(holding, 'review.stashed');
+  await writeFile(target, 'previous run', 'utf8');
+  await mkdir(holding);
+
+  try {
+    await symlink('target.md', link, process.platform === 'win32' ? 'file' : undefined);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') {
+      context.skip('file symlinks require Windows Developer Mode or elevation');
+      return;
+    }
+    throw error;
+  }
+
+  const crossDeviceRename: typeof rename = async () => {
+    throw Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' });
+  };
+
+  await moveFile(link, stored, { rename: crossDeviceRename });
+  assert.equal((await lstat(stored)).isSymbolicLink(), true);
+  assert.equal(await readlink(stored), 'target.md');
+  assert.equal(existsSync(link), false);
+
+  await moveFile(stored, link, { rename: crossDeviceRename });
+  assert.equal((await lstat(link)).isSymbolicLink(), true);
+  assert.equal(await readlink(link), 'target.md');
+  assert.equal(await readFile(link, 'utf8'), 'previous run');
 });
 
 test('a restore that cannot put a file back keeps the only copy', async () => {

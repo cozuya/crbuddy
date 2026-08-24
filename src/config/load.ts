@@ -70,7 +70,7 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
     `No config found.\n` +
       `  Looked for: ${projectPath}\n` +
       `              ${globalPath}\n` +
-      `Run \`crbuddy init\` to create one.`,
+      `Run \`crb init\` to create one.`,
   );
 }
 
@@ -391,10 +391,25 @@ export function assertUsableOutput(
       }
     }
 
+    const absolute = path.resolve(repoRoot ?? process.cwd(), concrete);
+
+    if (absolute === path.parse(absolute).root) {
+      throw new ConfigError(`${where}.${key}: must not be a filesystem root.`);
+    }
+
     const named = segments.at(-1);
 
     if (named === undefined || named === '.' || named === '..') {
       throw new ConfigError(`${where}.${key}: must name a file.`);
+    }
+
+    // Stashing is a move followed by recursive disposal after a successful
+    // run. Accepting a directory here would therefore move the whole tree
+    // into crbuddy's holding area and delete it as if it were an old report.
+    // Inspect the directory entry itself: a final symlink is intentionally
+    // moved as a link rather than followed (see canonicalOutputPath).
+    if (repoRoot && existsSync(concrete) && lstatSync(concrete).isDirectory()) {
+      throw new ConfigError(`${where}.${key}: must name a file, not a directory.`);
     }
 
     normalizedPaths.push(normalized);

@@ -12,6 +12,9 @@ import { runDoctor } from './commands/doctor.js';
 
 const HELP = `crbuddy - fan one code review across several agent CLIs, then consolidate.
 
+First run: use \`crb init\` to set up your code review panel, then \`crb go\`
+to run it.
+
 Usage:
   crbuddy init                 Interactive setup. Writes a config.
   crbuddy config               Same as init; edits an existing config.

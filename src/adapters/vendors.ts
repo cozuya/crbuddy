@@ -50,7 +50,7 @@ function requireSafetyFlag(
 }
 
 const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
-  claude: new Set([
+  claude: blockedVendorArgs([
     '--permission-mode',
     '--dangerously-skip-permissions',
     '--allow-dangerously-skip-permissions',
@@ -70,7 +70,7 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
     '--append-system-prompt',
     '--append-system-prompt-file',
   ]),
-  codex: new Set([
+  codex: blockedVendorArgs([
     '--config',
     '-c',
     '--sandbox',
@@ -89,7 +89,7 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
     '--cd',
     '-C',
   ]),
-  gemini: new Set([
+  gemini: blockedVendorArgs([
     '--approval-mode',
     '--yolo',
     '-y',
@@ -106,14 +106,21 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
   ]),
 };
 
+function blockedVendorArgs(flags: string[]): ReadonlySet<string> {
+  return new Set(flags.map(vendorArgFlag));
+}
+
 function vendorArgFlag(arg: string): string {
   const equals = arg.indexOf('=');
   const flag = equals === -1 ? arg : arg.slice(0, equals);
 
-  // Long options are case-insensitive here so Claude's documented
-  // --allowedTools spelling and its --allowed-tools alias are both covered.
-  // Short options remain case-sensitive (`-C` and `-c` differ for Codex).
-  return flag.startsWith('--') ? flag.toLowerCase() : flag;
+  // Long-option parsers commonly expose kebab-case and camelCase spellings
+  // for the same control. Case-fold and remove separators so both forms are
+  // one key; short options remain case-sensitive (`-C` and `-c` differ for
+  // Codex).
+  return flag.startsWith('--')
+    ? flag.slice(2).replace(/-/g, '').toLowerCase()
+    : flag;
 }
 
 /**

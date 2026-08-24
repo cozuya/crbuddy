@@ -295,6 +295,25 @@ test('known per-vendor safety and configuration flags are rejected in split and 
         UnsafeInvocationError,
         `${vendor} should reject ${flag}=value`,
       );
+
+      if (flag.startsWith('--')) {
+        const camelCase = `--${flag
+          .slice(2)
+          .replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())}`;
+
+        if (camelCase !== flag) {
+          assert.throws(
+            () => buildWithVendorArgs(vendor, [camelCase, 'value']),
+            UnsafeInvocationError,
+            `${vendor} should reject ${camelCase} value`,
+          );
+          assert.throws(
+            () => buildWithVendorArgs(vendor, [`${camelCase}=value`]),
+            UnsafeInvocationError,
+            `${vendor} should reject ${camelCase}=value`,
+          );
+        }
+      }
     }
   }
 });

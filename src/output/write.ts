@@ -1,5 +1,17 @@
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  readlink,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import path from 'node:path';
 
 import { canonicalOutputPath } from '../config/load.js';
@@ -40,11 +52,27 @@ const MANIFEST = 'manifest.json';
  * already-written artifact, not the commit path: the copy is verified by
  * `rename` succeeding or by the copy completing before the original goes.
  */
-async function moveFile(from: string, to: string): Promise<void> {
+export async function moveFile(
+  from: string,
+  to: string,
+  operations: { rename?: typeof rename } = {},
+): Promise<void> {
   try {
-    await rename(from, to);
+    await (operations.rename ?? rename)(from, to);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+
+    if ((await lstat(from)).isSymbolicLink()) {
+      const target = await readlink(from);
+
+      // Configured outputs name files, so Windows needs the `file` link
+      // type. Preserve the target text verbatim: a relative link will be
+      // temporarily dangling in the holding directory, then regain its
+      // original meaning when restored to the output path.
+      await symlink(target, to, process.platform === 'win32' ? 'file' : undefined);
+      await unlink(from);
+      return;
+    }
 
     await copyFile(from, to);
     await unlink(from);

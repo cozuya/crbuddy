@@ -71,13 +71,13 @@ If the target resolves to nothing - `go` run straight after committing, or a
 base branch that is already the current commit - crbuddy warns and reviews the
 whole checkout instead of exiting.
 
-That only happens when a terminal is attached. The warning is the safeguard,
-and an unattended caller has nobody to read it: a hook or CI job on a clean
-tree would otherwise spend one full agent run per panel entry with no diff
-size limit bounding any of them. Without a terminal, `go` prints the reason
-and exits 1, as it always did. Pass `--whole-checkout` to ask for the fallback
-anyway. `--force` only waives `maxDiffBytes`; it does not opt into this broader
-run.
+That only happens when both input and the warning stream are attached to a
+terminal. The warning is the safeguard, and an unattended caller has nobody to
+read it: a hook, CI job, or run with stderr redirected would otherwise spend one
+full agent run per panel entry with no diff size limit bounding any of them.
+Without a visible prompt stream, `go` prints the reason and exits 1, as it
+always did. Pass `--whole-checkout` to ask for the fallback anyway. `--force`
+only waives `maxDiffBytes`; it does not opt into this broader run.
 
 That is a materially different run, so it is worth recognizing in the output.
 No vendor CLI has a native review mode for "the entire repository", so every
@@ -108,7 +108,8 @@ A copyable configuration is shipped in
   // cannot land in a diff or be committed by accident. An absolute path is
   // allowed and pins every repository to the same file. Both paths are
   // kept and validated even in "terminal" mode, so switching back to
-  // "file" restores the last choice.
+  // "file" restores the last choice. Each path must name a file, never an
+  // existing directory or a filesystem root.
   "output": {
     "destination": "file",
     "merged": "CODE-REVIEW-HANDOFF.md",
@@ -256,6 +257,14 @@ failure.
 **Concurrency is unmanaged by default.** Six entries means six subprocesses.
 That will hit per-subscription rate limits well before it hits your machine.
 Set `maxConcurrent` if it bites.
+
+**Terminal progress is capability-dependent.** Every interactive terminal gets
+the in-terminal status line and a bell after a successful run. crbuddy also
+reports native indeterminate progress to Windows Terminal, ConEmu, iTerm2
+3.6.6+, Ghostty 1.2+, and VS Code. VS Code receives the state but only displays
+it when its tab title or description includes `${progress}`; unsupported
+terminals receive no OSC progress sequence. Audible versus visual bell
+behavior remains the terminal user's setting.
 
 **Reviewers are invoked with a probed read-only mode, or refused.** Each
 adapter passes its vendor's advertised read-only/sandboxing mechanism when

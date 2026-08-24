@@ -1,4 +1,5 @@
 import { formatElapsed } from '../util/format.js';
+import { isVersionAtLeast } from '../adapters/version.js';
 
 /**
  * Run narration.
@@ -33,10 +34,35 @@ const FRAMES = [
 ];
 const FRAME_MS = 100;
 
+/**
+ * OSC 9;4 collides with the older OSC 9 notification protocol, so do not
+ * broadcast it to every TTY. Limit emission to terminals whose support can
+ * be identified without an interactive capability query.
+ */
+export function supportsTerminalProgress(environment: NodeJS.ProcessEnv): boolean {
+  if (environment.TERM_PROGRAM === 'vscode') return true;
+  if (environment.WT_SESSION) return true;
+  if (environment.ConEmuANSI?.toUpperCase() === 'ON') return true;
+
+  const program = environment.TERM_PROGRAM?.toLowerCase();
+  const version = environment.TERM_PROGRAM_VERSION;
+
+  if (!version) return false;
+
+  if (program === 'iterm.app') return isVersionAtLeast(version, '3.6.6');
+  if (program === 'ghostty') return isVersionAtLeast(version, '1.2.0');
+
+  return false;
+}
+
 interface ProgressOutput {
   readonly isTTY?: boolean;
   readonly columns?: number;
   write(text: string): unknown;
+}
+
+interface ExitEmitter {
+  once(event: 'exit', listener: () => void): unknown;
 }
 
 export class Progress {
@@ -77,13 +103,10 @@ export class Progress {
     this.statusOutput = this.terminalOutput();
     if (!this.statusOutput) return;
 
-    // VS Code maps OSC 9;4 progress onto the `${progress}` portion of its
-    // terminal-tab title. It is invisible in the terminal body and gives a
-    // background tab the same busy signal as a foreground Codex session.
-    if (
-      this.environment.TERM_PROGRAM === 'vscode' &&
-      !this.tabProgressVisible
-    ) {
+    // Supported terminals map OSC 9;4 onto native chrome such as a tab,
+    // window, or taskbar progress indicator. VS Code receives the state too,
+    // though it displays it only when `${progress}` is in its title template.
+    if (supportsTerminalProgress(this.environment) && !this.tabProgressVisible) {
       this.statusOutput.write(TAB_PROGRESS_INDETERMINATE);
       this.tabProgressVisible = true;
     }
@@ -104,7 +127,7 @@ export class Progress {
     this.active.clear();
   }
 
-  /** Stop every progress surface, including VS Code's terminal-tab state. */
+  /** Stop every progress surface, including native terminal progress state. */
   stopPulse(): void {
     this.pausePulse();
 
@@ -181,3 +204,13 @@ export class Progress {
 }
 
 export const progress = new Progress();
+
+/** `process.exit()` skips `finally`, but it emits `exit` synchronously. */
+export function installExitCleanup(
+  subject: Progress,
+  emitter: ExitEmitter = process,
+): void {
+  emitter.once('exit', () => subject.stopPulse());
+}
+
+installExitCleanup(progress);
