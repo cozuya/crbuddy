@@ -57,20 +57,28 @@ export interface StashedOutputs {
   moved: string[];
 }
 
+interface StashOperations {
+  moveFile?: (from: string, to: string) => Promise<void>;
+  writeManifest?: (file: string, content: string) => Promise<void>;
+}
+
 export async function stashExistingOutputs(
   repoRoot: string,
   stateDir: string,
   relativePaths: string[],
   runId: string,
+  operations: StashOperations = {},
 ): Promise<StashedOutputs> {
   // Per-run, not shared. A hard stop mid-run used to leave files in a
   // common `previous/` directory; the next run would stash nothing, then on
   // total failure delete that directory wholesale — taking the stranded
   // prior report with it.
-  const holding = path.join(stateDir, 'previous', runId);
-  await mkdir(holding, { recursive: true });
+  const previous = path.join(stateDir, 'previous');
+  const holding = path.join(previous, runId);
+  await mkdir(previous, { recursive: true });
+  await mkdir(holding);
 
-  const moved: Array<{ from: string; to: string; relative: string }> = [];
+  const planned: Array<{ from: string; to: string; relative: string }> = [];
 
   for (const [index, relative] of relativePaths.entries()) {
     const from = path.resolve(repoRoot, relative);
@@ -82,15 +90,58 @@ export async function stashExistingOutputs(
     // output called `review__previous.md` decodes back as `review/previous.md`.
     const to = path.join(holding, `${index}.stashed`);
 
-    await moveFile(from, to);
-    moved.push({ from, to, relative });
+    planned.push({ from, to, relative });
   }
 
-  await writeFile(
-    path.join(holding, MANIFEST),
-    JSON.stringify(moved.map((entry) => ({ stored: path.basename(entry.to), relative: entry.relative }))),
-    'utf8',
+  const manifest = path.join(holding, MANIFEST);
+  const manifestContent = JSON.stringify(
+    planned.map((entry) => ({
+      stored: path.basename(entry.to),
+      relative: entry.relative,
+    })),
   );
+  const move = operations.moveFile ?? moveFile;
+  const writeManifest =
+    operations.writeManifest ??
+    ((file: string, content: string) => writeFile(file, content, 'utf8'));
+
+  // Recovery metadata lands before the first output moves. If manifest
+  // creation fails, every report is still in its original location.
+  try {
+    await writeManifest(manifest, manifestContent);
+  } catch (error) {
+    await rm(holding, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+
+  const moved: typeof planned = [];
+
+  try {
+    for (const entry of planned) {
+      await move(entry.from, entry.to);
+      moved.push(entry);
+    }
+  } catch (error) {
+    const stranded: typeof moved = [];
+
+    // A returned handle cannot restore a stash that never finished, so roll
+    // back here. If rollback itself fails, the already-written manifest lets
+    // the next run recover precisely the entries still in the holding dir.
+    for (const entry of [...moved].reverse()) {
+      try {
+        await mkdir(path.dirname(entry.from), { recursive: true });
+        await move(entry.to, entry.from);
+      } catch {
+        stranded.push(entry);
+      }
+    }
+
+    if (stranded.length === 0) {
+      await rm(holding, { recursive: true, force: true }).catch(() => {});
+    }
+
+    throw error;
+  }
 
   // Restore is retryable for entries that genuinely remain stranded, but a
   // successfully restored entry is retired immediately. Calling restore a
@@ -107,7 +158,7 @@ export async function stashExistingOutputs(
       for (const entry of pending) {
         try {
           await mkdir(path.dirname(entry.from), { recursive: true });
-          await moveFile(entry.to, entry.from);
+          await move(entry.to, entry.from);
         } catch {
           stranded.push(entry.to);
           stillPending.push(entry);

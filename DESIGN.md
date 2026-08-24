@@ -261,6 +261,9 @@ A per-repository lock prevents two simultaneous crbuddy runs from racing output 
 - total reviewer failure → restore prior output and write no fresh report
 
 Stage temp files on the destination filesystem, then rename into place.
+Before moving an existing report aside, persist a recovery manifest. A
+partial stash failure rolls completed moves back immediately; if that rollback
+also fails, the manifest remains for the next run to recover.
 
 ### Exit codes
 
@@ -324,7 +327,8 @@ Consolidated output has YAML frontmatter recording at least:
 
 Unconsolidated output omits the verbose frontmatter. Its visible report block
 retains the review count, failures, warnings, target range, and file count; the
-per-review markers retain vendor, model, and stable lane IDs.
+per-review markers retain vendor, model, and stable lane IDs. A compact hidden
+marker retains the run ID so a raw/consolidated mismatch remains detectable.
 
 HTML comments delimit human-navigation sections, but they are not parser boundaries because verbatim model output can contain the same strings.
 

@@ -278,13 +278,14 @@ the deliverable; `output.raw` is written alongside it only when consolidation
 ran.
 
 **`terminal`** writes nothing to disk. The report goes to stdout, so
-`crbuddy go > review.md` works and every progress line stays on stderr where
-it cannot interleave. With consolidation on, only the consolidated report is
-printed - the unmerged reviews are an audit trail worth having on disk, not
-worth doubling the scrollback for. When both ends are a terminal the run then
-stops on a prompt offering to copy the report to the clipboard; piped or
-redirected, it prints and exits. Nothing clears the screen or uses the
-alternate buffer, so the report survives in the scrollback either way.
+`crbuddy go > review.md` works and every progress line or preflight
+confirmation stays on stderr where it cannot interleave. With consolidation
+on, only the consolidated report is printed - the unmerged reviews are an
+audit trail worth having on disk, not worth doubling the scrollback for. When
+both ends are a terminal the run then stops on a prompt offering to copy the
+report to the clipboard; piped or redirected, it prints and exits. Nothing
+clears the screen or uses the alternate buffer, so the report survives in the
+scrollback either way.
 
 A report left on disk by an earlier `file`-mode run is still moved aside for
 the duration of a `terminal` run - reviewers must not read the last review -
@@ -307,7 +308,8 @@ running reviewer, which breaks blindness in a way the diff pathspec cannot
 prevent - and a whole-checkout run, which has no pathspec at all, loses it
 entirely. Under the home directory rather than the OS temp directory because a
 crashed run's only copy of the previous report waits there until the next run
-recovers it.
+recovers it. Panel and consolidation spool files are removed when the run
+ends; only a report that still needs crash recovery may remain.
 
 Shared output paths get their own locks, one per resolved file, in the OS temp
 directory. Two sibling repositories both writing `../CODE-REVIEW-HANDOFF.md`
@@ -319,7 +321,9 @@ Consolidated reports carry YAML frontmatter with the captured snapshot and
 base SHAs, diff digest, per-run CLI versions and applied effort, failures with
 reasons, and consolidation state. Unconsolidated reports omit that verbose
 block and begin with the review itself. Their visible report block still gives
-the review count, failures, warnings, target range, and file count.
+the review count, failures, warnings, target range, and file count. A compact
+hidden marker keeps the run ID so a raw file can be matched to its consolidated
+companion without restoring the large metadata block.
 
 HTML comment markers delimit reviews, clusters, and findings. **They are
 navigation aids, not a parsing boundary** - a model's verbatim output can

@@ -155,6 +155,7 @@ test('unconsolidated reports omit verbose provenance frontmatter', () => {
   for (const report of [deliverable, auditTrail, mergeFallback]) {
     assert.ok(!report.startsWith('---\n'), report);
     assert.ok(!report.includes('\ncrbuddy:\n'), report);
+    assert.match(report, /<!-- crbuddy:raw runId=abc12345 -->/);
     assert.match(report, /<!-- crbuddy:report -->/);
     assert.match(report, /Reviewed `/);
   }

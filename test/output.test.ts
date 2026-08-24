@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -256,17 +256,115 @@ test('restoring twice does not invent a stranded holding path', async () => {
   assert.equal(await readFile(report, 'utf8'), 'previous run');
 });
 
-test('two spellings of one path never become two colliding lock keys', async () => {
-  // Folding unconditionally made `Review.md` and `review.md` two entries
-  // with ONE key on Linux: the second acquisition found the first lock
-  // holding this very pid and aborted as though another run were active.
+test('a partial stash failure rolls earlier moves back immediately', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const first = path.join(parent, 'first.md');
+  const second = path.join(parent, 'second.md');
+  const manifest = path.join(workDir, 'previous', 'partial', 'manifest.json');
+  await writeFile(first, 'first report', 'utf8');
+  await writeFile(second, 'second report', 'utf8');
+
+  let moves = 0;
+
+  await assert.rejects(
+    stashExistingOutputs(
+      repoRoot,
+      workDir,
+      ['../first.md', '../second.md'],
+      'partial',
+      {
+        moveFile: async (from, to) => {
+          moves += 1;
+          assert.ok(existsSync(manifest), 'manifest must precede the first move');
+          if (moves === 2) throw new Error('simulated second move failure');
+          await rename(from, to);
+        },
+      },
+    ),
+    /simulated second move failure/,
+  );
+
+  assert.equal(await readFile(first, 'utf8'), 'first report');
+  assert.equal(await readFile(second, 'utf8'), 'second report');
+  assert.ok(!existsSync(path.dirname(manifest)), 'completed rollback clears the batch');
+});
+
+test('a failed stash rollback leaves a manifest the next run can recover', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const first = path.join(parent, 'first.md');
+  const second = path.join(parent, 'second.md');
+  const holding = path.join(workDir, 'previous', 'recoverable');
+  await writeFile(first, 'first report', 'utf8');
+  await writeFile(second, 'second report', 'utf8');
+
+  let moves = 0;
+
+  await assert.rejects(
+    stashExistingOutputs(
+      repoRoot,
+      workDir,
+      ['../first.md', '../second.md'],
+      'recoverable',
+      {
+        moveFile: async (from, to) => {
+          moves += 1;
+          if (moves === 2) throw new Error('simulated second move failure');
+          if (moves === 3) throw new Error('simulated rollback failure');
+          await rename(from, to);
+        },
+      },
+    ),
+    /simulated second move failure/,
+  );
+
+  assert.ok(existsSync(path.join(holding, 'manifest.json')));
+  assert.ok(!existsSync(first));
+  assert.equal(await readFile(second, 'utf8'), 'second report');
+
+  assert.deepEqual(await recoverStrandedOutputs(repoRoot, workDir), ['../first.md']);
+  assert.equal(await readFile(first, 'utf8'), 'first report');
+});
+
+test('a manifest failure occurs before any output is moved', async () => {
+  const { parent, repoRoot, workDir } = await makeTree();
+  const report = path.join(parent, 'report.md');
+  const holding = path.join(workDir, 'previous', 'no-manifest');
+  await writeFile(report, 'previous report', 'utf8');
+
+  let moved = false;
+
+  await assert.rejects(
+    stashExistingOutputs(
+      repoRoot,
+      workDir,
+      ['../report.md'],
+      'no-manifest',
+      {
+        moveFile: async () => { moved = true; },
+        writeManifest: async () => {
+          throw new Error('simulated manifest failure');
+        },
+      },
+    ),
+    /simulated manifest failure/,
+  );
+
+  assert.equal(moved, false);
+  assert.equal(await readFile(report, 'utf8'), 'previous report');
+  assert.ok(!existsSync(holding));
+});
+
+test('output lock identity conservatively folds on Windows and macOS', async () => {
+  // Under-coordinating one physical output file can corrupt it. A
+  // case-sensitive macOS volume may over-coordinate two case-distinct files,
+  // but repository state uses its separately probed canonical identity.
   const { pathKey } = await import('../src/commands/go.js');
 
   const keys = new Set([pathKey('/w/Review.md'), pathKey('/w/review.md')]);
-  const insensitive = process.platform === 'win32' || process.platform === 'darwin';
+  const conservativelyFolded =
+    process.platform === 'win32' || process.platform === 'darwin';
 
-  // One file or two, but never two entries sharing a key.
-  assert.equal(keys.size, insensitive ? 1 : 2);
+  assert.equal(keys.size, conservativelyFolded ? 1 : 2);
 });
 
 test('separators are normalized so one path has one identity', () => {

@@ -189,6 +189,11 @@ export function renderRaw(context: ReportContext): string {
 
   const parts = [
     `${heading}\n`,
+    // The raw report intentionally omits the large YAML provenance block,
+    // but it still needs a run identity. If a process dies between the raw
+    // and merged renames, this marker makes a mixed pair detectable by
+    // comparing it with the consolidated report's frontmatter.
+    `<!-- crbuddy:raw runId=${context.runId} -->\n`,
     renderReportBlock(context),
   ];
 

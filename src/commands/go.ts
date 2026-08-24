@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
@@ -164,12 +164,12 @@ export async function runGo(options: GoOptions): Promise<number> {
           'An existing file there is moved aside and replaced by the report.',
       );
 
-      if (!process.stdin.isTTY) {
+      if (!canConfirm()) {
         throw new PreflightError(
           'Refusing to write outside the repository from a project-local ' +
             'config without confirmation. Move that output setting into your ' +
-            'global config (`crbuddy init --global`), or run this ' +
-            'interactively once to confirm.',
+            'global config (`crbuddy init --global`), or run interactively ' +
+            'to confirm this run.',
         );
       }
 
@@ -200,6 +200,22 @@ export async function runGo(options: GoOptions): Promise<number> {
     // change that answer between confirmation and commit.
     outputLocks = await acquireOutputLocks(repoRoot, config);
 
+    // Recover anything a crashed run left in a holding directory before
+    // deciding whether an existing report may be replaced. Otherwise the
+    // refusal check sees an empty destination, recovery restores the report,
+    // and this run overwrites it without the configured confirmation.
+    // External project-config paths have already passed their separate gate.
+    const recovered = [
+      ...(await recoverStrandedOutputs(repoRoot, stateDir)),
+      ...(await recoverStrandedOutputs(repoRoot, workDir)),
+    ];
+
+    if (recovered.length > 0) {
+      progress.dim(
+        `Recovered ${recovered.join(', ')} left behind by an interrupted run.`,
+      );
+    }
+
     // Nothing is replaced when the report only ever reaches the terminal.
     if (config.refuseIfOutputExists && config.output.destination === 'file') {
       const existing = [config.output.merged, config.output.raw].filter((relative) =>
@@ -229,19 +245,6 @@ export async function runGo(options: GoOptions): Promise<number> {
     await mkdir(mergeDir, { recursive: true });
 
     await cleanupTemps(repoRoot, [config.output.merged, config.output.raw]);
-
-    // Recover anything a crashed run left in a holding directory before this
-    // run stashes outputs of its own, including the pre-relocation location.
-    const recovered = [
-      ...(await recoverStrandedOutputs(repoRoot, stateDir)),
-      ...(await recoverStrandedOutputs(repoRoot, workDir)),
-    ];
-
-    if (recovered.length > 0) {
-      progress.dim(
-        `Recovered ${recovered.join(', ')} left behind by an interrupted run.`,
-      );
-    }
 
     // --- preflight -------------------------------------------------------
 
@@ -581,6 +584,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     await restorePreviousOutput().catch(() => {});
 
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    await rm(mergeDir, { recursive: true, force: true }).catch(() => {});
     await releaseAll(outputLocks);
     await lock.release();
   }
@@ -867,12 +871,26 @@ function tail(text: string, limit = 2000): string {
   return text.length <= limit ? text : `…${text.slice(-limit)}`;
 }
 
-async function confirm(question: string): Promise<boolean> {
-  if (!process.stdin.isTTY) return false;
+type ConfirmationInput = NodeJS.ReadableStream & { isTTY?: boolean };
+type ConfirmationOutput = NodeJS.WritableStream & { isTTY?: boolean };
+
+export function canConfirm(
+  input: ConfirmationInput = process.stdin,
+  output: ConfirmationOutput = process.stderr,
+): boolean {
+  return Boolean(input.isTTY && output.isTTY);
+}
+
+export async function confirm(
+  question: string,
+  input: ConfirmationInput = process.stdin,
+  output: ConfirmationOutput = process.stderr,
+): Promise<boolean> {
+  if (!canConfirm(input, output)) return false;
 
   const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
+    input,
+    output,
   });
 
   try {
@@ -897,13 +915,13 @@ function reportStranded(stranded: string[]): void {
 }
 
 /**
- * Whether the filesystem treats two spellings as one file.
+ * Conservative identity for output-file locks.
  *
- * Folding unconditionally is wrong in both directions. On Linux `Review.md`
- * and `review.md` are two files that would share one lock key - and since
- * the second acquisition then finds the first lock holding this very pid,
- * the run deadlocks against itself. Not folding on Windows would let two
- * spellings of one file run unlocked.
+ * Windows and the default macOS filesystems fold case. A case-sensitive macOS
+ * volume may therefore over-coordinate two distinct output paths, which is
+ * safe; treating one real file as two lock identities is not. Repository
+ * state uses canonical filesystem paths separately, so this conservative
+ * output-lock rule can never merge two checkouts' scratch directories.
  */
 const CASE_INSENSITIVE = process.platform === 'win32' || process.platform === 'darwin';
 
@@ -941,9 +959,57 @@ function lockRoot(): string {
  * again by the next run in that same checkout.
  */
 export function repoStateDir(repoRoot: string): string {
-  const key = createHash('sha1').update(pathKey(repoRoot)).digest('hex').slice(0, 16);
+  let canonical = path.resolve(repoRoot);
+
+  try {
+    // Preserves distinct paths on a case-sensitive APFS/HFS volume while
+    // canonicalizing alternate spellings of one path on a folding volume.
+    canonical = realpathSync.native(canonical);
+  } catch {
+    // The caller normally supplies an existing git root. Keeping the exact
+    // resolved spelling is safer than folding two unknown paths together.
+  }
+
+  const normalized = canonical.replace(/\\/g, '/');
+  const identity = filesystemFoldsCase(canonical)
+    ? normalized.toLowerCase()
+    : normalized;
+  const key = createHash('sha1').update(identity).digest('hex').slice(0, 16);
 
   return path.join(homedir(), HOME_CONFIG_DIR, 'state', key);
+}
+
+/** Probe the actual volume instead of assuming every macOS volume folds. */
+function filesystemFoldsCase(canonical: string): boolean {
+  if (process.platform !== 'win32' && process.platform !== 'darwin') return false;
+
+  let alternate = '';
+
+  for (let index = canonical.length - 1; index >= 0; index -= 1) {
+    const character = canonical[index]!;
+
+    if (/[a-z]/.test(character)) {
+      alternate =
+        `${canonical.slice(0, index)}${character.toUpperCase()}` +
+        canonical.slice(index + 1);
+      break;
+    }
+
+    if (/[A-Z]/.test(character)) {
+      alternate =
+        `${canonical.slice(0, index)}${character.toLowerCase()}` +
+        canonical.slice(index + 1);
+      break;
+    }
+  }
+
+  if (alternate === '') return false;
+
+  try {
+    return realpathSync.native(alternate) === canonical;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1016,11 +1082,9 @@ async function releaseAll(locks: Lock[]): Promise<void> {
  * hand if the clipboard is unavailable.
  */
 async function printReport(document: string): Promise<void> {
-  // No leading blank line. The document opens with `---`, and YAML
-  // frontmatter is only frontmatter when its delimiter is the first
-  // line - a spacer here would silently cost `crbuddy go > review.md`
-  // its provenance block. The terminal gets its spacing from the
-  // progress output that precedes this on stderr.
+  // No leading blank line: a redirect must begin with the report itself,
+  // whether that is consolidated YAML frontmatter or an unconsolidated
+  // heading. Terminal spacing comes from progress output on stderr.
   process.stdout.write(`${document.trimEnd()}
 `);
 
