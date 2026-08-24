@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
-import { Config, PanelEntry, WORK_DIR } from '../config/schema.js';
+import { Config, HOME_CONFIG_DIR, PanelEntry, WORK_DIR } from '../config/schema.js';
 import { ConfigError, LoadedConfig, repoRelative } from '../config/load.js';
 import { ResolvedTarget, resolveTarget } from '../git/target.js';
 import { Adapter, UnsafeInvocationError } from '../adapters/types.js';
@@ -43,17 +43,40 @@ import { formatClock, formatElapsed, formatSize } from '../util/format.js';
 /** Below this, a "successful" review is more likely a status message. */
 const SUSPICIOUSLY_SHORT = 200;
 
+/** What every whole-checkout run has to establish before anything else. */
+const WHOLE_CHECKOUT_SUBJECT =
+  'Review this repository as it currently stands. There is no diff to review, ' +
+  'so treat the checked-out code itself as the subject.';
+
 /**
- * Used when there is no diff at all. Deliberately not phrased as a diff
- * prompt: there is no range to anchor to, so the reviewer is pointed at the
- * checkout itself. The "do not modify" line is spelled out here because
- * `genericPrompt` only appends it when there IS a range.
+ * Used when there is no diff at all and the entry has no instructions of its
+ * own. Deliberately not phrased as a diff prompt: there is no range to anchor
+ * to, so the reviewer is pointed at the checkout itself. The "do not modify"
+ * line is spelled out because `genericPrompt` only appends it when there IS a
+ * range.
  */
 const WHOLE_CHECKOUT_INSTRUCTIONS =
-  'Review this repository as it currently stands. There is no diff to review, so ' +
-  'treat the checked-out code itself as the subject. Report concrete, actionable ' +
-  'defects with file paths and line numbers, covering correctness bugs, error ' +
-  'handling, resource cleanup, and security. Do not modify any files.';
+  `${WHOLE_CHECKOUT_SUBJECT} Report concrete, actionable defects with file ` +
+  `paths and line numbers, covering correctness bugs, error handling, ` +
+  `resource cleanup, and security. Do not modify any files.`;
+
+/**
+ * Custom instructions say what to look FOR; they never say what the subject
+ * IS. With `target: null` there is no range for `genericPrompt` to describe,
+ * so without this the reviewer gets a brief with nothing to apply it to.
+ * The framing goes first and the user's words after, so theirs read as the
+ * instruction and this as the setting.
+ */
+export function wholeCheckoutPrompt(instructions: string | undefined): string {
+  if (!instructions) return WHOLE_CHECKOUT_INSTRUCTIONS;
+
+  return (
+    `${WHOLE_CHECKOUT_SUBJECT}\n\n` +
+    `${instructions}\n\n` +
+    `Report concrete, actionable findings with file paths and line numbers. ` +
+    `Do not modify any files.`
+  );
+}
 
 export const EXIT_OK = 0;
 export const EXIT_TOTAL_FAILURE = 1;
@@ -77,20 +100,42 @@ export async function runGo(options: GoOptions): Promise<number> {
   const workDir = path.join(repoRoot, WORK_DIR);
   await mkdir(workDir, { recursive: true });
 
-  const scratch = path.join(workDir, 'scratch');
+  // Volatile state lives outside the repository, not under `.crbuddy/`.
+  // Reviewers read the tree freely, so a previous report stashed inside it
+  // and one lane's live stdout are both readable by another lane - blindness
+  // that the diff pathspec cannot enforce, and that a whole-checkout run
+  // (no pathspec at all) loses entirely.
+  //
+  // Under the home directory rather than the OS temp directory because a
+  // crashed run's only copy of the previous report lives here until the next
+  // run recovers it, and temp is not somewhere to keep the only copy.
+  const stateDir = repoStateDir(repoRoot);
+
+  const scratch = path.join(stateDir, 'scratch');
   await mkdir(scratch, { recursive: true });
 
   // Lock first. Cleanup touches `*.crbuddy-tmp-*` files, and doing that
   // before the lock lets a second invocation delete a live run's staged
   // output on its way to failing the lock check.
   const lock = await acquireLock(workDir);
-  const outputLock = await acquireOutputLock(repoRoot, config);
+
+  // Inside its own try from here on: a contended output lock throws, and
+  // letting that escape before the main try would strand `<repo>/.crbuddy/
+  // lock/` for the stale-pid check to clean up later.
+  let outputLocks: Lock[] = [];
+
+  try {
+    outputLocks = await acquireOutputLocks(repoRoot, config);
+  } catch (error) {
+    await lock.release();
+    throw error;
+  }
 
   await cleanupTemps(repoRoot, [config.output.merged, config.output.raw]);
 
   // Recover anything a crashed run left in a holding directory before this
   // run stashes outputs of its own.
-  const recovered = await recoverStrandedOutputs(repoRoot, workDir);
+  const recovered = await recoverStrandedOutputs(repoRoot, stateDir);
 
   if (recovered.length > 0) {
     progress.dim(
@@ -283,7 +328,7 @@ export async function runGo(options: GoOptions): Promise<number> {
 
     stashed = await stashExistingOutputs(
       repoRoot,
-      workDir,
+      stateDir,
       [config.output.merged, config.output.raw],
       runId,
     );
@@ -486,7 +531,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     if (stashed) await stashed.restore().catch(() => {});
 
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
-    await outputLock?.release();
+    await releaseAll(outputLocks);
     await lock.release();
   }
 }
@@ -577,11 +622,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
             // is a range, so a whole-checkout run carries it itself. The
             // sandbox flags are the real guarantee; this just stops the
             // prompt from contradicting them.
-            instructions: instructions
-              ? `${instructions}
-
-Do not modify any files.`
-              : WHOLE_CHECKOUT_INSTRUCTIONS,
+            instructions: wholeCheckoutPrompt(instructions),
           }
         : instructions
           ? { kind: 'generic', target, instructions }
@@ -784,43 +825,82 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 /**
- * A second lock, keyed by the destination directory instead of the repo.
+ * Per-repository scratch and stash, outside the repository.
  *
- * `../CODE-REVIEW-HANDOFF.md` in two sibling repositories is ONE file, and
- * each repo's own lock knows nothing about the other. Without this, run A
- * can stash the previous report, run B write a fresh one, and A's restore()
- * put the stale copy back over it.
- *
- * Kept in the OS temp directory, keyed by a hash of the resolved paths, so
- * coordinating two repositories never means dropping a lock file into
- * someone's home or parent directory. Only taken when the output actually
- * escapes the repo; anything inside it is already covered.
+ * Keyed by the repo's own path so two checkouts of the same project do not
+ * share a holding directory, and so a report stranded by a crash is found
+ * again by the next run in that same checkout.
  */
-async function acquireOutputLock(
-  repoRoot: string,
-  config: Config,
-): Promise<Lock | null> {
-  if (config.output.destination !== 'file') return null;
-
-  const outside = [config.output.merged, config.output.raw]
-    .map((relative) => path.resolve(repoRoot, relative))
-    .filter((absolute) => repoRelative(absolute, repoRoot) === null);
-
-  if (outside.length === 0) return null;
-
-  const unique = [...new Set(outside.map((file) => file.replace(/\\/g, '/')))].sort();
-
-  // Case-insensitive on Windows and macOS; over-locking two paths that only
-  // differ in case is harmless, under-locking them is the bug being fixed.
+function repoStateDir(repoRoot: string): string {
   const key = createHash('sha1')
-    .update(unique.join('\u0000').toLowerCase())
+    .update(repoRoot.replace(/\\/g, '/').toLowerCase())
     .digest('hex')
     .slice(0, 16);
 
-  return acquireLockAt(
-    path.join(tmpdir(), 'crbuddy-locks', key),
-    `for the shared output location ${unique.join(', ')}`,
+  return path.join(homedir(), HOME_CONFIG_DIR, 'state', key);
+}
+
+/**
+ * Locks keyed by the output files themselves, held alongside the repo lock.
+ *
+ * The repo lock cannot see other repositories, and these paths are shared
+ * across them: `../CODE-REVIEW-HANDOFF.md` in two siblings is ONE file.
+ * Without this, run A can stash the previous report, run B write a fresh
+ * one, and A's restore() put the stale copy back over it.
+ *
+ * One lock PER PATH, not one for the set. Two configs that share only the
+ * merged report would hash to different keys and never contend, which is
+ * the overlap that matters most. Sorted, so two runs always take a shared
+ * pair in the same order and cannot deadlock on each other.
+ *
+ * Taken for every path regardless of where it sits: a file inside THIS repo
+ * can be another repo's external output, so containment says nothing about
+ * whether it is shared. Taken in terminal mode too - that mode writes no
+ * report but still runs cleanupTemps, stash and restore over these paths.
+ *
+ * Kept in the OS temp directory so coordinating two repositories never
+ * means dropping a lock file into someone's home or parent directory.
+ */
+async function acquireOutputLocks(
+  repoRoot: string,
+  config: Config,
+): Promise<Lock[]> {
+  const files = [config.output.merged, config.output.raw].map((relative) =>
+    path.resolve(repoRoot, relative).replace(/\\/g, '/'),
   );
+
+  const unique = [...new Set(files)].sort();
+  const held: Lock[] = [];
+
+  try {
+    for (const file of unique) {
+      // Case-insensitive on Windows and macOS. Over-locking two paths that
+      // differ only in case is harmless; under-locking them is the bug.
+      const key = createHash('sha1')
+        .update(file.toLowerCase())
+        .digest('hex')
+        .slice(0, 16);
+
+      held.push(
+        await acquireLockAt(
+          path.join(tmpdir(), 'crbuddy-locks', key),
+          `for the output file ${file}`,
+        ),
+      );
+    }
+  } catch (error) {
+    // Never strand the ones already taken when a later one is contended.
+    await releaseAll(held);
+    throw error;
+  }
+
+  return held;
+}
+
+async function releaseAll(locks: Lock[]): Promise<void> {
+  for (const held of locks.reverse()) {
+    await held.release().catch(() => {});
+  }
 }
 
 /**
@@ -833,8 +913,12 @@ async function acquireOutputLock(
  * hand if the clipboard is unavailable.
  */
 async function printReport(document: string): Promise<void> {
-  process.stdout.write(`
-${document.trimEnd()}
+  // No leading blank line. The document opens with `---`, and YAML
+  // frontmatter is only frontmatter when its delimiter is the first
+  // line - a spacer here would silently cost `crbuddy go > review.md`
+  // its provenance block. The terminal gets its spacing from the
+  // progress output that precedes this on stderr.
+  process.stdout.write(`${document.trimEnd()}
 `);
 
   // stdout matters as much as stdin here: `select` draws its menu there, so

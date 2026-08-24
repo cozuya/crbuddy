@@ -291,6 +291,25 @@ Clipboard support uses `clip` on Windows, `pbcopy` on macOS, and the first of
 `wl-copy`, `xclip`, or `xsel` found on Linux. Failure is reported and never
 fatal; the report has already been printed by then.
 
+## Where crbuddy keeps its own state
+
+Only two things live in the repository: `.crbuddy/config.json` (if the config
+is project-local) and `.crbuddy/lock/` for the duration of a run.
+
+Everything volatile - the per-lane scratch files and the previous report while
+it is moved aside - lives under `~/.crbuddy/state/<hash of the repo path>/`.
+That is not tidiness. Reviewers read the working tree freely, so a previous
+report or another lane's live stdout sitting inside the repo is readable by a
+running reviewer, which breaks blindness in a way the diff pathspec cannot
+prevent - and a whole-checkout run, which has no pathspec at all, loses it
+entirely. Under the home directory rather than the OS temp directory because a
+crashed run's only copy of the previous report waits there until the next run
+recovers it.
+
+Shared output paths get their own locks, one per resolved file, in the OS temp
+directory. Two sibling repositories both writing `../CODE-REVIEW-HANDOFF.md`
+are writing one file, and a per-repository lock cannot see across that.
+
 ## How output is structured
 
 YAML frontmatter carries provenance: the captured snapshot and base SHAs, the

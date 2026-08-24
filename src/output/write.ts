@@ -5,6 +5,12 @@ import path from 'node:path';
 /**
  * Output handling (DESIGN.md §6).
  *
+ * Everything volatile lives OUTSIDE the repository. Stashing the previous
+ * report into `<repo>/.crbuddy/` moved it out of the diff but left it on
+ * disk under the tree the reviewers are reading, which is not blindness -
+ * and a whole-checkout run, pointed at the tree with no pathspec at all,
+ * made that plain.
+ *
  * Two problems solved here, and they pull against each other:
  *
  *  1. crbuddy's own output is an uncommitted file, so the next run would
@@ -52,7 +58,7 @@ export interface StashedOutputs {
 
 export async function stashExistingOutputs(
   repoRoot: string,
-  workDir: string,
+  stateDir: string,
   relativePaths: string[],
   runId: string,
 ): Promise<StashedOutputs> {
@@ -60,7 +66,7 @@ export async function stashExistingOutputs(
   // common `previous/` directory; the next run would stash nothing, then on
   // total failure delete that directory wholesale — taking the stranded
   // prior report with it.
-  const holding = path.join(workDir, 'previous', runId);
+  const holding = path.join(stateDir, 'previous', runId);
   await mkdir(holding, { recursive: true });
 
   const moved: Array<{ from: string; to: string; relative: string }> = [];
@@ -159,9 +165,9 @@ export async function commitOutputs(
  */
 export async function recoverStrandedOutputs(
   repoRoot: string,
-  workDir: string,
+  stateDir: string,
 ): Promise<string[]> {
-  const root = path.join(workDir, 'previous');
+  const root = path.join(stateDir, 'previous');
   const recovered: string[] = [];
 
   let batches: string[];

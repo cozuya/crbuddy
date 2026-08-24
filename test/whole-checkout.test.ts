@@ -156,3 +156,30 @@ test('the consolidated report links to the unmerged file only when one exists', 
   assert.ok(!printed.includes('Unmerged reviews'), printed);
   assert.ok(!printed.includes('``'), printed);
 });
+
+test('custom instructions still say what the subject is', async () => {
+  // With `target: null` there is no range for `genericPrompt` to describe,
+  // so framing dropped here leaves the reviewer with a brief and no subject.
+  const { wholeCheckoutPrompt } = await import('../src/commands/go.js');
+
+  const prompt = wholeCheckoutPrompt('Focus only on resource leaks.');
+
+  assert.match(prompt, /no diff to review/);
+  assert.match(prompt, /the checked-out code itself as the subject/);
+  assert.match(prompt, /Focus only on resource leaks\./);
+  assert.match(prompt, /Do not modify any files\./);
+
+  // The user's brief is the instruction; the framing is the setting.
+  assert.ok(
+    prompt.indexOf('subject') < prompt.indexOf('Focus only'),
+    prompt,
+  );
+});
+
+test('with no custom instructions the default brief is used whole', async () => {
+  const { wholeCheckoutPrompt } = await import('../src/commands/go.js');
+  const prompt = wholeCheckoutPrompt(undefined);
+
+  assert.match(prompt, /no diff to review/);
+  assert.match(prompt, /correctness bugs/);
+});

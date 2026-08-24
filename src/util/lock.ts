@@ -42,7 +42,7 @@ export async function acquireLockAt(lockDir: string, scope: string): Promise<Loc
     }
 
     throw new LockError(
-      `Another crbuddy run is already active in this repository (pid ${holder.trim()}).\n` +
+      `Another crbuddy run is already active ${scope} (pid ${holder.trim()}).\n` +
         `If that is wrong, remove ${lockDir}.`,
     );
   }

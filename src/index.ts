@@ -18,7 +18,9 @@ Usage:
   crbuddy doctor               Report which vendor CLIs are usable, and why not.
 
 Options for \`go\`:
-  --force      Run even if the diff exceeds maxDiffBytes.
+  --force      Run even if the diff exceeds maxDiffBytes. Without a
+               terminal, also opts into the whole-checkout review
+               when the diff is empty.
   --strict     Exit 2 when any run or the merge fails (default: exit 0).
 
 Other:
