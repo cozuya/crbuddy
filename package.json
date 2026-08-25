@@ -19,6 +19,7 @@
   "files": [
     "dist",
     "examples",
+    "scripts/postinstall.mjs",
     "README.md",
     "GUIDE.md",
     "DESIGN.md"
@@ -28,6 +29,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "postinstall": "node scripts/postinstall.mjs",
     "prepare": "npm run build",
     "test": "npm run build:test && node scripts/test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",

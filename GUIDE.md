@@ -409,7 +409,7 @@ break the command chain.
 
 ## Status
 
-Prototype. The pure-logic surface - config, target resolution, merge
+The pure-logic surface - config, target resolution, merge
 validation, rendering, adapter safety, and adapter dispatch - has unit tests.
 Vendor CLIs change quickly, so the native adapter layer is the most
 version-sensitive part of the program. Run `crbuddy doctor` on every machine

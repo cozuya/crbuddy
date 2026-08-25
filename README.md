@@ -1,10 +1,12 @@
 # crbuddy
 
-crbuddy is a small, blocking CLI application installed globally with `npm i -g crbuddy`. The use case is that I found myself constantly doing a lot of steps every time I wanted to do a code review process, which for me means opening multiple harnesses from different vendors, deciding on models and thinking levels, prompting them, copy/pasting their output into a new file, and then feeding it back to the controlling or working agent on the project.
+crbuddy is a small, blocking CLI application installed globally with `npm i -g crbuddy`.  If you type that and are told you don't have Node.js and npm installed, [install the current Node.js LTS release first](https://nodejs.org/en/download); npm is included with it.
+
+The use case is that I found myself constantly doing a lot of steps every time I wanted to do a code review process, which for me means opening multiple harnesses from different vendors, deciding on models and thinking levels, prompting them, copy/pasting their output into a new file, and then feeding it back to the controlling or working agent on the project.
 
 crbuddy turns all that into one command, `crb go`, and outputs either a file containing all of the reviews - or just one, if that's your process - to the repo root or the results to the terminal.  `crb config` or `crb init` interactively sets up your global or local settings for the app; do that first.
 
-More details can be found in [`GUIDE.md`](GUIDE.md), but this should be enough information for most users to get started.
+More details can be found in [`GUIDE.md`](GUIDE.md), but this should be enough information for most users to get started.  This application currently supports Codex CLI, Claude Code, and Gemini CLI.
 
 ## Note on AI usage
 
