@@ -1,0 +1,35 @@
+{
+  "configVersion": 1,
+  "output": {
+    "merged": "CODE-REVIEW-HANDOFF.md",
+    "raw": "CODE-REVIEW-HANDOFF.raw.md"
+  },
+  "target": "uncommitted",
+  "refuseIfOutputExists": false,
+  "timeoutMs": 3600000,
+  "mergeTimeoutMs": 3600000,
+  "maxConcurrent": 0,
+  "maxDiffBytes": 2000000,
+  "merge": {
+    "enabled": true,
+    "vendor": "claude",
+    "model": "opus",
+    "effort": "high"
+  },
+  "panel": [
+    { "vendor": "claude", "model": "opus", "effort": "max" },
+    { "vendor": "codex", "model": "gpt-5.6-sol", "effort": "xhigh" },
+    {
+      "vendor": "gemini",
+      "model": "gemini-2.5-pro",
+      "instructions": "Review the changes for correctness, regressions, and missing tests."
+    },
+    {
+      "id": "security",
+      "vendor": "claude",
+      "model": "sonnet",
+      "effort": "high",
+      "instructions": "Review only for security issues: injection, authorization gaps, secrets handling, unsafe deserialization."
+    }
+  ]
+}
