@@ -6,6 +6,7 @@ import {
   UnsafeInvocationError,
   defaultCompletion,
 } from './types.js';
+import { claudeProviderEnv } from '../providers/claude.js';
 
 /**
  * Native review is intentional. When a panel entry has no custom
@@ -115,11 +116,6 @@ function vendorArgFlag(arg: string): string {
   const equals = arg.indexOf('=');
   const flag = equals === -1 ? arg : arg.slice(0, equals);
 
-  // Long-option parsers commonly expose kebab-case and camelCase spellings
-  // for the same control. Case-fold and remove separators so both forms are
-  // one key. Value-taking short options may attach their value directly
-  // (`-cfoo`, `-sread-only`), so classify those by the first short option;
-  // short options remain case-sensitive (`-C` and `-c` differ for Codex).
   return flag.startsWith('--')
     ? flag.slice(2).replace(/-/g, '').toLowerCase()
     : flag.startsWith('-') && flag.length > 2
@@ -127,12 +123,6 @@ function vendorArgFlag(arg: string): string {
       : flag;
 }
 
-/**
- * Best-effort guardrail for known vendor flags that can change permissions,
- * configuration sources, loaded capabilities, or the review root. This is
- * exact per-vendor matching, not proof that an unknown flag is inert;
- * repository and vendor configuration remain trusted inputs.
- */
 function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void {
   if (!args || args.length === 0) return;
 
@@ -187,6 +177,13 @@ export const claudeAdapter: Adapter = {
   build(request: InvocationRequest): Invocation {
     assertSafeVendorArgs(this.name, request.vendorArgs);
 
+    let providerEnv: Record<string, string>;
+    try {
+      providerEnv = claudeProviderEnv(request.model);
+    } catch (error) {
+      throw new UnsafeInvocationError(error instanceof Error ? error.message : String(error));
+    }
+
     const warnings: string[] = [];
     const args = ['-p', '--model', request.model];
 
@@ -218,9 +215,6 @@ export const claudeAdapter: Adapter = {
     }
 
     if (request.operation.kind === 'review') {
-      // Native /code-review otherwise reuses the last interactively selected
-      // level when no effort is supplied. Never inherit ambient session state:
-      // an omitted config value resolves to crbuddy's documented default.
       const reviewEffort = request.effort ?? this.defaultEffort;
 
       if (reviewEffort?.toLowerCase() === 'ultra') {
@@ -234,22 +228,15 @@ export const claudeAdapter: Adapter = {
         );
       }
 
-      // /code-review is the canonical native review surface and accepts an
-      // explicit target such as a branch or ref range. Current Claude Code
-      // (>=2.1.223) also treats /review as an alias, but crbuddy uses the
-      // canonical spelling for both target kinds.
       const parts = ['/code-review'];
       if (reviewEffort) parts.push(reviewEffort);
       parts.push(request.operation.target.range);
-
-      // Use the documented `claude -p "query"` form. In non-interactive mode
-      // a non-ultra /code-review runs in the foreground: Claude Code waits for
-      // the review and includes the findings in the response.
       args.push(parts.join(' '));
 
       return {
         command: this.command,
         args,
+        env: providerEnv,
         appliedEffort: reviewEffort,
         ...(warnings.length > 0 ? { warnings } : {}),
       };
@@ -280,6 +267,7 @@ export const claudeAdapter: Adapter = {
       command: this.command,
       args,
       stdin: prompt,
+      env: providerEnv,
       appliedEffort,
       ...(warnings.length > 0 ? { warnings } : {}),
     };
@@ -292,10 +280,6 @@ export const claudeAdapter: Adapter = {
   checkCompletion(result): CompletionCheck {
     const body = result.stdout.trim();
 
-    // This exact class of status-only response was observed during the initial
-    // build. It violates Claude Code's current documented non-interactive
-    // contract (local /code-review should wait and return findings), so never
-    // let a zero exit turn it into a successful review artifact.
     if (
       result.code === 0 &&
       body.length < 500 &&
@@ -333,9 +317,6 @@ export const codexAdapter: Adapter = {
   },
 
   helpArgs() {
-    // The flags crbuddy itself passes (--sandbox, -c, --ephemeral, etc.) are
-    // exec-level options. `codex exec review --help` may omit those parent
-    // flags and would make a safe invocation look unsupported.
     return ['exec', '--help'];
   },
 
