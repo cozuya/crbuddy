@@ -21,10 +21,12 @@ export type Effort = string;
 export type Target = 'uncommitted' | { base: string };
 
 export interface PanelEntry {
-  /** Stable, used in provenance. Generated from vendor+model if absent. */
+  /** Stable, used in provenance. Generated from vendor+provider+model if absent. */
   id: string;
-  /** Vendor key as registered in the adapter registry. */
+  /** Vendor key as registered in the adapter registry (the CLI/harness). */
   vendor: string;
+  /** Model provider used by a provider-aware harness such as Claude Code. */
+  provider?: string;
   /** Vendor-native model identifier. */
   model: string;
   effort?: Effort;
@@ -41,6 +43,7 @@ export interface PanelEntry {
 export interface MergeConfig {
   enabled: boolean;
   vendor: string;
+  provider?: string;
   model: string;
   effort?: Effort;
 }
@@ -99,6 +102,7 @@ export const DEFAULTS = {
 };
 
 export const CONFIG_FILENAME = 'config.json';
+export const CREDENTIALS_FILENAME = 'credentials.json';
 export const HOME_CONFIG_DIR = '.crbuddy';
 export const PROJECT_CONFIG_DIR = '.crbuddy';
 export const WORK_DIR = '.crbuddy';
