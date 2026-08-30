@@ -28,6 +28,17 @@ import { probe } from '../run/spawn.js';
 import { Adapter } from '../adapters/types.js';
 import { PromptAborted } from '../util/prompt.js';
 import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
+import {
+  CLAUDE_PROVIDERS,
+  ClaudeCredentials,
+  ClaudeProviderDefinition,
+  ClaudeProviderId,
+  RoutedClaudeProviderId,
+  credentialsPath,
+  getClaudeProvider,
+  loadClaudeCredentials,
+  saveClaudeCredentials,
+} from '../providers/claude.js';
 
 export interface InitOptions {
   repoRoot: string | null;
@@ -37,6 +48,11 @@ export interface InitOptions {
 export interface InitDependencies {
   ui?: WizardUI;
   detect?: (signal?: AbortSignal) => Promise<Detection[]>;
+}
+
+interface CredentialSession {
+  values: ClaudeCredentials;
+  dirty: boolean;
 }
 
 export async function runInit(
@@ -65,6 +81,11 @@ async function wizard(
   detect: (signal?: AbortSignal) => Promise<Detection[]>,
 ): Promise<number> {
   ui.intro('crbuddy setup');
+
+  const credentials: CredentialSession = {
+    values: await loadClaudeCredentials(),
+    dirty: false,
+  };
 
   const scopeChoices = [
     { label: 'Global', value: 'global' as const, hint: homeConfigPath() },
@@ -99,9 +120,6 @@ async function wizard(
     );
   }
 
-  // A project-local config REPLACES the global one, so editing global while
-  // a local one exists here changes a file that will never be read in this
-  // repo. Silence there is how you end up debugging a panel you did not run.
   if (scope === 'global' && options.repoRoot) {
     const local = projectConfigPath(options.repoRoot);
 
@@ -118,9 +136,7 @@ async function wizard(
         true,
       );
 
-      if (switchToLocal) {
-        scope = 'project';
-      }
+      if (switchToLocal) scope = 'project';
     }
   }
 
@@ -173,7 +189,7 @@ async function wizard(
     'Detection checks presence only; crbuddy does not check whether CLIs are logged in.',
   );
 
-  const panel = await buildPanel(ui, available, existing?.panel ?? []);
+  const panel = await buildPanel(ui, available, existing?.panel ?? [], credentials);
   const { merge, output } = await buildMerge(
     ui,
     available,
@@ -181,6 +197,7 @@ async function wizard(
     existing?.output,
     options.repoRoot,
     scope,
+    credentials,
   );
   const reviewTarget = await buildTarget(ui, existing?.target);
 
@@ -198,6 +215,8 @@ async function wizard(
     panel,
   };
 
+  await ensureRequiredCredentials(ui, config, credentials);
+
   const gitignorePlan =
     scope === 'project' && options.repoRoot
       ? await planGitignore(ui, options.repoRoot, config)
@@ -208,12 +227,13 @@ async function wizard(
     'Configuration',
   );
 
-  // Piped setup deliberately keeps its existing answer sequence. The final
-  // confirmation is a TTY safeguard and defaults to yes there.
   if (ui.interactive && !(await ui.confirm('Save this config?', true))) {
     ui.cancel('Setup cancelled. No config was written.');
     return 1;
   }
+
+  // Credentials are global user state and intentionally never land in a project config.
+  if (credentials.dirty) await saveClaudeCredentials(credentials.values);
 
   await mkdir(path.dirname(targetFile), { recursive: true });
   await writeFile(targetFile, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
@@ -243,18 +263,11 @@ async function planGitignore(
   repoRoot: string,
   config: Config,
 ): Promise<GitignorePlan | null> {
-  // Two filters, two reasons. A report written outside the repository has
-  // no .gitignore spelling and needs none; a terminal-mode config writes no
-  // report at all, so offering to ignore one means editing a tracked file
-  // over a file that will never exist. The working directory is always
-  // created, so it is always worth ignoring.
   const reports =
     config.output.destination === 'file'
       ? [config.output.merged, config.output.raw]
       : [];
 
-  // Mapped, not filtered: an absolute path can still resolve inside the
-  // repo, and .gitignore needs the repo-relative spelling of it.
   const wanted = [...reports, `${WORK_DIR}/`]
     .map((entry) => repoRelative(entry, repoRoot))
     .filter((entry): entry is string => entry !== null);
@@ -283,9 +296,6 @@ async function planGitignore(
 
   ui.note(missing.join('\n'), 'Files crbuddy writes into this repository');
 
-  // Defaults to NO: .gitignore is usually a tracked file, and editing a
-  // tracked file in the repo under review is not something to do on an
-  // absent-minded Enter.
   const add = await ui.confirm(
     existsSync(gitignorePath)
       ? 'Add them to .gitignore? (this edits a tracked file)'
@@ -350,18 +360,27 @@ function formatDetection(detection: Detection): string {
 function formatReviewer(entry: PanelEntry): string {
   let vendorLabel = entry.vendor;
   let modelLabel = entry.model;
+  let providerLabel: string | undefined;
 
   try {
     const adapter = getAdapter(entry.vendor);
     vendorLabel = adapter.label;
-    modelLabel =
-      adapter.models.find((model) => model.id === entry.model)?.label ?? entry.model;
+
+    if (entry.vendor === 'claude') {
+      const provider = getClaudeProvider(entry.provider);
+      providerLabel = provider.label;
+      modelLabel = provider.models.find((model) => model.id === entry.model)?.label ?? entry.model;
+    } else {
+      modelLabel =
+        adapter.models.find((model) => model.id === entry.model)?.label ?? entry.model;
+    }
   } catch {
     // Existing hand-edited configs may name an adapter unknown to this build.
   }
 
   return [
     vendorLabel,
+    providerLabel,
     modelLabel,
     entry.effort,
     entry.instructions ? 'custom instructions' : undefined,
@@ -393,6 +412,7 @@ function formatConfigSummary(
     const merger: PanelEntry = {
       id: 'summary',
       vendor: config.merge.vendor,
+      ...(config.merge.provider ? { provider: config.merge.provider } : {}),
       model: config.merge.model,
       ...(config.merge.effort ? { effort: config.merge.effort } : {}),
     };
@@ -425,12 +445,29 @@ function formatConfigSummary(
 
 const OTHER = '\u0000other';
 
+async function pickClaudeProvider(
+  ui: WizardUI,
+  current?: string,
+): Promise<ClaudeProviderDefinition> {
+  const preferred = getClaudeProvider(current);
+  const index = CLAUDE_PROVIDERS.findIndex((provider) => provider.id === preferred.id);
+
+  return ui.select(
+    'What provider should Claude Code use?',
+    CLAUDE_PROVIDERS.map((provider) => ({ label: provider.label, value: provider })),
+    index >= 0 ? index : 0,
+  );
+}
+
 async function pickModel(
   ui: WizardUI,
   adapter: Adapter,
   current?: string,
+  claudeProvider?: ClaudeProviderDefinition,
 ): Promise<string> {
-  const choices = adapter.models.map((model) => ({
+  const catalog = claudeProvider?.models ?? adapter.models;
+  const defaultModel = claudeProvider?.defaultModel ?? adapter.defaultModel;
+  const choices = catalog.map((model) => ({
     label: model.label,
     value: model.id,
     ...(model.hint ? { hint: model.hint } : {}),
@@ -439,23 +476,21 @@ async function pickModel(
   choices.push({
     label: 'Other\u2026',
     value: OTHER,
-    hint: `any id \`${adapter.command}\` accepts, passed through unchecked`,
+    hint: `any model id accepted by this provider through \`${adapter.command}\``,
   });
 
-  const preferred = current ?? adapter.defaultModel;
-  const index = adapter.models.findIndex((model) => model.id === preferred);
+  const preferred = current ?? defaultModel;
+  const index = catalog.findIndex((model) => model.id === preferred);
 
   const chosen = await ui.select(
-    `Model for ${adapter.label}`,
+    `Model for ${adapter.label}${claudeProvider ? ` · ${claudeProvider.label}` : ''}`,
     choices,
     index >= 0 ? index : 0,
   );
 
   if (chosen === OTHER) {
     ui.message(
-      `crbuddy passes this straight to \`${adapter.command}\` and does not ` +
-        `validate it. Run \`${adapter.command} ${adapter.versionArgs().join(' ')}\`` +
-        ` or check the vendor's docs for current ids.`,
+      `crbuddy passes this straight to \`${adapter.command}\` and does not validate it.`,
     );
 
     return ui.text('Model id', current ?? '');
@@ -499,10 +534,47 @@ async function pickEffort(
   return chosen === OTHER ? ui.text('Effort value', current ?? '') : chosen;
 }
 
+async function ensureCredential(
+  ui: WizardUI,
+  provider: ClaudeProviderDefinition,
+  session: CredentialSession,
+  offerReplace: boolean,
+): Promise<void> {
+  if (!provider.credentialRequired) return;
+
+  const id = provider.id as RoutedClaudeProviderId;
+  const existing = session.values[id];
+
+  if (existing && offerReplace) {
+    const replace = await ui.confirm(`Replace the saved ${provider.label} API key?`, false);
+    if (!replace) return;
+  } else if (existing) {
+    return;
+  }
+
+  ui.note(
+    `This key will be stored in plaintext at:\n${credentialsPath()}\n\n` +
+      `Anyone or any process that can read that file can read the key.`,
+    'Plaintext credential storage',
+  );
+
+  const apiKey = ui.secret
+    ? await ui.secret(`${provider.label} API key`)
+    : await ui.text(`${provider.label} API key`);
+
+  if (!(await ui.confirm('Save this API key?', true))) {
+    throw new PromptAborted();
+  }
+
+  session.values[id] = { apiKey };
+  session.dirty = true;
+}
+
 async function buildPanel(
   ui: WizardUI,
   available: Adapter[],
   existing: PanelEntry[],
+  credentials: CredentialSession,
 ): Promise<PanelEntry[]> {
   const panel: PanelEntry[] = [];
 
@@ -513,16 +585,10 @@ async function buildPanel(
       panel.push(...existing);
       ui.note(formatPanel(panel), 'Panel');
     } else {
-      // Said out loud because nothing else on screen changes: the listing
-      // above stays visible, and without this the next prompt reads as if
-      // it were adding to the panel still printed there.
       ui.message('Panel cleared for now.');
     }
   }
 
-  // "Run" is already taken: one `crbuddy go` invocation is a run, and the
-  // report calls each lane's record a run too. The user-facing word for a
-  // lane is "reviewer", which is also what makes the blindness legible.
   ui.message(
     'Now add the reviewers. `crbuddy go` starts all of them at once, ' +
       'each one blind to what the others find.',
@@ -531,8 +597,7 @@ async function buildPanel(
   for (;;) {
     if (panel.length > 0) {
       const more = await ui.confirm(
-        `${panel.length} reviewer${panel.length === 1 ? '' : 's'} configured. ` +
-          `Add another?`,
+        `${panel.length} reviewer${panel.length === 1 ? '' : 's'} configured. Add another?`,
         false,
       );
 
@@ -545,7 +610,13 @@ async function buildPanel(
       0,
     );
 
-    const model = await pickModel(ui, adapter);
+    let provider: ClaudeProviderDefinition | undefined;
+    if (adapter.name === 'claude') {
+      provider = await pickClaudeProvider(ui);
+      await ensureCredential(ui, provider, credentials, true);
+    }
+
+    const model = await pickModel(ui, adapter, undefined, provider);
     const effort = await pickEffort(ui, adapter, model);
 
     let instructions: string | undefined;
@@ -567,7 +638,8 @@ async function buildPanel(
     }
 
     const seen = new Set(panel.map((entry) => entry.id));
-    const base = slug(`${adapter.name}-${model}`);
+    const providerPart = provider && provider.id !== 'anthropic' ? `-${provider.id}` : '';
+    const base = slug(`${adapter.name}${providerPart}-${model}`);
 
     let id = base;
     let n = 2;
@@ -577,7 +649,12 @@ async function buildPanel(
       n += 1;
     }
 
-    const entry: PanelEntry = { id, vendor: adapter.name, model };
+    const entry: PanelEntry = {
+      id,
+      vendor: adapter.name,
+      ...(provider && provider.id !== 'anthropic' ? { provider: provider.id } : {}),
+      model,
+    };
     if (effort) entry.effort = effort;
     if (instructions) entry.instructions = instructions;
 
@@ -593,13 +670,6 @@ async function buildPanel(
   return panel;
 }
 
-/**
- * The consolidation answer and the destination are asked together because
- * they describe the same artifact, but the destination is asked either way:
- * `output.merged` is written whatever the answer is — holding the unmerged
- * reviews when consolidation is off — so skipping the question there would
- * silently pin those runs to the repository root.
- */
 async function buildMerge(
   ui: WizardUI,
   available: Adapter[],
@@ -607,6 +677,7 @@ async function buildMerge(
   existingOutput: OutputConfig | undefined,
   repoRoot: string | null,
   scope: 'global' | 'project',
+  credentials: CredentialSession,
 ): Promise<{ merge: MergeConfig; output: OutputConfig }> {
   const destination = await ui.select<OutputDestination>(
     'Where should the output go?',
@@ -633,8 +704,6 @@ async function buildMerge(
     existing?.enabled ?? true,
   );
 
-  // Only "file" has anywhere to put it. The paths are still carried in the
-  // config so switching back to "file" later restores the last choice.
   const output =
     destination === 'terminal'
       ? usableOrDefault(
@@ -674,21 +743,46 @@ async function buildMerge(
     currentIndex >= 0 ? currentIndex : 0,
   );
 
-  const model = await pickModel(ui, adapter, existing?.model);
+  let provider: ClaudeProviderDefinition | undefined;
+  if (adapter.name === 'claude') {
+    provider = await pickClaudeProvider(ui, existing?.provider);
+    await ensureCredential(ui, provider, credentials, true);
+  }
+
+  const model = await pickModel(ui, adapter, existing?.model, provider);
   const effort = await pickEffort(ui, adapter, model, existing?.effort);
 
-  const merge: MergeConfig = { enabled: true, vendor: adapter.name, model };
+  const merge: MergeConfig = {
+    enabled: true,
+    vendor: adapter.name,
+    ...(provider && provider.id !== 'anthropic' ? { provider: provider.id } : {}),
+    model,
+  };
   if (effort) merge.effort = effort;
 
   return { merge, output };
 }
 
-/**
- * Stored relative to the repository root, so one config can serve many
- * repositories: `../` means "beside whatever repo is under review", not one
- * fixed directory. A directory that cannot be said that way is stored
- * absolute, which pins every repository to the same file.
- */
+async function ensureRequiredCredentials(
+  ui: WizardUI,
+  config: Config,
+  credentials: CredentialSession,
+): Promise<void> {
+  const required = new Set<ClaudeProviderId>();
+
+  for (const entry of config.panel) {
+    if (entry.vendor === 'claude') required.add(getClaudeProvider(entry.provider).id);
+  }
+
+  if (config.merge.enabled && config.merge.vendor === 'claude') {
+    required.add(getClaudeProvider(config.merge.provider).id);
+  }
+
+  for (const id of required) {
+    await ensureCredential(ui, getClaudeProvider(id), credentials, false);
+  }
+}
+
 async function pickOutputLocation(
   ui: WizardUI,
   existing: OutputConfig | undefined,
@@ -709,8 +803,6 @@ async function pickOutputLocation(
       {
         label: 'One level up from the repository root',
         value: 'up',
-        // Worth saying: outside the repo, the report cannot land in a diff,
-        // be committed by accident, or be read by the next run's reviewers.
         hint: `../${path.basename(current.merged)} - outside the repo entirely`,
       },
       {
@@ -722,9 +814,6 @@ async function pickOutputLocation(
     currentDir === '.' ? 0 : currentDir === '..' ? 1 : 2,
   );
 
-  // Validated on every branch, not just the typed one. These two build
-  // paths from an existing config, and a config can carry names that only
-  // work in the directories they came from.
   if (where === 'root' || where === 'up') {
     return usableOrDefault(
       ui,
@@ -753,8 +842,6 @@ async function pickOutputLocation(
       continue;
     }
 
-    // Echoed because the answer is rewritten: someone who typed an absolute
-    // path should see that it became repo-relative, and vice versa.
     ui.message(`Writing to ${candidate.merged}`);
 
     if (path.isAbsolute(candidate.merged)) {
@@ -770,11 +857,6 @@ async function pickOutputLocation(
   }
 }
 
-/**
- * Last line of defence for the branches with no re-prompt loop: an
- * unusable choice falls back to the defaults with a note, rather than
- * throwing out of the wizard or writing a config that will not load.
- */
 function usableOrDefault(
   ui: WizardUI,
   candidate: OutputConfig,
@@ -791,19 +873,10 @@ function usableOrDefault(
   }
 }
 
-/**
- * Only the directory is chosen here, so a config that already names its
- * files keeps those names. Rebuilding both paths from the defaults would
- * silently rename a hand-edited `output.merged` the moment someone re-ran
- * `crbuddy config` and accepted the location it was already using.
- */
 export function inDirectory(directory: string, existing?: OutputConfig): OutputConfig {
   const merged = path.basename(existing?.merged ?? DEFAULT_OUTPUT.merged);
   let raw = path.basename(existing?.raw ?? DEFAULT_OUTPUT.raw);
 
-  // Two directories can hold two files of the same name; collapsing them
-  // into one directory would make them one file, and the wizard would
-  // write a config that `crbuddy go` then refuses to load.
   if (raw === merged) {
     const extension = path.extname(merged);
     raw = `${merged.slice(0, merged.length - extension.length)}.raw${extension}`;
@@ -820,12 +893,6 @@ export function inDirectory(directory: string, existing?: OutputConfig): OutputC
   };
 }
 
-/**
- * One level up is a sibling of the repository — a relationship that still
- * holds in whichever repository the config is used from. Several levels up
- * is not: it would resolve somewhere different in every repo, so it is
- * pinned absolute instead of being stored as a pile of `..`.
- */
 export function storedDirectory(answer: string, repoRoot: string | null): string {
   const typed = answer.trim();
   const expanded =
@@ -833,8 +900,6 @@ export function storedDirectory(answer: string, repoRoot: string | null): string
       ? path.join(homedir(), typed.slice(1))
       : typed;
 
-  // A relative answer is anchored to the repository root, matching how the
-  // two fixed choices above are phrased.
   const anchor = repoRoot ?? process.cwd();
   const absolute = path.resolve(anchor, expanded);
   const posix = (value: string): string => value.replace(/\\/g, '/');
@@ -844,8 +909,6 @@ export function storedDirectory(answer: string, repoRoot: string | null): string
   const relative = path.relative(repoRoot, absolute);
 
   if (relative === '') return '.';
-
-  // A different drive on Windows has no relative spelling at all.
   if (path.isAbsolute(relative)) return posix(absolute);
 
   const climbs = posix(relative)
