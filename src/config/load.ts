@@ -17,6 +17,12 @@ import {
   PanelEntry,
   Target,
 } from './schema.js';
+import {
+  CLAUDE_PROVIDER_IDS,
+  isClaudeProvider,
+  registerClaudeModelProvider,
+  resetClaudeProviderRegistry,
+} from '../providers/claude.js';
 
 export class ConfigError extends Error {}
 
@@ -35,10 +41,6 @@ export function projectConfigPath(repoRoot: string): string {
   return path.join(repoRoot, PROJECT_CONFIG_DIR, CONFIG_FILENAME);
 }
 
-/**
- * Project-local config REPLACES the global one entirely. No implicit
- * merging — see DESIGN.md §3 for why.
- */
 export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
   const projectPath = projectConfigPath(repoRoot);
 
@@ -46,11 +48,7 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
     const config = await readAndValidate(projectPath);
     assertUsableOutput(config.output, `${projectPath}.output`, repoRoot);
 
-    return {
-      config,
-      source: projectPath,
-      scope: 'project',
-    };
+    return { config, source: projectPath, scope: 'project' };
   }
 
   const globalPath = homeConfigPath();
@@ -59,11 +57,7 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
     const config = await readAndValidate(globalPath);
     assertUsableOutput(config.output, `${globalPath}.output`, repoRoot);
 
-    return {
-      config,
-      source: globalPath,
-      scope: 'global',
-    };
+    return { config, source: globalPath, scope: 'global' };
   }
 
   throw new ConfigError(
@@ -176,19 +170,22 @@ const TOP_LEVEL_KEYS = new Set([
 const ENTRY_KEYS = new Set([
   'id',
   'vendor',
+  'provider',
   'model',
   'effort',
   'instructions',
   'vendorArgs',
 ]);
 
-const MERGE_KEYS = new Set(['enabled', 'vendor', 'model', 'effort']);
+const MERGE_KEYS = new Set(['enabled', 'vendor', 'provider', 'model', 'effort']);
 
 /** Unknown keys are fatal — a typo silently doing nothing is worse. */
 export function validate(input: unknown, where = 'config'): Config {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) {
     throw new ConfigError(`${where}: expected a JSON object at the top level.`);
   }
+
+  resetClaudeProviderRegistry();
 
   const raw = input as Record<string, unknown>;
 
@@ -219,7 +216,7 @@ export function validate(input: unknown, where = 'config'): Config {
   const merge = validateMerge(raw.merge, where);
   const panel = validatePanel(raw.panel, where);
 
-  const config: Config = {
+  return {
     configVersion,
     output,
     target,
@@ -247,8 +244,6 @@ export function validate(input: unknown, where = 'config'): Config {
     merge,
     panel,
   };
-
-  return config;
 }
 
 function rejectUnknown(
@@ -286,8 +281,6 @@ function validateOutput(value: unknown, where: string): OutputConfig {
   const rawPath = str(raw.raw, DEFAULT_OUTPUT.raw, `${where}.output.raw`);
   const destination = validateDestination(raw.destination, `${where}.output.destination`);
 
-  // Validated even for "terminal", so switching a config back to "file"
-  // cannot surface a path problem that was sitting there unnoticed.
   assertUsableOutput({ merged, raw: rawPath }, `${where}.output`);
 
   return { destination, merged, raw: rawPath };
@@ -305,33 +298,7 @@ function validateDestination(value: unknown, where: string): OutputDestination {
   return value;
 }
 
-/**
- * Shared by the validator and the setup wizard, so a path the wizard offers
- * can never be one `crbuddy go` refuses to load.
- *
- * A report may live outside the repository — that is the point of the "one
- * level up" option, and it takes the file out of the review universe
- * entirely rather than relying on the diff exclusion. So `..` and absolute
- * paths are both accepted; these guards are about not destroying state, not
- * about staying inside the repo.
- */
-/**
- * The repository-relative spelling of a configured path, or null when it
- * lands outside the repository.
- *
- * Output paths may sit outside the repo, and an outside path is not merely
- * uninteresting to git — it is fatal. Passing one as a `:(exclude)`
- * pathspec makes git abort with "is outside repository", so every caller
- * that builds a pathspec or a .gitignore entry has to filter first.
- *
- * Absolute is NOT the same as outside. An absolute path can resolve inside
- * the repository, and treating it as external would drop it from the
- * exclusion — letting the last run's report be swept into the snapshot and
- * reviewed, which is the exact thing the exclusion exists to prevent. So
- * this resolves first and answers with the spelling git wants.
- */
 export function repoRelative(entry: string, repoRoot: string): string | null {
-  // A trailing slash means "everything beneath"; path.relative eats it.
   const directory = entry.endsWith('/') || entry.endsWith('\\');
   const trimmed = directory ? entry.slice(0, -1) : entry;
 
@@ -342,7 +309,6 @@ export function repoRelative(entry: string, repoRoot: string): string | null {
     : canonicalOutputPath(repoRoot, trimmed);
   const relative = path.relative(canonicalRoot, canonical);
 
-  // Segment-wise: a file legitimately named `..config` is not an escape.
   const segments = relative.split(/[\\/]/);
 
   if (relative === '' || segments[0] === '..' || path.isAbsolute(relative)) {
@@ -365,17 +331,11 @@ export function assertUsableOutput(
     ['merged', output.merged],
     ['raw', output.raw],
   ] as const) {
-    // Normalize before every check: `a/../../b` and `./.git/config` both
-    // slip past naive prefix tests.
     const concrete = repoRoot
       ? canonicalOutputPath(repoRoot, candidate)
       : candidate;
     const normalized = path.normalize(concrete).replace(/\\/g, '/');
 
-    // For a path inside the repository, inspect only the part below the Git
-    // root: a checkout may itself live beneath an unrelated ancestor named
-    // `.crbuddy`. For an external path retain the full absolute check, since
-    // `../other/.git/HEAD` is still a destructive destination.
     const relativeToRepo = repoRoot ? repoRelative(concrete, repoRoot) : null;
     const reservedPath = relativeToRepo ?? normalized;
     const segments = reservedPath.split('/').filter((part) => part !== '');
@@ -406,11 +366,6 @@ export function assertUsableOutput(
       throw new ConfigError(`${where}.${key}: must name a file.`);
     }
 
-    // Stashing is a move followed by recursive disposal after a successful
-    // run. Accepting a directory here would therefore move the whole tree
-    // into crbuddy's holding area and delete it as if it were an old report.
-    // Inspect the directory entry itself: a final symlink is intentionally
-    // moved as a link rather than followed (see canonicalOutputPath).
     if (repoRoot && existsSync(concrete) && lstatSync(concrete).isDirectory()) {
       throw new ConfigError(`${where}.${key}: must name a file, not a directory.`);
     }
@@ -425,15 +380,6 @@ export function assertUsableOutput(
   }
 }
 
-/**
- * Resolve an output destination through every existing PARENT directory.
- *
- * The final path component is deliberately not dereferenced. Stashing and
- * committing use rename(2)-style operations, which move or replace a final
- * symlink directory entry rather than writing through it. Parent symlinks,
- * however, redirect every one of those operations and must be frozen to
- * their real destination before consent, locking, or mutation.
- */
 export function canonicalOutputPath(repoRoot: string, entry: string): string {
   const absolute = path.resolve(repoRoot, entry);
   const parent = canonicalizeExistingAncestors(path.dirname(absolute));
@@ -450,7 +396,6 @@ export function resolveOutputPaths(
   };
 }
 
-/** Resolve the longest existing prefix and preserve any missing suffix. */
 function canonicalizeExistingAncestors(candidate: string): string {
   let current = path.resolve(candidate);
   const missing: string[] = [];
@@ -467,9 +412,6 @@ function canonicalizeExistingAncestors(candidate: string): string {
         );
       }
 
-      // realpath reports ENOENT for a dangling symlink even though the
-      // directory entry itself exists. Treat it as unusable rather than
-      // lexically classifying it inside the repository.
       try {
         if (lstatSync(current).isSymbolicLink()) {
           throw new ConfigError(
@@ -550,10 +492,13 @@ function validateMerge(value: unknown, where: string): MergeConfig {
 
   const vendor = str(raw.vendor, undefined, `${where}.merge.vendor`);
   const model = str(raw.model, undefined, `${where}.merge.model`);
+  const provider = validateProvider(vendor, raw.provider, `${where}.merge.provider`);
+  registerProvider(vendor, provider, model, `${where}.merge`);
 
   return {
     enabled: true,
     vendor,
+    ...(provider ? { provider } : {}),
     model,
     effort: raw.effort === undefined ? 'high' : effort(raw.effort, `${where}.merge.effort`),
   };
@@ -581,13 +526,19 @@ function validatePanel(value: unknown, where: string): PanelEntry[] {
 
     const vendor = str(raw.vendor, undefined, `${at}.vendor`);
     const model = str(raw.model, undefined, `${at}.model`);
+    const provider = validateProvider(vendor, raw.provider, `${at}.provider`);
+    registerProvider(vendor, provider, model, at);
+
+    const identity = vendor === 'claude' && provider
+      ? `${vendor}-${provider}-${model}`
+      : `${vendor}-${model}`;
 
     const id =
       raw.id === undefined
-        ? uniqueId(`${vendor}-${model}`, seen)
+        ? uniqueId(identity, seen)
         : uniqueId(str(raw.id, undefined, `${at}.id`), seen, at);
 
-    const entry: PanelEntry = { id, vendor, model };
+    const entry: PanelEntry = { id, vendor, ...(provider ? { provider } : {}), model };
 
     if (raw.effort !== undefined) {
       entry.effort = effort(raw.effort, `${at}.effort`);
@@ -610,6 +561,43 @@ function validatePanel(value: unknown, where: string): PanelEntry[] {
 
     return entry;
   });
+}
+
+function validateProvider(
+  vendor: string,
+  value: unknown,
+  at: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+
+  if (vendor !== 'claude') {
+    throw new ConfigError(`${at}: provider is only supported when vendor is "claude".`);
+  }
+
+  const provider = str(value, undefined, at);
+  if (!isClaudeProvider(provider)) {
+    throw new ConfigError(
+      `${at}: unknown Claude Code provider ${JSON.stringify(provider)}. Known providers: ` +
+        CLAUDE_PROVIDER_IDS.join(', '),
+    );
+  }
+
+  return provider === 'anthropic' ? undefined : provider;
+}
+
+function registerProvider(
+  vendor: string,
+  provider: string | undefined,
+  model: string,
+  at: string,
+): void {
+  if (vendor !== 'claude') return;
+
+  try {
+    registerClaudeModelProvider(model, provider);
+  } catch (error) {
+    throw new ConfigError(`${at}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function uniqueId(candidate: string, seen: Set<string>, at?: string): string {
@@ -677,13 +665,6 @@ function nonNegativeInt(value: unknown, fallback: number, at: string): number {
   return value;
 }
 
-/**
- * Effort is vendor-native and passed through verbatim, so any non-empty
- * string is accepted. Validating against a hardcoded list here would mean a
- * vendor adding a level breaks configs until crbuddy ships a release -
- * exactly the rot the translation layer was removed to avoid. An unusable
- * value surfaces as a fast, clearly-attributed lane failure instead.
- */
 function effort(value: unknown, at: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new ConfigError(
