@@ -30,6 +30,8 @@ export interface WizardUI {
   ): Promise<T>;
   confirm(question: string, defaultYes: boolean): Promise<boolean>;
   text(question: string, fallback?: string): Promise<string>;
+  /** Secret input is masked in an interactive TTY and never echoed by crbuddy. */
+  secret?(question: string): Promise<string>;
 }
 
 export interface WizardUIOptions {
@@ -40,10 +42,6 @@ export interface WizardUIOptions {
   loadClack?: () => Promise<typeof import('@clack/prompts')>;
 }
 
-/**
- * Clack is loaded only for a real interactive session. Piped setup keeps the
- * existing prompt implementation, including its single-drain stdin queue.
- */
 export async function createWizardUI(
   options: WizardUIOptions = {},
 ): Promise<WizardUI> {
@@ -109,6 +107,10 @@ class LineWizardUI implements WizardUI {
 
   text(question: string, fallback = ''): Promise<string> {
     return lineText(question, fallback);
+  }
+
+  secret(question: string): Promise<string> {
+    return lineText(question);
   }
 }
 
@@ -217,11 +219,21 @@ class ClackWizardUI implements WizardUI {
     });
 
     const value = this.valueOrAbort(result ?? '').trim();
-
-    // Clack treats whitespace as a supplied value, while the line prompt
-    // trims before deciding whether to use its fallback. Keep both paths
-    // semantically identical so a TTY cannot produce an invalid empty id/ref.
     return value === '' && fallback !== '' ? fallback : value;
+  }
+
+  async secret(question: string): Promise<string> {
+    const result = await this.clack.password({
+      message: question,
+      mask: '*',
+      validate(value) {
+        return (value ?? '').trim() === '' ? 'A value is required.' : undefined;
+      },
+      input: this.input,
+      output: this.output,
+    });
+
+    return this.valueOrAbort(result ?? '').trim();
   }
 
   private valueOrAbort<T>(value: T | symbol): T {
