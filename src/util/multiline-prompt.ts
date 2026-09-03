@@ -576,11 +576,13 @@ export function multilineText(
   reraiseSignal: (signal: TerminationSignal) => void = defaultReraiseSignal,
   options: MultilineTextOptions = {},
 ): Promise<string> {
-  const rawMode = input.setRawMode?.bind(input);
-
-  if (!rawMode) {
-    throw new Error('Multiline input requires a terminal with raw input support.');
-  }
+  const rawMode = (() => {
+    const setRawMode = input.setRawMode;
+    if (typeof setRawMode !== 'function') {
+      throw new Error('Multiline input requires a terminal with raw input support.');
+    }
+    return setRawMode.bind(input);
+  })();
 
   return new Promise<string>((resolve, reject) => {
     const decoder = new TerminalInputDecoder({
