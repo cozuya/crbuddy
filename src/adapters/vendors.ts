@@ -218,9 +218,6 @@ export const claudeAdapter: Adapter = {
     }
 
     if (request.operation.kind === 'review') {
-      // Native /code-review otherwise reuses the last interactively selected
-      // level when no effort is supplied. Never inherit ambient session state:
-      // an omitted config value resolves to crbuddy's documented default.
       const reviewEffort = request.effort ?? this.defaultEffort;
 
       if (reviewEffort?.toLowerCase() === 'ultra') {
@@ -234,17 +231,9 @@ export const claudeAdapter: Adapter = {
         );
       }
 
-      // /code-review is the canonical native review surface and accepts an
-      // explicit target such as a branch or ref range. Current Claude Code
-      // (>=2.1.223) also treats /review as an alias, but crbuddy uses the
-      // canonical spelling for both target kinds.
       const parts = ['/code-review'];
       if (reviewEffort) parts.push(reviewEffort);
       parts.push(request.operation.target.range);
-
-      // Use the documented `claude -p "query"` form. In non-interactive mode
-      // a non-ultra /code-review runs in the foreground: Claude Code waits for
-      // the review and includes the findings in the response.
       args.push(parts.join(' '));
 
       return {
@@ -292,10 +281,6 @@ export const claudeAdapter: Adapter = {
   checkCompletion(result): CompletionCheck {
     const body = result.stdout.trim();
 
-    // This exact class of status-only response was observed during the initial
-    // build. It violates Claude Code's current documented non-interactive
-    // contract (local /code-review should wait and return findings), so never
-    // let a zero exit turn it into a successful review artifact.
     if (
       result.code === 0 &&
       body.length < 500 &&
@@ -333,9 +318,6 @@ export const codexAdapter: Adapter = {
   },
 
   helpArgs() {
-    // The flags crbuddy itself passes (--sandbox, -c, --ephemeral, etc.) are
-    // exec-level options. `codex exec review --help` may omit those parent
-    // flags and would make a safe invocation look unsupported.
     return ['exec', '--help'];
   },
 
@@ -431,6 +413,23 @@ export const codexAdapter: Adapter = {
   },
 };
 
+const GEMINI_ARGV_SAFE = 6000;
+
+/**
+ * cmd.exe treats literal newlines inside a `.cmd` argument as command
+ * separators. Gemini is commonly installed as an npm `.cmd` shim on Windows,
+ * so multiline prompts must go through stdin there even when `--prompt` exists.
+ */
+export function geminiCanUsePromptArg(
+  prompt: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return (
+    prompt.length <= GEMINI_ARGV_SAFE &&
+    !(platform === 'win32' && /[\r\n]/.test(prompt))
+  );
+}
+
 /** Gemini CLI: generic agent runs only; no supported headless native review. */
 export const geminiAdapter: Adapter = {
   name: 'gemini',
@@ -494,9 +493,8 @@ export const geminiAdapter: Adapter = {
     }
 
     const promptFlag = firstSupported(request, ['--prompt', '-p']);
-    const ARGV_SAFE = 6000;
 
-    if (promptFlag && prompt.length <= ARGV_SAFE) {
+    if (promptFlag && geminiCanUsePromptArg(prompt)) {
       args.push(promptFlag, prompt);
 
       return {
