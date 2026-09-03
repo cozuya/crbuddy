@@ -5,6 +5,7 @@ import {
   explicitSubmitMultilineText,
   multilineText,
   supportsBracketedPaste,
+  supportsShiftEnter,
   type MultilineInput,
 } from './multiline-prompt.js';
 import type { Choice } from './prompt.js';
@@ -262,6 +263,9 @@ class ClackWizardUI implements WizardUI {
 
     const value = this.valueOrAbort(result ?? '').trim();
 
+    // Clack treats whitespace as a supplied value, while the line prompt
+    // trims before deciding whether to use its fallback. Keep both paths
+    // semantically identical so a TTY cannot produce an invalid empty id/ref.
     return value === '' && fallback !== '' ? fallback : value;
   }
 
@@ -269,9 +273,24 @@ class ClackWizardUI implements WizardUI {
     // Enter-submit is safe only when the terminal is known to honor bracketed
     // paste. Otherwise use an explicit Ctrl+D submit mode where CR/LF and tabs
     // are always content, so a multiline paste cannot answer the next prompt.
-    return supportsBracketedPaste(this.platform, this.environment)
-      ? multilineText(this.prompt(question), this.input, this.output)
-      : explicitSubmitMultilineText(this.prompt(question), this.input, this.output);
+    const pasteSafe = supportsBracketedPaste(this.platform, this.environment);
+
+    if (!pasteSafe) {
+      return explicitSubmitMultilineText(this.prompt(question), this.input, this.output);
+    }
+
+    const newlineHint = supportsShiftEnter(this.platform, this.environment)
+      ? 'Shift+Enter/Ctrl+J adds a line'
+      : 'Ctrl+J adds a line';
+
+    return multilineText(
+      this.prompt(question),
+      this.input,
+      this.output,
+      undefined,
+      undefined,
+      { newlineHint, pasteSafe: true },
+    );
   }
 
   private valueOrAbort<T>(value: T | symbol): T {
