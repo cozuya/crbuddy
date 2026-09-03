@@ -277,6 +277,11 @@ export class TerminalInputDecoder {
     if (!decoded) return;
 
     if (decoded.type !== 'utf16') {
+      // Win32 input mode may interleave key-up records between the UTF-16
+      // high/low-surrogate key-down records. An empty text event is a no-op,
+      // not a reason to discard a pending high surrogate.
+      if (decoded.type === 'text' && decoded.text === '') return;
+
       this.pendingWin32HighSurrogate = null;
       events.push(decoded);
       return;
