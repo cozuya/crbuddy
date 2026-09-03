@@ -103,6 +103,23 @@ test('legacy Enter submits while Ctrl+J adds a newline', () => {
   assert.deepEqual(decode('\n'), [{ type: 'newline' }]);
 });
 
+test('explicit-submit mode collapses split CRLF and submits only on Ctrl+D', () => {
+  const decoder = new TerminalInputDecoder({
+    enterSubmits: false,
+    ctrlDSubmits: true,
+  });
+
+  assert.deepEqual(decoder.feed('first\r'), [
+    { type: 'text', text: 'first' },
+    { type: 'newline' },
+  ]);
+  assert.deepEqual(decoder.feed('\nsecond\t'), [
+    { type: 'text', text: 'second' },
+    { type: 'text', text: '\t' },
+  ]);
+  assert.deepEqual(decoder.feed('\u0004'), [{ type: 'submit' }]);
+});
+
 test('unsupported C0 controls are ignored instead of becoming instruction text', () => {
   const events = decode('a\u0001b\u0004c\u0015d\te');
 
@@ -144,6 +161,18 @@ test('kitty functional PUA keys are ignored while literal associated PUA text su
 
 test('kitty associated text wins over Ctrl shortcut interpretation for AltGr', () => {
   assert.deepEqual(decode('\u001b[99;7;263u'), [{ type: 'text', text: 'ć' }]);
+});
+
+test('enhanced protocol events obey explicit-submit mode too', () => {
+  const decoder = new TerminalInputDecoder({
+    enterSubmits: false,
+    ctrlDSubmits: true,
+  });
+
+  assert.deepEqual(decoder.feed('\u001b[13u'), [{ type: 'newline' }]);
+  assert.deepEqual(decoder.feed('\u001b[100;5u'), [{ type: 'submit' }]);
+  assert.deepEqual(decoder.feed('\u001b[13;28;13;1;0;1_'), [{ type: 'newline' }]);
+  assert.deepEqual(decoder.feed('\u001b[68;32;0;1;4;1_'), [{ type: 'submit' }]);
 });
 
 test('Win32 input mode distinguishes Shift+Enter from Enter', () => {
@@ -191,7 +220,7 @@ test('Shift+Enter is advertised only for terminals known to distinguish it', () 
   assert.equal(supportsShiftEnter('win32', { WT_SESSION: 'session' }), false);
   assert.equal(supportsShiftEnter('darwin', { TERM_PROGRAM: 'Apple_Terminal' }), false);
   assert.equal(supportsShiftEnter('darwin', { TERM_PROGRAM: 'iTerm.app' }), false);
-  assert.equal(supportsShiftEnter('linux', { TERM_PROGRAM: 'vscode' }), true);
+  assert.equal(supportsShiftEnter('linux', { TERM_PROGRAM: 'vscode' }), false);
   assert.equal(supportsShiftEnter('linux', { WT_SESSION: 'session' }), true);
   assert.equal(supportsShiftEnter('linux', { KITTY_WINDOW_ID: '1' }), true);
 });
@@ -295,7 +324,7 @@ test('process exit cleanup restores terminal modes synchronously', async () => {
   await assert.rejects(result, PromptAborted);
 });
 
-test('SIGTERM restores terminal modes and preserves the signal outcome', async () => {
+test('SIGTERM restores terminal modes and rejects if the reraised signal is swallowed', async () => {
   const input = new TtyInput();
   const output = new PassThrough();
   const written = capture(output);
@@ -311,12 +340,10 @@ test('SIGTERM restores terminal modes and preserves the signal outcome', async (
 
   lifecycle.emit('SIGTERM');
 
+  await assert.rejects(result, PromptAborted);
   assert.equal(input.isRaw, false);
   assert.deepEqual(reraised, ['SIGTERM']);
   assert.match(written(), /\u001b\[\?9001l/);
   assert.equal(lifecycle.listeners.has('SIGTERM'), false);
   assert.equal(lifecycle.listeners.has('SIGHUP'), false);
-
-  input.end();
-  await assert.rejects(result, PromptAborted);
 });
