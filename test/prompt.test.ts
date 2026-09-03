@@ -94,6 +94,27 @@ test('TTY text uses the fallback for whitespace-only input', async () => {
   assert.equal(await ui.text('Base branch', 'main'), 'main');
 });
 
+test('native Windows multiline uses Clack explicit submit mode for paste safety', async () => {
+  let received: Record<string, unknown> | undefined;
+  const ui = await createWizardUI({
+    interactive: true,
+    platform: 'win32',
+    input: new PassThrough(),
+    output: new PassThrough(),
+    loadClack: async () =>
+      fakeClack({
+        multiline: async (options) => {
+          received = options;
+          return 'first\n\nsecond';
+        },
+      }),
+  });
+
+  assert.equal(await ui.multiline('Review instructions'), 'first\n\nsecond');
+  assert.equal(received?.showSubmit, true);
+  assert.match(String(received?.message), /Tab to submit/);
+});
+
 test('cancelling the TTY spinner aborts the active operation', async () => {
   let cancelled = false;
   const ui = await createWizardUI({
@@ -214,6 +235,7 @@ test('piped prompts consume sequential answers from one stdin drain', async () =
 type FakeOverrides = {
   select?: (options: Record<string, unknown>) => Promise<unknown>;
   text?: (options: Record<string, unknown>) => Promise<unknown>;
+  multiline?: (options: Record<string, unknown>) => Promise<unknown>;
   isCancel?: (value: unknown) => boolean;
   spinner?: (options: { onCancel?: () => void }) => unknown;
 };
@@ -230,6 +252,7 @@ function fakeClack(overrides: FakeOverrides = {}) {
     select: overrides.select ?? (async () => 'value'),
     confirm: async () => true,
     text: overrides.text ?? (async () => 'text'),
+    multiline: overrides.multiline ?? (async () => 'multiline'),
     isCancel: overrides.isCancel ?? (() => false),
     spinner:
       overrides.spinner ??
