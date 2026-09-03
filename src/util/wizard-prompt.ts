@@ -1,6 +1,10 @@
 import type { Writable } from 'node:stream';
 
-import { multilineText, type MultilineInput } from './multiline-prompt.js';
+import {
+  multilineText,
+  windowsMultilineText,
+  type MultilineInput,
+} from './multiline-prompt.js';
 import type { Choice } from './prompt.js';
 import {
   PromptAborted,
@@ -39,7 +43,7 @@ export interface WizardUIOptions {
   output?: Writable & { isTTY?: boolean };
   /** Test seam; production callers should let the streams decide. */
   interactive?: boolean;
-  /** Test seam for the native-Windows multiline fallback. */
+  /** Test seam for the native-Windows multiline path. */
   platform?: NodeJS.Platform;
   loadClack?: () => Promise<typeof import('@clack/prompts')>;
 }
@@ -235,32 +239,16 @@ class ClackWizardUI implements WizardUI {
 
     const value = this.valueOrAbort(result ?? '').trim();
 
-    // Clack treats whitespace as a supplied value, while the line prompt
-    // trims before deciding whether to use its fallback. Keep both paths
-    // semantically identical so a TTY cannot produce an invalid empty id/ref.
     return value === '' && fallback !== '' ? fallback : value;
   }
 
-  async multiline(question: string): Promise<string> {
-    if (this.platform === 'win32') {
-      // Native Node on Windows receives console INPUT_RECORDs after libuv has
-      // already erased the distinction between physical Enter and pasted CRs.
-      // Clack's explicit submit control keeps arbitrary multiline paste safe:
-      // Enter always adds a line; Tab focuses [submit], then Enter submits.
-      const result = await this.clack.multiline({
-        message: `${question} (Enter adds a line; Tab to submit)`,
-        showSubmit: true,
-        validate(value) {
-          return (value ?? '').trim() === '' ? 'A value is required.' : undefined;
-        },
-        input: this.input,
-        output: this.output,
-      });
-
-      return this.valueOrAbort(result ?? '').trim();
-    }
-
-    return multilineText(question, this.input, this.output);
+  multiline(question: string): Promise<string> {
+    // Native Node on Windows cannot distinguish a physical Enter from a CR in
+    // pasted text. Use a mode where CR always means newline and Ctrl+D is the
+    // explicit submit key; tabs remain ordinary input instead of a focus key.
+    return this.platform === 'win32'
+      ? windowsMultilineText(question, this.input, this.output)
+      : multilineText(question, this.input, this.output);
   }
 
   private valueOrAbort<T>(value: T | symbol): T {
