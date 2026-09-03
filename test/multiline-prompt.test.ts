@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 import {
   multilineText,
+  supportsShiftEnter,
   TerminalInputDecoder,
   type MultilineInputEvent,
 } from '../src/util/multiline-prompt.js';
@@ -34,17 +35,22 @@ class TtyInput extends PassThrough {
   }
 }
 
-class FakeExitEmitter {
-  listener: (() => void) | null = null;
+class FakeLifecycleEmitter {
+  readonly listeners = new Map<string, (...args: unknown[]) => void>();
 
-  once(event: 'exit', listener: () => void): void {
-    assert.equal(event, 'exit');
-    this.listener = listener;
+  once(event: string, listener: (...args: unknown[]) => void): void {
+    this.listeners.set(event, listener);
   }
 
-  removeListener(event: 'exit', listener: () => void): void {
-    assert.equal(event, 'exit');
-    if (this.listener === listener) this.listener = null;
+  removeListener(event: string, listener: (...args: unknown[]) => void): void {
+    if (this.listeners.get(event) === listener) this.listeners.delete(event);
+  }
+
+  emit(event: string): void {
+    const listener = this.listeners.get(event);
+    if (!listener) return;
+    this.listeners.delete(event);
+    listener();
   }
 }
 
@@ -110,6 +116,18 @@ test('SS3 cursor keys are ignored and standalone Escape does not eat later input
   assert.equal(textOf(decode('\u001b', 'hello')), 'hello');
 });
 
+test('malformed CSI prefixes recover instead of wedging later input', () => {
+  const enter = new TerminalInputDecoder();
+  assert.deepEqual(enter.feed('\u001b['), []);
+  assert.deepEqual(enter.feed('\r'), [{ type: 'submit' }]);
+
+  const abort = new TerminalInputDecoder();
+  assert.deepEqual(abort.feed('\u001b['), []);
+  assert.deepEqual(abort.feed('\u0003'), [{ type: 'abort' }]);
+
+  assert.equal(textOf(decode('\u001b[', 'éhello')), 'éhello');
+});
+
 test('kitty input distinguishes Shift+Enter and preserves typed text', () => {
   assert.deepEqual(decode('\u001b[13;2u'), [{ type: 'newline' }]);
   assert.deepEqual(decode('\u001b[13u'), [{ type: 'submit' }]);
@@ -131,6 +149,11 @@ test('kitty associated text wins over Ctrl shortcut interpretation for AltGr', (
 test('Win32 input mode distinguishes Shift+Enter from Enter', () => {
   assert.deepEqual(decode('\u001b[13;28;13;1;16;1_'), [{ type: 'newline' }]);
   assert.deepEqual(decode('\u001b[13;28;13;1;0;1_'), [{ type: 'submit' }]);
+});
+
+test('Win32 input mode accepts protocol-defaulted empty fields', () => {
+  assert.deepEqual(decode('\u001b[13;;13;1;;_'), [{ type: 'submit' }]);
+  assert.deepEqual(decode('\u001b[13;;13;1;16;_'), [{ type: 'newline' }]);
 });
 
 test('Win32 printable AltGr text wins over Ctrl shortcuts', () => {
@@ -162,6 +185,15 @@ test('terminal control sequences may be split across arbitrary stream chunks', (
     { type: 'newline' },
   ]);
   assert.deepEqual(decode('\u001b[13;', '2u'), [{ type: 'newline' }]);
+});
+
+test('Shift+Enter is advertised only for terminals known to distinguish it', () => {
+  assert.equal(supportsShiftEnter('win32', { WT_SESSION: 'session' }), false);
+  assert.equal(supportsShiftEnter('darwin', { TERM_PROGRAM: 'Apple_Terminal' }), false);
+  assert.equal(supportsShiftEnter('darwin', { TERM_PROGRAM: 'iTerm.app' }), false);
+  assert.equal(supportsShiftEnter('linux', { TERM_PROGRAM: 'vscode' }), true);
+  assert.equal(supportsShiftEnter('linux', { WT_SESSION: 'session' }), true);
+  assert.equal(supportsShiftEnter('linux', { KITTY_WINDOW_ID: '1' }), true);
 });
 
 test('backspace deletes one grapheme without cursor-row rewriting', async () => {
@@ -248,16 +280,42 @@ test('process exit cleanup restores terminal modes synchronously', async () => {
   const input = new TtyInput();
   const output = new PassThrough();
   const written = capture(output);
-  const exits = new FakeExitEmitter();
-  const result = multilineText('Review instructions', input, output, exits);
+  const lifecycle = new FakeLifecycleEmitter();
+  const result = multilineText('Review instructions', input, output, lifecycle);
 
-  assert.ok(exits.listener);
-  exits.listener?.();
+  assert.ok(lifecycle.listeners.has('exit'));
+  lifecycle.emit('exit');
 
   assert.equal(input.isRaw, false);
   assert.match(written(), /\u001b\[\?9001l/);
   assert.match(written(), /\u001b\[<u/);
   assert.match(written(), /\u001b\[\?2004l/);
+
+  input.end();
+  await assert.rejects(result, PromptAborted);
+});
+
+test('SIGTERM restores terminal modes and preserves the signal outcome', async () => {
+  const input = new TtyInput();
+  const output = new PassThrough();
+  const written = capture(output);
+  const lifecycle = new FakeLifecycleEmitter();
+  const reraised: string[] = [];
+  const result = multilineText(
+    'Review instructions',
+    input,
+    output,
+    lifecycle,
+    (signal) => reraised.push(signal),
+  );
+
+  lifecycle.emit('SIGTERM');
+
+  assert.equal(input.isRaw, false);
+  assert.deepEqual(reraised, ['SIGTERM']);
+  assert.match(written(), /\u001b\[\?9001l/);
+  assert.equal(lifecycle.listeners.has('SIGTERM'), false);
+  assert.equal(lifecycle.listeners.has('SIGHUP'), false);
 
   input.end();
   await assert.rejects(result, PromptAborted);
