@@ -1,5 +1,13 @@
-import type { Readable, Writable } from 'node:stream';
+import type { Writable } from 'node:stream';
+import { styleText } from 'node:util';
 
+import {
+  explicitSubmitMultilineText,
+  multilineTerminalHints,
+  multilineText,
+  supportsBracketedPaste,
+  type MultilineInput,
+} from './multiline-prompt.js';
 import type { Choice } from './prompt.js';
 import {
   PromptAborted,
@@ -30,13 +38,17 @@ export interface WizardUI {
   ): Promise<T>;
   confirm(question: string, defaultYes: boolean): Promise<boolean>;
   text(question: string, fallback?: string): Promise<string>;
+  multiline(question: string): Promise<string>;
 }
 
 export interface WizardUIOptions {
-  input?: Readable & { isTTY?: boolean };
+  input?: MultilineInput & { isTTY?: boolean };
   output?: Writable & { isTTY?: boolean };
   /** Test seam; production callers should let the streams decide. */
   interactive?: boolean;
+  /** Test seams for terminal capability routing. */
+  platform?: NodeJS.Platform;
+  environment?: NodeJS.ProcessEnv;
   loadClack?: () => Promise<typeof import('@clack/prompts')>;
 }
 
@@ -55,7 +67,13 @@ export async function createWizardUI(
   if (!interactive) return new LineWizardUI();
 
   const clack = await (options.loadClack ?? (() => import('@clack/prompts')))();
-  return new ClackWizardUI(clack, input, output);
+  return new ClackWizardUI(
+    clack,
+    input,
+    output,
+    options.platform ?? process.platform,
+    options.environment ?? process.env,
+  );
 }
 
 class LineWizardUI implements WizardUI {
@@ -110,6 +128,13 @@ class LineWizardUI implements WizardUI {
   text(question: string, fallback = ''): Promise<string> {
     return lineText(question, fallback);
   }
+
+  // Piped setup intentionally stays one answer per line. Multiline editing is
+  // an interactive terminal affordance, not a change to the scripted init
+  // answer sequence.
+  multiline(question: string): Promise<string> {
+    return lineText(question);
+  }
 }
 
 type Clack = typeof import('@clack/prompts');
@@ -119,28 +144,47 @@ class ClackWizardUI implements WizardUI {
 
   constructor(
     private readonly clack: Clack,
-    private readonly input: Readable,
+    private readonly input: MultilineInput,
     private readonly output: Writable,
+    private readonly platform: NodeJS.Platform,
+    private readonly environment: NodeJS.ProcessEnv,
   ) {}
 
+  private bold(message: string): string {
+    return styleText('bold', message, { stream: this.output });
+  }
+
+  private dim(message: string): string {
+    return styleText('dim', message, { stream: this.output });
+  }
+
+  private prompt(message: string): string {
+    return this.bold(message);
+  }
+
   intro(message: string): void {
-    this.clack.intro(message, { output: this.output });
+    this.clack.intro(this.bold(message), { output: this.output });
   }
 
   outro(message: string): void {
-    this.clack.outro(message, { output: this.output });
+    this.clack.outro(this.bold(message), { output: this.output });
   }
 
   cancel(message: string): void {
+    // Keep Clack's stock cancellation symbol/color; only hierarchy is themed.
     this.clack.cancel(message, { output: this.output });
   }
 
   note(message: string, title = ''): void {
-    this.clack.note(message, title, { output: this.output });
+    this.clack.note(message, title ? this.bold(title) : '', { output: this.output });
   }
 
   message(message: string, kind: MessageKind = 'info'): void {
-    this.clack.log[kind](message, { output: this.output });
+    // Clack already supplies severity symbols/colors. Dim ordinary informational
+    // chatter so warnings/errors/successes retain their stock visual weight.
+    this.clack.log[kind](kind === 'info' ? this.dim(message) : message, {
+      output: this.output,
+    });
   }
 
   async spinner<T>(
@@ -154,7 +198,7 @@ class ClackWizardUI implements WizardUI {
       onCancel: () => controller.abort(),
     });
 
-    spin.start(message);
+    spin.start(this.dim(message));
 
     try {
       const result = await task(controller.signal);
@@ -163,7 +207,7 @@ class ClackWizardUI implements WizardUI {
         throw new PromptAborted();
       }
 
-      spin.stop(doneMessage);
+      spin.stop(this.bold(doneMessage));
       return result;
     } catch (error) {
       if (controller.signal.aborted || spin.isCancelled) {
@@ -182,9 +226,10 @@ class ClackWizardUI implements WizardUI {
     initialIndex = 0,
   ): Promise<T> {
     const result = (await this.clack.select({
-      message: question,
+      message: this.prompt(question),
       options: choices as never[],
       initialValue: choices[initialIndex]?.value,
+      showInstructions: false,
       input: this.input,
       output: this.output,
     })) as T | symbol;
@@ -194,7 +239,7 @@ class ClackWizardUI implements WizardUI {
 
   async confirm(question: string, defaultYes: boolean): Promise<boolean> {
     const result = await this.clack.confirm({
-      message: question,
+      message: this.prompt(question),
       initialValue: defaultYes,
       input: this.input,
       output: this.output,
@@ -205,7 +250,7 @@ class ClackWizardUI implements WizardUI {
 
   async text(question: string, fallback = ''): Promise<string> {
     const result = await this.clack.text({
-      message: question,
+      message: this.prompt(question),
       ...(fallback ? { placeholder: fallback, defaultValue: fallback } : {}),
       validate(value) {
         return (value ?? '').trim() === '' && fallback === ''
@@ -222,6 +267,28 @@ class ClackWizardUI implements WizardUI {
     // trims before deciding whether to use its fallback. Keep both paths
     // semantically identical so a TTY cannot produce an invalid empty id/ref.
     return value === '' && fallback !== '' ? fallback : value;
+  }
+
+  multiline(question: string): Promise<string> {
+    // Enter-submit is safe only when the terminal is known to honor bracketed
+    // paste. Otherwise use an explicit Ctrl+D submit mode where CR/LF and tabs
+    // are always content, so a multiline paste cannot answer the next prompt.
+    const pasteSafe = supportsBracketedPaste(this.platform, this.environment);
+
+    if (!pasteSafe) {
+      return explicitSubmitMultilineText(this.prompt(question), this.input, this.output);
+    }
+
+    const hints = multilineTerminalHints(this.platform, this.environment);
+
+    return multilineText(
+      this.prompt(question),
+      this.input,
+      this.output,
+      undefined,
+      undefined,
+      hints,
+    );
   }
 
   private valueOrAbort<T>(value: T | symbol): T {

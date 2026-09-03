@@ -431,6 +431,23 @@ export const codexAdapter: Adapter = {
   },
 };
 
+const GEMINI_ARGV_SAFE = 6000;
+
+/**
+ * cmd.exe treats literal newlines inside a `.cmd` argument as command
+ * separators. Gemini is commonly installed as an npm `.cmd` shim on Windows,
+ * so multiline prompts must go through stdin there even when `--prompt` exists.
+ */
+export function geminiCanUsePromptArg(
+  prompt: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return (
+    prompt.length <= GEMINI_ARGV_SAFE &&
+    !(platform === 'win32' && /[\r\n]/.test(prompt))
+  );
+}
+
 /** Gemini CLI: generic agent runs only; no supported headless native review. */
 export const geminiAdapter: Adapter = {
   name: 'gemini',
@@ -494,9 +511,8 @@ export const geminiAdapter: Adapter = {
     }
 
     const promptFlag = firstSupported(request, ['--prompt', '-p']);
-    const ARGV_SAFE = 6000;
 
-    if (promptFlag && prompt.length <= ARGV_SAFE) {
+    if (promptFlag && geminiCanUsePromptArg(prompt)) {
       args.push(promptFlag, prompt);
 
       return {

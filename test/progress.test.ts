@@ -77,7 +77,6 @@ test('supported terminals receive indeterminate progress until the pulse stops',
     { TERM_PROGRAM: 'vscode' },
     { WT_SESSION: 'windows-terminal-session' },
     { ConEmuANSI: 'ON' },
-    { TERM_PROGRAM: 'iTerm.app', TERM_PROGRAM_VERSION: '3.6.6' },
     { TERM_PROGRAM: 'ghostty', TERM_PROGRAM_VERSION: '1.2.0' },
   ];
 
@@ -102,6 +101,35 @@ test('supported terminals receive indeterminate progress until the pulse stops',
       'the native terminal progress state must be cleared on completion',
     );
   }
+});
+
+test('iTerm lane progress is silent and only the explicit completion bell rings', () => {
+  const stderr = new Capture(false);
+  const stdout = new Capture(true);
+  const progress = new Progress(stderr, stdout, {
+    TERM_PROGRAM: 'iTerm.app',
+    TERM_PROGRAM_VERSION: '3.6.6',
+  });
+
+  progress.startPulse(Date.now());
+  assert.equal(stdout.value, '\u001B]9;4;3;0\u001B\\');
+
+  progress.laneStarted('Claude Code');
+  progress.laneStarted('Codex CLI');
+  progress.laneFinished('Claude Code');
+  progress.laneFinished('Codex CLI');
+  progress.stopPulse();
+
+  assert.ok(stdout.value.endsWith('\u001B]9;4;0;0\u001B\\'));
+  assert.equal(
+    stdout.value.includes('\u0007'),
+    false,
+    'lane/progress updates must not emit a bell in iTerm',
+  );
+
+  progress.bell();
+
+  assert.equal(stdout.value.split('\u0007').length - 1, 1);
 });
 
 test('progress reporting avoids terminals without known OSC 9;4 support', () => {

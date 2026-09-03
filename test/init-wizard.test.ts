@@ -268,6 +268,10 @@ class DefaultingUI implements WizardUI {
     if (fallback === '') throw new Error('Test UI received required text unexpectedly');
     return fallback;
   }
+
+  async multiline(_question: string): Promise<string> {
+    throw new Error('Test UI received required multiline text unexpectedly');
+  }
 }
 
 class OneLevelUpUI extends DefaultingUI {

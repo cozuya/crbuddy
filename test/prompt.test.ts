@@ -12,6 +12,17 @@ import { PromptAborted } from '../src/util/prompt.js';
 import { probe, runProcess } from '../src/run/spawn.js';
 import { createWizardUI } from '../src/util/wizard-prompt.js';
 
+class TtyInput extends PassThrough {
+  isTTY = true;
+  isRaw = false;
+  readonly rawStates: boolean[] = [];
+
+  setRawMode(enabled: boolean): void {
+    this.isRaw = enabled;
+    this.rawStates.push(enabled);
+  }
+}
+
 test('non-TTY wizard creation does not load the Clack adapter', async () => {
   let loads = 0;
 
@@ -27,7 +38,7 @@ test('non-TTY wizard creation does not load the Clack adapter', async () => {
   assert.equal(loads, 0);
 });
 
-test('the TTY adapter maps defaults and disabled choices into Clack', async () => {
+test('the TTY adapter maps defaults and disabled choices into Clack without helper footer', async () => {
   let received: Record<string, unknown> | undefined;
   const input = new PassThrough();
   const output = new PassThrough();
@@ -55,6 +66,7 @@ test('the TTY adapter maps defaults and disabled choices into Clack', async () =
 
   assert.equal(value, 'second');
   assert.equal(received?.initialValue, 'second');
+  assert.equal(received?.showInstructions, false);
   assert.deepEqual(received?.options, [
     { label: 'First', value: 'first', disabled: true },
     { label: 'Second', value: 'second', hint: 'recommended' },
@@ -92,6 +104,45 @@ test('TTY text uses the fallback for whitespace-only input', async () => {
   });
 
   assert.equal(await ui.text('Base branch', 'main'), 'main');
+});
+
+test('native Windows multiline preserves pasted tabs and CRs until Ctrl+D submits', async () => {
+  const input = new TtyInput();
+  const output = new PassThrough();
+  const ui = await createWizardUI({
+    interactive: true,
+    platform: 'win32',
+    input,
+    output,
+    loadClack: async () => fakeClack(),
+  });
+
+  const result = ui.multiline('Review instructions');
+  input.write('first\r\tsecond\r');
+  input.write('\u0004');
+
+  assert.equal(await result, 'first\n\tsecond');
+  assert.deepEqual(input.rawStates, [true, false]);
+});
+
+test('unknown POSIX terminals also use explicit-submit multiline mode', async () => {
+  const input = new TtyInput();
+  const output = new PassThrough();
+  const ui = await createWizardUI({
+    interactive: true,
+    platform: 'darwin',
+    environment: { TERM_PROGRAM: 'Apple_Terminal' },
+    input,
+    output,
+    loadClack: async () => fakeClack(),
+  });
+
+  const result = ui.multiline('Review instructions');
+  input.write('first\rsecond\r');
+  input.write('\u0004');
+
+  assert.equal(await result, 'first\nsecond');
+  assert.deepEqual(input.rawStates, [true, false]);
 });
 
 test('cancelling the TTY spinner aborts the active operation', async () => {
@@ -214,6 +265,7 @@ test('piped prompts consume sequential answers from one stdin drain', async () =
 type FakeOverrides = {
   select?: (options: Record<string, unknown>) => Promise<unknown>;
   text?: (options: Record<string, unknown>) => Promise<unknown>;
+  multiline?: (options: Record<string, unknown>) => Promise<unknown>;
   isCancel?: (value: unknown) => boolean;
   spinner?: (options: { onCancel?: () => void }) => unknown;
 };
@@ -230,6 +282,7 @@ function fakeClack(overrides: FakeOverrides = {}) {
     select: overrides.select ?? (async () => 'value'),
     confirm: async () => true,
     text: overrides.text ?? (async () => 'text'),
+    multiline: overrides.multiline ?? (async () => 'multiline'),
     isCancel: overrides.isCancel ?? (() => false),
     spinner:
       overrides.spinner ??
