@@ -19,8 +19,10 @@ export type MultilineInputEvent =
 type TerminationSignal = 'SIGTERM' | 'SIGHUP';
 
 interface LifecycleEmitter {
-  once(event: string, listener: (...args: unknown[]) => void): unknown;
-  removeListener(event: string, listener: (...args: unknown[]) => void): unknown;
+  // Match Node's EventEmitter listener shape so `process` is structurally
+  // assignable while tests can still supply a tiny fake lifecycle emitter.
+  once(event: string, listener: (...args: any[]) => void): unknown;
+  removeListener(event: string, listener: (...args: any[]) => void): unknown;
 }
 
 interface Win32Utf16Unit {
