@@ -31,6 +31,7 @@ export interface WizardUI {
   ): Promise<T>;
   confirm(question: string, defaultYes: boolean): Promise<boolean>;
   text(question: string, fallback?: string): Promise<string>;
+  multiline(question: string): Promise<string>;
 }
 
 export interface WizardUIOptions {
@@ -110,6 +111,13 @@ class LineWizardUI implements WizardUI {
 
   text(question: string, fallback = ''): Promise<string> {
     return lineText(question, fallback);
+  }
+
+  // Piped setup intentionally stays one answer per line. Multiline editing is
+  // an interactive terminal affordance, not a change to the scripted init
+  // answer sequence.
+  multiline(question: string): Promise<string> {
+    return lineText(question);
   }
 }
 
@@ -205,13 +213,6 @@ class ClackWizardUI implements WizardUI {
   }
 
   async text(question: string, fallback = ''): Promise<string> {
-    // Reviewer instructions are routinely long, markdown-heavy prompts. A
-    // single-line Clack prompt interprets pasted newlines as Enter, so this one
-    // field gets the paste-safe editor while ids/paths/etc. stay single-line.
-    if (question === 'Review instructions' && fallback === '') {
-      return multilineText(question, this.input, this.output);
-    }
-
     const result = await this.clack.text({
       message: question,
       ...(fallback ? { placeholder: fallback, defaultValue: fallback } : {}),
@@ -230,6 +231,10 @@ class ClackWizardUI implements WizardUI {
     // trims before deciding whether to use its fallback. Keep both paths
     // semantically identical so a TTY cannot produce an invalid empty id/ref.
     return value === '' && fallback !== '' ? fallback : value;
+  }
+
+  multiline(question: string): Promise<string> {
+    return multilineText(question, this.input, this.output);
   }
 
   private valueOrAbort<T>(value: T | symbol): T {
