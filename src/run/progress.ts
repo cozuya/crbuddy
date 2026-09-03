@@ -17,8 +17,12 @@ import { isVersionAtLeast } from '../adapters/version.js';
 const DIM = '\u001B[2m';
 const RESET = '\u001B[0m';
 const CLEAR_LINE = '\u001B[2K\r';
-const TAB_PROGRESS_INDETERMINATE = '\u001B]9;4;3;0\u0007';
-const TAB_PROGRESS_CLEAR = '\u001B]9;4;0;0\u0007';
+// OSC permits either BEL or ST as its terminator. Use ST so native progress
+// updates cannot be mistaken for audible bells by macOS terminals; the only
+// intentional BEL is the explicit completion bell below.
+const OSC_ST = '\u001B\\';
+const TAB_PROGRESS_INDETERMINATE = `\u001B]9;4;3;0${OSC_ST}`;
+const TAB_PROGRESS_CLEAR = `\u001B]9;4;0;0${OSC_ST}`;
 
 const FRAMES = [
   '\u280B',
@@ -150,7 +154,7 @@ export class Progress {
     this.render();
   }
 
-  /** TTY only — BEL bytes in a CI log are noise. */
+  /** TTY only — this is the one intentional audible completion signal. */
   bell(): void {
     this.terminalOutput()?.write('\u0007');
   }
