@@ -2,7 +2,6 @@ import { StringDecoder } from 'node:string_decoder';
 import type { Readable, Writable } from 'node:stream';
 
 import { PromptAborted } from './prompt.js';
-import { stripAnsi } from './ansi.js';
 
 export type MultilineInput = Readable & {
   isTTY?: boolean;
@@ -22,6 +21,14 @@ interface ExitEmitter {
   removeListener(event: 'exit', listener: () => void): unknown;
 }
 
+interface Win32Utf16Unit {
+  type: 'utf16';
+  unit: number;
+  repeatCount: number;
+}
+
+type Win32Decoded = MultilineInputEvent | Win32Utf16Unit;
+
 const ESC = '\u001b';
 const PASTE_START = `${ESC}[200~`;
 const PASTE_END = `${ESC}[201~`;
@@ -29,16 +36,9 @@ const PASTE_END = `${ESC}[201~`;
 const BRACKETED_PASTE_ON = `${ESC}[?2004h`;
 const BRACKETED_PASTE_OFF = `${ESC}[?2004l`;
 
-// Kitty's report-all-keys + associated-text flags make Shift+Enter distinct
-// without sacrificing ordinary Unicode text input. Unsupported terminals
-// ignore the sequence.
 const KITTY_KEYS_ON = `${ESC}[>24u`;
 const KITTY_KEYS_OFF = `${ESC}[<u`;
 
-// Windows Terminal / ConPTY can report the Win32 key record, including Shift,
-// through a VT stream. This is useful to Unix-side clients such as WSL; native
-// Node on Windows consumes console INPUT_RECORDs before this representation is
-// exposed, so native Windows falls back to Ctrl+J for a newline.
 const WIN32_INPUT_ON = `${ESC}[?9001h`;
 const WIN32_INPUT_OFF = `${ESC}[?9001l`;
 
@@ -46,8 +46,6 @@ const CTRL_MASK = 0b100;
 const SHIFT_MASK = 0b001;
 const WIN32_CTRL_MASK = 0x0004 | 0x0008;
 const WIN32_SHIFT_MASK = 0x0010;
-const ERASE_LINE = `${ESC}[2K`;
-const CURSOR_UP = `${ESC}[1A`;
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 function longestMarkerPrefixSuffix(value: string, marker: string): number {
@@ -60,31 +58,119 @@ function longestMarkerPrefixSuffix(value: string, marker: string): number {
   return 0;
 }
 
-function isFallbackTextCodePoint(code: number): boolean {
+function isTextScalar(code: number): boolean {
   if (code < 0x20 || code > 0x10ffff) return false;
   if (code >= 0x7f && code <= 0x9f) return false;
-  if (code >= 0xd800 && code <= 0xdfff) return false;
+  return code < 0xd800 || code > 0xdfff;
+}
 
-  // Kitty reserves the BMP Private Use Area for functional keys. Literal PUA
-  // text is still preserved when it arrives through the associated-text field;
-  // it must never be synthesized from the functional key code itself.
-  if (code >= 0xe000 && code <= 0xf8ff) return false;
+function isKittyFallbackTextCodePoint(code: number): boolean {
+  if (!isTextScalar(code)) return false;
 
-  return true;
+  // Kitty reserves the BMP Private Use Area for functional keys. Associated
+  // text is different: a literal PUA character supplied there remains text.
+  return code < 0xe000 || code > 0xf8ff;
 }
 
 function sanitizeAssociatedText(codes: number[]): string {
   return codes
-    .filter(isFallbackTextCodePoint)
+    .filter(isTextScalar)
     .map((code) => String.fromCodePoint(code))
     .join('');
 }
 
+function consumeCsi(text: string, start: number): number {
+  for (let index = start; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code >= 0x40 && code <= 0x7e) return index + 1;
+  }
+
+  return text.length;
+}
+
+function consumeStringControl(text: string, start: number): number {
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (char === '\u0007' || char === '\u009c') return index + 1;
+    if (char === ESC && text[index + 1] === '\\') return index + 2;
+  }
+
+  return text.length;
+}
+
+/**
+ * Pasted text is content, not terminal control input. Remove CSI/OSC/DCS/APC
+ * framing before echoing or saving it, then retain only tab/LF among controls.
+ */
 function sanitizePastedText(text: string): string {
-  return stripAnsi(text)
-    .replace(/\r\n?/g, '\n')
-    // Keep only the controls that are meaningful instruction text: tab and LF.
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
+  let clean = '';
+
+  for (let index = 0; index < text.length; ) {
+    const char = text[index]!;
+    const code = char.charCodeAt(0);
+
+    if (char === ESC) {
+      const next = text[index + 1];
+
+      if (next === '[') {
+        index = consumeCsi(text, index + 2);
+        continue;
+      }
+
+      if (next === ']' || next === 'P' || next === '^' || next === '_' || next === 'X') {
+        index = consumeStringControl(text, index + 2);
+        continue;
+      }
+
+      if (next === '\\') {
+        index += 2;
+        continue;
+      }
+
+      index += 1;
+      continue;
+    }
+
+    if (char === '\u009b') {
+      index = consumeCsi(text, index + 1);
+      continue;
+    }
+
+    if (
+      char === '\u009d' ||
+      char === '\u0090' ||
+      char === '\u0098' ||
+      char === '\u009e' ||
+      char === '\u009f'
+    ) {
+      index = consumeStringControl(text, index + 1);
+      continue;
+    }
+
+    if (char === '\r') {
+      clean += '\n';
+      if (text[index + 1] === '\n') index += 1;
+      index += 1;
+      continue;
+    }
+
+    if (char === '\n' || char === '\t') {
+      clean += char;
+      index += 1;
+      continue;
+    }
+
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+      index += 1;
+      continue;
+    }
+
+    clean += char;
+    index += 1;
+  }
+
+  return clean;
 }
 
 function kittyEvent(sequence: string): MultilineInputEvent | null {
@@ -99,14 +185,12 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
   const encodedModifiers = Number(modifierParts[0] || '1');
   const eventType = Number(modifierParts[1] || '1');
 
-  // 1 = press, 2 = repeat, 3 = release. Releases must never mutate the value.
   if (eventType === 3) return { type: 'text', text: '' };
 
   const modifiers = Math.max(0, encodedModifiers - 1);
   const shift = Boolean(modifiers & SHIFT_MASK);
   const ctrl = Boolean(modifiers & CTRL_MASK);
 
-  // Structural editor keys win even if a terminal supplies associated text.
   if (keyCode === 13) return { type: shift ? 'newline' : 'submit' };
   if (keyCode === 127) return { type: 'backspace' };
   if (keyCode === 9) return { type: 'text', text: '\t' };
@@ -118,17 +202,12 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
     .filter((code) => Number.isInteger(code) && code > 0 && code <= 0x10ffff);
   const associatedText = sanitizeAssociatedText(textCodes);
 
-  // Text-producing events take precedence over Ctrl shortcut interpretation.
-  // This is required for layouts where AltGr is represented as Ctrl+Alt.
   if (associatedText !== '') return { type: 'text', text: associatedText };
 
   if (ctrl && (keyCode === 99 || keyCode === 67)) return { type: 'abort' };
   if (ctrl && (keyCode === 106 || keyCode === 74)) return { type: 'newline' };
 
-  // Associated text is requested above, but retain a conservative fallback
-  // for terminals that report ordinary printable keys without that field.
-  // Kitty functional keys occupy the PUA and are deliberately excluded.
-  if (!ctrl && isFallbackTextCodePoint(keyCode)) {
+  if (!ctrl && isKittyFallbackTextCodePoint(keyCode)) {
     let text = String.fromCodePoint(keyCode);
     if (shift && /^[a-z]$/.test(text)) text = text.toUpperCase();
     return { type: 'text', text };
@@ -137,7 +216,7 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
   return { type: 'text', text: '' };
 }
 
-function win32Event(sequence: string): MultilineInputEvent | null {
+function win32Event(sequence: string): Win32Decoded | null {
   const match = /^\u001b\[([0-9]+);([0-9]+);([0-9]+);([01]);([0-9]+);([0-9]+)_$/.exec(
     sequence,
   );
@@ -154,20 +233,23 @@ function win32Event(sequence: string): MultilineInputEvent | null {
   const ctrl = Boolean(controlState & WIN32_CTRL_MASK);
   const shift = Boolean(controlState & WIN32_SHIFT_MASK);
 
-  // Structural editor keys are handled before printable text.
   if (virtualKey === 13) return { type: shift ? 'newline' : 'submit' };
   if (virtualKey === 8) return { type: 'backspace' };
   if (virtualKey === 9) return { type: 'text', text: '\t' };
 
-  // A printable Unicode result means this is text input, even when Windows
-  // also reports Ctrl+Alt (AltGr). Never turn a composed character into a
-  // Ctrl+C/Ctrl+J editor shortcut.
-  if (isFallbackTextCodePoint(unicodeChar)) {
-    return { type: 'text', text: String.fromCharCode(unicodeChar).repeat(repeatCount) };
+  if (unicodeChar >= 0xd800 && unicodeChar <= 0xdfff) {
+    return { type: 'utf16', unit: unicodeChar, repeatCount };
   }
 
-  if (ctrl && virtualKey === 67) return { type: 'abort' }; // C
-  if (ctrl && virtualKey === 74) return { type: 'newline' }; // J
+  if (isTextScalar(unicodeChar)) {
+    return {
+      type: 'text',
+      text: String.fromCharCode(unicodeChar).repeat(repeatCount),
+    };
+  }
+
+  if (ctrl && virtualKey === 67) return { type: 'abort' };
+  if (ctrl && virtualKey === 74) return { type: 'newline' };
 
   return { type: 'text', text: '' };
 }
@@ -182,15 +264,45 @@ function removeLastGrapheme(text: string): string {
   return lastIndex < 0 ? text : text.slice(0, lastIndex);
 }
 
-/**
- * Stateful byte-stream decoder for the small terminal protocol surface the
- * review-instructions editor needs. Keeping this pure makes chunk-boundary
- * behavior deterministic and unit-testable.
- */
 export class TerminalInputDecoder {
   private pending = '';
   private inPaste = false;
   private pasteBuffer = '';
+  private pendingWin32HighSurrogate: { unit: number; repeatCount: number } | null = null;
+
+  private appendWin32Event(
+    decoded: Win32Decoded | null,
+    events: MultilineInputEvent[],
+  ): void {
+    if (!decoded) return;
+
+    if (decoded.type !== 'utf16') {
+      this.pendingWin32HighSurrogate = null;
+      events.push(decoded);
+      return;
+    }
+
+    const unit = decoded.unit;
+
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      this.pendingWin32HighSurrogate = {
+        unit,
+        repeatCount: decoded.repeatCount,
+      };
+      return;
+    }
+
+    const high = this.pendingWin32HighSurrogate;
+    this.pendingWin32HighSurrogate = null;
+
+    if (!high || unit < 0xdc00 || unit > 0xdfff) return;
+
+    const repeatCount = Math.max(high.repeatCount, decoded.repeatCount);
+    events.push({
+      type: 'text',
+      text: String.fromCharCode(high.unit, unit).repeat(repeatCount),
+    });
+  }
 
   feed(chunk: string): MultilineInputEvent[] {
     this.pending += chunk;
@@ -213,9 +325,6 @@ export class TerminalInputDecoder {
           continue;
         }
 
-        // Keep only a possible partial paste-end marker in `pending`; buffering
-        // the paste body until the marker arrives makes CRLF and ANSI parsing
-        // independent of arbitrary PTY chunk boundaries.
         const keep = longestMarkerPrefixSuffix(this.pending, PASTE_END);
         this.pasteBuffer += this.pending.slice(0, this.pending.length - keep);
         this.pending = this.pending.slice(this.pending.length - keep);
@@ -239,7 +348,6 @@ export class TerminalInputDecoder {
         continue;
       }
 
-      // In legacy raw terminal input, Ctrl+J is LF while Enter is CR.
       if (first === '\n') {
         this.pending = this.pending.slice(1);
         events.push({ type: 'newline' });
@@ -269,39 +377,32 @@ export class TerminalInputDecoder {
           continue;
         }
 
-        // Match the exact grammar win32Event accepts. A looser prefix matcher
-        // can consume a sequence and then silently discard it when parsing
-        // fails.
         const win32 = /^\u001b\[[0-9]+;[0-9]+;[0-9]+;[01];[0-9]+;[0-9]+_/.exec(
           this.pending,
         )?.[0];
         if (win32) {
           this.pending = this.pending.slice(win32.length);
-          const event = win32Event(win32);
-          if (event) events.push(event);
+          this.appendWin32Event(win32Event(win32), events);
           continue;
         }
 
         if (this.pending.startsWith(`${ESC}[`)) {
-          // Ignore unrelated complete CSI sequences (arrows, terminal replies,
-          // etc.). If the final byte has not arrived, retain the fragment.
           const csi = /^\u001b\[[0-?]*[ -/]*[@-~]/.exec(this.pending)?.[0];
           if (!csi) break;
           this.pending = this.pending.slice(csi.length);
           continue;
         }
 
-        // SS3 is the common application-cursor encoding (ESC O A, etc.). Do
-        // not leak the printable tail into the saved instructions.
         if (this.pending.startsWith(`${ESC}O`)) {
           if (this.pending.length < 3) break;
           this.pending = this.pending.slice(3);
           continue;
         }
 
-        // Alt/meta keys arrive as ESC plus the ordinary key in legacy mode.
-        // Neither byte is instruction text, so consume the pair together.
-        this.pending = this.pending.slice(2);
+        // Unknown/standalone Escape is ignored by itself. Do not consume the
+        // following character: it may be the start of another escape sequence
+        // or ordinary text typed immediately afterwards.
+        this.pending = this.pending.slice(1);
         continue;
       }
 
@@ -313,9 +414,6 @@ export class TerminalInputDecoder {
 
       const code = first.charCodeAt(0);
       if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
-        // Raw-mode editing keys such as Ctrl+A/Ctrl+D/Ctrl+U are control
-        // events, not text. Ignore unsupported ones rather than persisting
-        // invisible bytes into config.json.
         this.pending = this.pending.slice(1);
         continue;
       }
@@ -330,12 +428,6 @@ export class TerminalInputDecoder {
   }
 }
 
-/**
- * Paste-safe multiline editor for long reviewer instructions.
- *
- * Enter submits. Shift+Enter adds a newline where the terminal protocol
- * exposes the modifier; Ctrl+J is always the explicit newline fallback.
- */
 export function multilineText(
   question: string,
   input: MultilineInput,
@@ -361,7 +453,7 @@ export function multilineText(
         try {
           output.write(`${WIN32_INPUT_OFF}${KITTY_KEYS_OFF}${BRACKETED_PASTE_OFF}`);
         } catch {
-          // Terminal restoration must continue even if the output stream died.
+          // Continue restoring raw mode even if the output stream died.
         }
         modesEnabled = false;
       }
@@ -369,13 +461,11 @@ export function multilineText(
       try {
         setRawMode.call(input, wasRaw);
       } catch {
-        // The input stream may already be closed; there is nothing left to restore.
+        // The input stream may already be closed.
       }
     };
 
     const onProcessExit = (): void => {
-      // `exit` is synchronous and there is no next prompt to resume. Best effort
-      // restoration prevents a normal process.exit() path from stranding modes.
       restoreTerminal();
     };
 
@@ -396,10 +486,13 @@ export function multilineText(
 
     const finish = (): void => {
       const trimmed = value.trim();
+
       if (trimmed === '') {
-        output.write('\u0007');
+        value = '';
+        output.write('\n  A value is required.\n> ');
         return;
       }
+
       if (!cleanup()) return;
       output.write('\n');
       resolve(trimmed);
@@ -413,26 +506,23 @@ export function multilineText(
 
     const fail = (error: unknown): void => {
       if (!cleanup()) return;
+
       try {
         output.write('\n');
       } catch {
         // Preserve the original input failure.
       }
+
       reject(error instanceof Error ? error : new Error(String(error)));
     };
 
-    const currentLine = (): { lineStart: number; line: string; prefix: string } => {
-      const lineStart = value.lastIndexOf('\n') + 1;
-      return {
-        lineStart,
-        line: value.slice(lineStart),
-        prefix: lineStart === 0 ? '> ' : '',
-      };
-    };
+    const currentLine = (): string => value.slice(value.lastIndexOf('\n') + 1);
 
-    const redrawCurrentLine = (): void => {
-      const { line, prefix } = currentLine();
-      output.write(`\r${ERASE_LINE}${prefix}${line}`);
+    const showEditSnapshot = (): void => {
+      // Append-only edit feedback cannot corrupt wrapped terminal rows. It is
+      // deliberately less clever than cursor arithmetic, which requires exact
+      // terminal-cell widths for wide/combining Unicode.
+      output.write(`\n\u001b[2m  edit: \u001b[0m${currentLine()}`);
     };
 
     const apply = (event: MultilineInputEvent): boolean => {
@@ -454,18 +544,15 @@ export function multilineText(
           }
 
           if (value.endsWith('\n')) {
-            // Join the current empty line back onto the preceding one. Move the
-            // terminal cursor up and redraw that logical line so editing can
-            // continue naturally across a newline boundary.
             value = value.slice(0, -1);
-            const { line, prefix } = currentLine();
-            output.write(`${CURSOR_UP}\r${ERASE_LINE}${prefix}${line}`);
+            showEditSnapshot();
             return false;
           }
 
-          const { lineStart, line } = currentLine();
+          const lineStart = value.lastIndexOf('\n') + 1;
+          const line = value.slice(lineStart);
           value = `${value.slice(0, lineStart)}${removeLastGrapheme(line)}`;
-          redrawCurrentLine();
+          showEditSnapshot();
           return false;
         }
         case 'submit':
@@ -479,6 +566,7 @@ export function multilineText(
 
     function onData(chunk: Buffer | string): void {
       const text = typeof chunk === 'string' ? chunk : utf8.write(chunk);
+
       for (const event of decoder.feed(text)) {
         if (apply(event)) return;
       }
