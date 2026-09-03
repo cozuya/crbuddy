@@ -323,7 +323,7 @@ export function supportsShiftEnter(
   if (term.includes('kitty')) return true;
 
   const program = environment.TERM_PROGRAM?.toLowerCase();
-  return program === 'vscode' || program === 'iterm.app';
+  return program === 'vscode';
 }
 
 export function supportsBracketedPaste(
