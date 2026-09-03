@@ -1,5 +1,6 @@
-import type { Readable, Writable } from 'node:stream';
+import type { Writable } from 'node:stream';
 
+import { multilineText, type MultilineInput } from './multiline-prompt.js';
 import type { Choice } from './prompt.js';
 import {
   PromptAborted,
@@ -33,7 +34,7 @@ export interface WizardUI {
 }
 
 export interface WizardUIOptions {
-  input?: Readable & { isTTY?: boolean };
+  input?: MultilineInput & { isTTY?: boolean };
   output?: Writable & { isTTY?: boolean };
   /** Test seam; production callers should let the streams decide. */
   interactive?: boolean;
@@ -119,7 +120,7 @@ class ClackWizardUI implements WizardUI {
 
   constructor(
     private readonly clack: Clack,
-    private readonly input: Readable,
+    private readonly input: MultilineInput,
     private readonly output: Writable,
   ) {}
 
@@ -204,6 +205,13 @@ class ClackWizardUI implements WizardUI {
   }
 
   async text(question: string, fallback = ''): Promise<string> {
+    // Reviewer instructions are routinely long, markdown-heavy prompts. A
+    // single-line Clack prompt interprets pasted newlines as Enter, so this one
+    // field gets the paste-safe editor while ids/paths/etc. stay single-line.
+    if (question === 'Review instructions' && fallback === '') {
+      return multilineText(question, this.input, this.output);
+    }
+
     const result = await this.clack.text({
       message: question,
       ...(fallback ? { placeholder: fallback, defaultValue: fallback } : {}),
