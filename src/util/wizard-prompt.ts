@@ -3,9 +3,9 @@ import { styleText } from 'node:util';
 
 import {
   explicitSubmitMultilineText,
+  multilineTerminalHints,
   multilineText,
   supportsBracketedPaste,
-  supportsShiftEnter,
   type MultilineInput,
 } from './multiline-prompt.js';
 import type { Choice } from './prompt.js';
@@ -279,9 +279,7 @@ class ClackWizardUI implements WizardUI {
       return explicitSubmitMultilineText(this.prompt(question), this.input, this.output);
     }
 
-    const newlineHint = supportsShiftEnter(this.platform, this.environment)
-      ? 'Shift+Enter/Ctrl+J adds a line'
-      : 'Ctrl+J adds a line';
+    const hints = multilineTerminalHints(this.platform, this.environment);
 
     return multilineText(
       this.prompt(question),
@@ -289,7 +287,7 @@ class ClackWizardUI implements WizardUI {
       this.output,
       undefined,
       undefined,
-      { newlineHint, pasteSafe: true },
+      hints,
     );
   }
 
