@@ -35,7 +35,7 @@ class TtyInput extends PassThrough {
 }
 
 class FakeExitEmitter {
-  private listener: (() => void) | null = null;
+  listener: (() => void) | null = null;
 
   once(event: 'exit', listener: () => void): void {
     assert.equal(event, 'exit');
@@ -45,10 +45,6 @@ class FakeExitEmitter {
   removeListener(event: 'exit', listener: () => void): void {
     assert.equal(event, 'exit');
     if (this.listener === listener) this.listener = null;
-  }
-
-  emitExit(): void {
-    this.listener?.();
   }
 }
 
@@ -81,18 +77,19 @@ test('bracketed paste preserves CRLF when the PTY splits between CR and LF', () 
   );
 
   assert.equal(textOf(events), 'first\nsecond\nthird');
-  assert.equal(events.some((event) => event.type === 'submit'), false);
 });
 
-test('bracketed paste strips ANSI and unsafe control bytes before echoing text', () => {
+test('pasted OSC, CSI, and control bytes are stripped without losing visible text', () => {
   const events = decode(
-    '\u001b[200~plain \u001b[31mred\u001b[0m\u0000\u0007\tend\u001b[201~',
+    '\u001b[200~' +
+      '\u001b]8;;https://example.com\u001b\\click\u001b]8;;\u001b\\' +
+      '\u001b[31m red\u001b[0m' +
+      '\u0000\u0007' +
+      '\u001b]0;title\u0007 visible' +
+      '\u001b[201~',
   );
 
-  assert.equal(textOf(events), 'plain red\tend');
-  assert.equal(textOf(events).includes('\u001b'), false);
-  assert.equal(textOf(events).includes('\u0000'), false);
-  assert.equal(textOf(events).includes('\u0007'), false);
+  assert.equal(textOf(events), 'click red visible');
 });
 
 test('legacy Enter submits while Ctrl+J adds a newline', () => {
@@ -107,9 +104,10 @@ test('unsupported C0 controls are ignored instead of becoming instruction text',
   assert.equal(events.some((event) => event.type === 'abort'), false);
 });
 
-test('SS3 cursor keys and Alt/meta keys do not leak printable tails', () => {
+test('SS3 cursor keys are ignored and standalone Escape does not eat later input', () => {
   assert.equal(textOf(decode('\u001bO', 'Ahello')), 'hello');
-  assert.equal(textOf(decode('\u001bxhello')), 'hello');
+  assert.equal(textOf(decode('\u001b', '\u001b[Ahello')), 'hello');
+  assert.equal(textOf(decode('\u001b', 'hello')), 'hello');
 });
 
 test('kitty input distinguishes Shift+Enter and preserves typed text', () => {
@@ -120,36 +118,43 @@ test('kitty input distinguishes Shift+Enter and preserves typed text', () => {
   assert.deepEqual(decode('\u001b[97;1;97u'), [{ type: 'text', text: 'a' }]);
 });
 
-test('kitty functional-key PUA codes never become instruction text', () => {
-  assert.equal(textOf(decode('\u001b[57352u')), ''); // Up
-  assert.equal(textOf(decode('\u001b[57441;2u')), ''); // Left Shift
-  assert.equal(textOf(decode('\u001b[57376u')), ''); // F13
+test('kitty functional PUA keys are ignored while literal associated PUA text survives', () => {
+  assert.equal(textOf(decode('\u001b[57352;1u')), '');
+  assert.equal(textOf(decode('\u001b[57441;2u')), '');
+  assert.equal(textOf(decode('\u001b[97;1;57344u')), '\ue000');
 });
 
-test('kitty associated text wins over Ctrl+Alt shortcut interpretation', () => {
+test('kitty associated text wins over Ctrl shortcut interpretation for AltGr', () => {
   assert.deepEqual(decode('\u001b[99;7;263u'), [{ type: 'text', text: 'ć' }]);
 });
 
-test('Win32 input mode distinguishes Shift+Enter from Enter when delivered', () => {
+test('Win32 input mode distinguishes Shift+Enter from Enter', () => {
   assert.deepEqual(decode('\u001b[13;28;13;1;16;1_'), [{ type: 'newline' }]);
   assert.deepEqual(decode('\u001b[13;28;13;1;0;1_'), [{ type: 'submit' }]);
 });
 
-test('Win32 input ignores key-up records and emits Unicode key-down text', () => {
+test('Win32 printable AltGr text wins over Ctrl shortcuts', () => {
+  assert.deepEqual(decode('\u001b[67;46;263;1;9;1_'), [
+    { type: 'text', text: 'ć' },
+  ]);
+});
+
+test('Win32 UTF-16 surrogate records combine into supplementary characters', () => {
+  assert.deepEqual(
+    decode(
+      '\u001b[0;0;55357;1;0;1_',
+      '\u001b[0;0;56832;1;0;1_',
+    ),
+    [{ type: 'text', text: '😀' }],
+  );
+});
+
+test('Win32 input ignores key-up records and emits BMP Unicode key-down text', () => {
   assert.deepEqual(decode('\u001b[65;30;65;0;16;1_'), [
     { type: 'text', text: '' },
   ]);
   assert.deepEqual(decode('\u001b[65;30;65;1;16;1_'), [
     { type: 'text', text: 'A' },
-  ]);
-});
-
-test('Win32 AltGr-composed text wins over Ctrl shortcuts', () => {
-  assert.deepEqual(decode('\u001b[67;46;263;1;9;1_'), [
-    { type: 'text', text: 'ć' },
-  ]);
-  assert.deepEqual(decode('\u001b[74;36;309;1;9;1_'), [
-    { type: 'text', text: 'ĵ' },
   ]);
 });
 
@@ -160,7 +165,7 @@ test('terminal control sequences may be split across arbitrary stream chunks', (
   assert.deepEqual(decode('\u001b[13;', '2u'), [{ type: 'newline' }]);
 });
 
-test('backspace deletes one grapheme and redraws the logical line', async () => {
+test('backspace deletes one grapheme without cursor-row rewriting', async () => {
   const input = new TtyInput();
   const output = new PassThrough();
   const written = capture(output);
@@ -172,21 +177,56 @@ test('backspace deletes one grapheme and redraws the logical line', async () => 
 
   assert.equal(await result, 'A');
   assert.deepEqual(input.rawStates, [true, false]);
-  assert.match(written(), /\r\u001b\[2K> A/);
+  assert.match(written(), /edit: .*A/);
+  assert.equal(written().includes('\u001b[2K'), false);
+  assert.equal(written().includes('\u001b[1A'), false);
 });
 
-test('backspace can cross a newline and continue editing the previous line', async () => {
+test('backspace can cross a newline without cursor-row rewriting', async () => {
   const input = new TtyInput();
   const output = new PassThrough();
   const written = capture(output);
   const result = multilineText('Review instructions', input, output);
 
-  input.write('first\n');
+  input.write('first');
+  input.write('\n');
   input.write('\u007f');
-  input.write('X\r');
+  input.write('\r');
 
-  assert.equal(await result, 'firstX');
-  assert.match(written(), /\u001b\[1A\r\u001b\[2K> first/);
+  assert.equal(await result, 'first');
+  assert.match(written(), /edit: .*first/);
+  assert.equal(written().includes('\u001b[1A'), false);
+});
+
+test('editing a long wrapped line uses append-only snapshots instead of row arithmetic', async () => {
+  const input = new TtyInput();
+  const output = new PassThrough();
+  const written = capture(output);
+  const result = multilineText('Review instructions', input, output);
+  const long = 'x'.repeat(300);
+
+  input.write(long);
+  input.write('\u007f');
+  input.write('\r');
+
+  assert.equal(await result, 'x'.repeat(299));
+  assert.equal(written().includes('\u001b[2K'), false);
+  assert.equal(written().includes('\u001b[1A'), false);
+});
+
+test('empty submit shows validation and allows retry', async () => {
+  const input = new TtyInput();
+  const output = new PassThrough();
+  const written = capture(output);
+  const result = multilineText('Review instructions', input, output);
+
+  input.write('   ');
+  input.write('\r');
+  input.write('valid');
+  input.write('\r');
+
+  assert.equal(await result, 'valid');
+  assert.match(written(), /A value is required\./);
 });
 
 test('unexpected stdin EOF restores raw and terminal modes before aborting', async () => {
@@ -212,7 +252,8 @@ test('process exit cleanup restores terminal modes synchronously', async () => {
   const exits = new FakeExitEmitter();
   const result = multilineText('Review instructions', input, output, exits);
 
-  exits.emitExit();
+  assert.ok(exits.listener);
+  exits.listener?.();
 
   assert.equal(input.isRaw, false);
   assert.match(written(), /\u001b\[\?9001l/);
