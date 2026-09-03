@@ -12,6 +12,17 @@ import { PromptAborted } from '../src/util/prompt.js';
 import { probe, runProcess } from '../src/run/spawn.js';
 import { createWizardUI } from '../src/util/wizard-prompt.js';
 
+class TtyInput extends PassThrough {
+  isTTY = true;
+  isRaw = false;
+  readonly rawStates: boolean[] = [];
+
+  setRawMode(enabled: boolean): void {
+    this.isRaw = enabled;
+    this.rawStates.push(enabled);
+  }
+}
+
 test('non-TTY wizard creation does not load the Clack adapter', async () => {
   let loads = 0;
 
@@ -94,25 +105,23 @@ test('TTY text uses the fallback for whitespace-only input', async () => {
   assert.equal(await ui.text('Base branch', 'main'), 'main');
 });
 
-test('native Windows multiline uses Clack explicit submit mode for paste safety', async () => {
-  let received: Record<string, unknown> | undefined;
+test('native Windows multiline preserves pasted tabs and CRs until Ctrl+D submits', async () => {
+  const input = new TtyInput();
+  const output = new PassThrough();
   const ui = await createWizardUI({
     interactive: true,
     platform: 'win32',
-    input: new PassThrough(),
-    output: new PassThrough(),
-    loadClack: async () =>
-      fakeClack({
-        multiline: async (options) => {
-          received = options;
-          return 'first\n\nsecond';
-        },
-      }),
+    input,
+    output,
+    loadClack: async () => fakeClack(),
   });
 
-  assert.equal(await ui.multiline('Review instructions'), 'first\n\nsecond');
-  assert.equal(received?.showSubmit, true);
-  assert.match(String(received?.message), /Tab to submit/);
+  const result = ui.multiline('Review instructions');
+  input.write('first\r\tsecond\r');
+  input.write('\u0004');
+
+  assert.equal(await result, 'first\n\tsecond');
+  assert.deepEqual(input.rawStates, [true, false]);
 });
 
 test('cancelling the TTY spinner aborts the active operation', async () => {
