@@ -16,7 +16,7 @@ export type MultilineInputEvent =
   | { type: 'backspace'; count?: number }
   | { type: 'abort' };
 
-type TerminationSignal = 'SIGTERM' | 'SIGHUP';
+type TerminationSignal = 'SIGINT' | 'SIGTERM' | 'SIGHUP';
 
 interface LifecycleEmitter {
   once(event: string, listener: (...args: any[]) => void): unknown;
@@ -619,6 +619,7 @@ export function multilineText(
 
     function removeLifecycleListeners(): void {
       lifecycle.removeListener('exit', onProcessExit);
+      lifecycle.removeListener('SIGINT', onSigint);
       lifecycle.removeListener('SIGTERM', onSigterm);
       lifecycle.removeListener('SIGHUP', onSighup);
     }
@@ -652,6 +653,10 @@ export function multilineText(
       // listener swallows it, reject instead of leaving a settled-looking UI
       // backed by a permanently pending Promise.
       reject(new PromptAborted());
+    }
+
+    function onSigint(): void {
+      onTermination('SIGINT');
     }
 
     function onSigterm(): void {
@@ -789,6 +794,7 @@ export function multilineText(
       }
 
       lifecycle.once('exit', onProcessExit);
+      lifecycle.once('SIGINT', onSigint);
       lifecycle.once('SIGTERM', onSigterm);
       lifecycle.once('SIGHUP', onSighup);
 
