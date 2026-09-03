@@ -1,8 +1,10 @@
 import type { Writable } from 'node:stream';
+import { styleText } from 'node:util';
 
 import {
+  explicitSubmitMultilineText,
   multilineText,
-  windowsMultilineText,
+  supportsBracketedPaste,
   type MultilineInput,
 } from './multiline-prompt.js';
 import type { Choice } from './prompt.js';
@@ -43,8 +45,9 @@ export interface WizardUIOptions {
   output?: Writable & { isTTY?: boolean };
   /** Test seam; production callers should let the streams decide. */
   interactive?: boolean;
-  /** Test seam for the native-Windows multiline path. */
+  /** Test seams for terminal capability routing. */
   platform?: NodeJS.Platform;
+  environment?: NodeJS.ProcessEnv;
   loadClack?: () => Promise<typeof import('@clack/prompts')>;
 }
 
@@ -68,6 +71,7 @@ export async function createWizardUI(
     input,
     output,
     options.platform ?? process.platform,
+    options.environment ?? process.env,
   );
 }
 
@@ -142,26 +146,44 @@ class ClackWizardUI implements WizardUI {
     private readonly input: MultilineInput,
     private readonly output: Writable,
     private readonly platform: NodeJS.Platform,
+    private readonly environment: NodeJS.ProcessEnv,
   ) {}
 
+  private bold(message: string): string {
+    return styleText('bold', message, { stream: this.output });
+  }
+
+  private dim(message: string): string {
+    return styleText('dim', message, { stream: this.output });
+  }
+
+  private prompt(message: string): string {
+    return this.bold(message);
+  }
+
   intro(message: string): void {
-    this.clack.intro(message, { output: this.output });
+    this.clack.intro(this.bold(message), { output: this.output });
   }
 
   outro(message: string): void {
-    this.clack.outro(message, { output: this.output });
+    this.clack.outro(this.bold(message), { output: this.output });
   }
 
   cancel(message: string): void {
+    // Keep Clack's stock cancellation symbol/color; only hierarchy is themed.
     this.clack.cancel(message, { output: this.output });
   }
 
   note(message: string, title = ''): void {
-    this.clack.note(message, title, { output: this.output });
+    this.clack.note(message, title ? this.bold(title) : '', { output: this.output });
   }
 
   message(message: string, kind: MessageKind = 'info'): void {
-    this.clack.log[kind](message, { output: this.output });
+    // Clack already supplies severity symbols/colors. Dim ordinary informational
+    // chatter so warnings/errors/successes retain their stock visual weight.
+    this.clack.log[kind](kind === 'info' ? this.dim(message) : message, {
+      output: this.output,
+    });
   }
 
   async spinner<T>(
@@ -175,7 +197,7 @@ class ClackWizardUI implements WizardUI {
       onCancel: () => controller.abort(),
     });
 
-    spin.start(message);
+    spin.start(this.dim(message));
 
     try {
       const result = await task(controller.signal);
@@ -184,7 +206,7 @@ class ClackWizardUI implements WizardUI {
         throw new PromptAborted();
       }
 
-      spin.stop(doneMessage);
+      spin.stop(this.bold(doneMessage));
       return result;
     } catch (error) {
       if (controller.signal.aborted || spin.isCancelled) {
@@ -203,9 +225,10 @@ class ClackWizardUI implements WizardUI {
     initialIndex = 0,
   ): Promise<T> {
     const result = (await this.clack.select({
-      message: question,
+      message: this.prompt(question),
       options: choices as never[],
       initialValue: choices[initialIndex]?.value,
+      showInstructions: false,
       input: this.input,
       output: this.output,
     })) as T | symbol;
@@ -215,7 +238,7 @@ class ClackWizardUI implements WizardUI {
 
   async confirm(question: string, defaultYes: boolean): Promise<boolean> {
     const result = await this.clack.confirm({
-      message: question,
+      message: this.prompt(question),
       initialValue: defaultYes,
       input: this.input,
       output: this.output,
@@ -226,7 +249,7 @@ class ClackWizardUI implements WizardUI {
 
   async text(question: string, fallback = ''): Promise<string> {
     const result = await this.clack.text({
-      message: question,
+      message: this.prompt(question),
       ...(fallback ? { placeholder: fallback, defaultValue: fallback } : {}),
       validate(value) {
         return (value ?? '').trim() === '' && fallback === ''
@@ -243,12 +266,12 @@ class ClackWizardUI implements WizardUI {
   }
 
   multiline(question: string): Promise<string> {
-    // Native Node on Windows cannot distinguish a physical Enter from a CR in
-    // pasted text. Use a mode where CR always means newline and Ctrl+D is the
-    // explicit submit key; tabs remain ordinary input instead of a focus key.
-    return this.platform === 'win32'
-      ? windowsMultilineText(question, this.input, this.output)
-      : multilineText(question, this.input, this.output);
+    // Enter-submit is safe only when the terminal is known to honor bracketed
+    // paste. Otherwise use an explicit Ctrl+D submit mode where CR/LF and tabs
+    // are always content, so a multiline paste cannot answer the next prompt.
+    return supportsBracketedPaste(this.platform, this.environment)
+      ? multilineText(this.prompt(question), this.input, this.output)
+      : explicitSubmitMultilineText(this.prompt(question), this.input, this.output);
   }
 
   private valueOrAbort<T>(value: T | symbol): T {
