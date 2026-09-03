@@ -16,9 +16,11 @@ export type MultilineInputEvent =
   | { type: 'backspace' }
   | { type: 'abort' };
 
-interface ExitEmitter {
-  once(event: 'exit', listener: () => void): unknown;
-  removeListener(event: 'exit', listener: () => void): unknown;
+type TerminationSignal = 'SIGTERM' | 'SIGHUP';
+
+interface LifecycleEmitter {
+  once(event: string, listener: (...args: unknown[]) => void): unknown;
+  removeListener(event: string, listener: (...args: unknown[]) => void): unknown;
 }
 
 interface Win32Utf16Unit {
@@ -217,16 +219,16 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
 }
 
 function win32Event(sequence: string): Win32Decoded | null {
-  const match = /^\u001b\[([0-9]+);([0-9]+);([0-9]+);([01]);([0-9]+);([0-9]+)_$/.exec(
+  const match = /^\u001b\[([0-9]*);([0-9]*);([0-9]*);([01]?);([0-9]*);([0-9]*)_$/.exec(
     sequence,
   );
   if (!match) return null;
 
-  const virtualKey = Number(match[1]);
-  const unicodeChar = Number(match[3]);
-  const keyDown = match[4] === '1';
-  const controlState = Number(match[5]);
-  const repeatCount = Math.max(1, Math.min(1000, Number(match[6]) || 1));
+  const virtualKey = Number(match[1] || '0');
+  const unicodeChar = Number(match[3] || '0');
+  const keyDown = (match[4] || '0') === '1';
+  const controlState = Number(match[5] || '0');
+  const repeatCount = Math.max(1, Math.min(1000, Number(match[6] || '1') || 1));
 
   if (!keyDown) return { type: 'text', text: '' };
 
@@ -262,6 +264,40 @@ function removeLastGrapheme(text: string): string {
   }
 
   return lastIndex < 0 ? text : text.slice(0, lastIndex);
+}
+
+function isPossibleCsiPrefix(text: string): boolean {
+  let intermediates = false;
+
+  for (const char of text) {
+    const code = char.charCodeAt(0);
+
+    if (!intermediates && code >= 0x30 && code <= 0x3f) continue;
+    if (code >= 0x20 && code <= 0x2f) {
+      intermediates = true;
+      continue;
+    }
+
+    return false;
+  }
+
+  return true;
+}
+
+/** Whether the active terminal is known to expose Shift+Enter distinctly. */
+export function supportsShiftEnter(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (platform === 'win32') return false;
+  if (environment.WT_SESSION) return true;
+  if (environment.KITTY_WINDOW_ID) return true;
+
+  const term = environment.TERM?.toLowerCase() ?? '';
+  if (term.includes('kitty')) return true;
+
+  const program = environment.TERM_PROGRAM?.toLowerCase();
+  return program === 'vscode';
 }
 
 export class TerminalInputDecoder {
@@ -382,7 +418,7 @@ export class TerminalInputDecoder {
           continue;
         }
 
-        const win32 = /^\u001b\[[0-9]+;[0-9]+;[0-9]+;[01];[0-9]+;[0-9]+_/.exec(
+        const win32 = /^\u001b\[[0-9]*;[0-9]*;[0-9]*;[01]?;[0-9]*;[0-9]*_/.exec(
           this.pending,
         )?.[0];
         if (win32) {
@@ -393,8 +429,18 @@ export class TerminalInputDecoder {
 
         if (this.pending.startsWith(`${ESC}[`)) {
           const csi = /^\u001b\[[0-?]*[ -/]*[@-~]/.exec(this.pending)?.[0];
-          if (!csi) break;
-          this.pending = this.pending.slice(csi.length);
+          if (csi) {
+            this.pending = this.pending.slice(csi.length);
+            continue;
+          }
+
+          const tail = this.pending.slice(2);
+          if (isPossibleCsiPrefix(tail)) break;
+
+          // The CSI introducer has been followed by something that cannot be
+          // part of a CSI sequence (CR, DEL, Unicode, another ESC, ...). Drop
+          // only the introducer so that character is still handled normally.
+          this.pending = this.pending.slice(2);
           continue;
         }
 
@@ -405,8 +451,7 @@ export class TerminalInputDecoder {
         }
 
         // Unknown/standalone Escape is ignored by itself. Do not consume the
-        // following character: it may be the start of another escape sequence
-        // or ordinary text typed immediately afterwards.
+        // following character: it may be another sequence or ordinary text.
         this.pending = this.pending.slice(1);
         continue;
       }
@@ -437,7 +482,10 @@ export function multilineText(
   question: string,
   input: MultilineInput,
   output: Writable,
-  exitEmitter: ExitEmitter = process,
+  lifecycle: LifecycleEmitter = process,
+  reraiseSignal: (signal: TerminationSignal) => void = (signal) => {
+    process.kill(process.pid, signal);
+  },
 ): Promise<string> {
   const setRawMode = input.setRawMode;
 
@@ -474,6 +522,22 @@ export function multilineText(
       restoreTerminal();
     };
 
+    const removeLifecycleListeners = (): void => {
+      lifecycle.removeListener('exit', onProcessExit);
+      lifecycle.removeListener('SIGTERM', onSigterm);
+      lifecycle.removeListener('SIGHUP', onSighup);
+    };
+
+    const onTermination = (signal: TerminationSignal): void => {
+      restoreTerminal();
+      input.pause();
+      removeLifecycleListeners();
+      reraiseSignal(signal);
+    };
+
+    const onSigterm = (): void => onTermination('SIGTERM');
+    const onSighup = (): void => onTermination('SIGHUP');
+
     const cleanup = (): boolean => {
       if (settled) return false;
       settled = true;
@@ -482,7 +546,7 @@ export function multilineText(
       input.removeListener('end', onEnd);
       input.removeListener('close', onEnd);
       input.removeListener('error', onError);
-      exitEmitter.removeListener('exit', onProcessExit);
+      removeLifecycleListeners();
 
       restoreTerminal();
       input.pause();
@@ -586,10 +650,9 @@ export function multilineText(
     }
 
     try {
-      const newlineHint =
-        process.platform === 'win32'
-          ? 'Ctrl+J adds a line'
-          : 'Shift+Enter/Ctrl+J adds a line';
+      const newlineHint = supportsShiftEnter()
+        ? 'Shift+Enter/Ctrl+J adds a line'
+        : 'Ctrl+J adds a line';
 
       output.write(`\n${question}\n`);
       output.write(
@@ -599,7 +662,9 @@ export function multilineText(
       setRawMode.call(input, true);
       output.write(`${BRACKETED_PASTE_ON}${KITTY_KEYS_ON}${WIN32_INPUT_ON}`);
       modesEnabled = true;
-      exitEmitter.once('exit', onProcessExit);
+      lifecycle.once('exit', onProcessExit);
+      lifecycle.once('SIGTERM', onSigterm);
+      lifecycle.once('SIGHUP', onSighup);
 
       input.on('data', onData);
       input.once('end', onEnd);
