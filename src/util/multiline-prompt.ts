@@ -36,9 +36,7 @@ interface TerminalInputDecoderOptions {
   ctrlDSubmits?: boolean;
 }
 
-interface MultilineTextOptions {
-  enterSubmits?: boolean;
-  ctrlDSubmits?: boolean;
+interface MultilineTextOptions extends TerminalInputDecoderOptions {
   enhancedModes?: boolean;
   submitHint?: string;
   newlineHint?: string;
@@ -110,6 +108,10 @@ function consumeStringControl(text: string, start: number): number {
   return text.length;
 }
 
+/**
+ * Pasted text is content, not terminal control input. Remove CSI/OSC/DCS/APC
+ * framing before echoing or saving it, then retain only tab/LF among controls.
+ */
 function sanitizePastedText(text: string): string {
   let clean = '';
 
@@ -187,7 +189,18 @@ function withCount<T extends { count?: number }>(
   return (count > 1 ? { ...event, count } : event) as T;
 }
 
-function kittyEvent(sequence: string): MultilineInputEvent | null {
+function newlineEvent(count = 1): Extract<MultilineInputEvent, { type: 'newline' }> {
+  return withCount<{ type: 'newline'; count?: number }>({ type: 'newline' }, count);
+}
+
+function backspaceEvent(count = 1): Extract<MultilineInputEvent, { type: 'backspace' }> {
+  return withCount<{ type: 'backspace'; count?: number }>({ type: 'backspace' }, count);
+}
+
+function kittyEvent(
+  sequence: string,
+  options: Required<TerminalInputDecoderOptions>,
+): MultilineInputEvent | null {
   const match = /^\u001b\[([0-9:;]*)u$/.exec(sequence);
   if (!match) return null;
 
@@ -199,13 +212,18 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
   const encodedModifiers = Number(modifierParts[0] || '1');
   const eventType = Number(modifierParts[1] || '1');
 
-  if (eventType === 3) return { type: 'text', text: '' };
+  // 1 = press, 2 = repeat, 3 = release.
+  if (eventType === 3) return null;
 
   const modifiers = Math.max(0, encodedModifiers - 1);
   const shift = Boolean(modifiers & SHIFT_MASK);
   const ctrl = Boolean(modifiers & CTRL_MASK);
 
-  if (keyCode === 13) return { type: shift ? 'newline' : 'submit' };
+  if (keyCode === 13) {
+    if (!options.enterSubmits) return { type: 'newline' };
+    return shift ? { type: 'newline' } : { type: 'submit' };
+  }
+
   if (keyCode === 127) return { type: 'backspace' };
   if (keyCode === 9) return { type: 'text', text: '\t' };
 
@@ -216,8 +234,13 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
     .filter((code) => Number.isInteger(code) && code > 0 && code <= 0x10ffff);
   const associatedText = sanitizeAssociatedText(textCodes);
 
+  // Text-producing events take precedence over Ctrl shortcuts. This preserves
+  // AltGr-composed text on layouts where the terminal reports Ctrl+Alt.
   if (associatedText !== '') return { type: 'text', text: associatedText };
 
+  if (options.ctrlDSubmits && ctrl && (keyCode === 100 || keyCode === 68)) {
+    return { type: 'submit' };
+  }
   if (ctrl && (keyCode === 99 || keyCode === 67)) return { type: 'abort' };
   if (ctrl && (keyCode === 106 || keyCode === 74)) return { type: 'newline' };
 
@@ -227,10 +250,13 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
     return { type: 'text', text };
   }
 
-  return { type: 'text', text: '' };
+  return null;
 }
 
-function win32Event(sequence: string): Win32Decoded | null {
+function win32Event(
+  sequence: string,
+  options: Required<TerminalInputDecoderOptions>,
+): Win32Decoded | null {
   const match = /^\u001b\[([0-9]*);([0-9]*);([0-9]*);([01]?);([0-9]*);([0-9]*)_$/.exec(
     sequence,
   );
@@ -242,27 +268,18 @@ function win32Event(sequence: string): Win32Decoded | null {
   const controlState = Number(match[5] || '0');
   const repeatCount = Math.max(1, Math.min(1000, Number(match[6] || '1') || 1));
 
-  if (!keyDown) return { type: 'text', text: '' };
+  if (!keyDown) return null;
 
   const ctrl = Boolean(controlState & WIN32_CTRL_MASK);
   const shift = Boolean(controlState & WIN32_SHIFT_MASK);
 
   if (virtualKey === 13) {
-    return shift
-      ? withCount<{ type: 'newline'; count?: number }>({ type: 'newline' }, repeatCount)
-      : { type: 'submit' };
+    if (!options.enterSubmits) return newlineEvent(repeatCount);
+    return shift ? newlineEvent(repeatCount) : { type: 'submit' };
   }
 
-  if (virtualKey === 8) {
-    return withCount<{ type: 'backspace'; count?: number }>(
-      { type: 'backspace' },
-      repeatCount,
-    );
-  }
-
-  if (virtualKey === 9) {
-    return { type: 'text', text: '\t'.repeat(repeatCount) };
-  }
+  if (virtualKey === 8) return backspaceEvent(repeatCount);
+  if (virtualKey === 9) return { type: 'text', text: '\t'.repeat(repeatCount) };
 
   if (unicodeChar >= 0xd800 && unicodeChar <= 0xdfff) {
     return { type: 'utf16', unit: unicodeChar, repeatCount };
@@ -275,12 +292,11 @@ function win32Event(sequence: string): Win32Decoded | null {
     };
   }
 
+  if (options.ctrlDSubmits && ctrl && virtualKey === 68) return { type: 'submit' };
   if (ctrl && virtualKey === 67) return { type: 'abort' };
-  if (ctrl && virtualKey === 74) {
-    return withCount<{ type: 'newline'; count?: number }>({ type: 'newline' }, repeatCount);
-  }
+  if (ctrl && virtualKey === 74) return newlineEvent(repeatCount);
 
-  return { type: 'text', text: '' };
+  return null;
 }
 
 function removeLastGrapheme(text: string): string {
@@ -311,6 +327,7 @@ function isPossibleCsiPrefix(text: string): boolean {
   return true;
 }
 
+/** Whether the terminal is known to expose Shift+Enter distinctly. */
 export function supportsShiftEnter(
   platform: NodeJS.Platform = process.platform,
   environment: NodeJS.ProcessEnv = process.env,
@@ -320,12 +337,10 @@ export function supportsShiftEnter(
   if (environment.KITTY_WINDOW_ID) return true;
 
   const term = environment.TERM?.toLowerCase() ?? '';
-  if (term.includes('kitty')) return true;
-
-  const program = environment.TERM_PROGRAM?.toLowerCase();
-  return program === 'vscode';
+  return term.includes('kitty');
 }
 
+/** Whether the terminal is known to honor DECSET 2004 bracketed paste. */
 export function supportsBracketedPaste(
   platform: NodeJS.Platform = process.platform,
   environment: NodeJS.ProcessEnv = process.env,
@@ -341,17 +356,25 @@ export function supportsBracketedPaste(
   return program === 'vscode' || program === 'iterm.app';
 }
 
+/**
+ * Stateful terminal byte-stream decoder. Two editing contracts are supported:
+ * Enter-submit for terminals with reliable bracketed paste, and explicit-submit
+ * (Enter=newline, Ctrl+D=submit) for terminals where paste boundaries are not
+ * observable. Kitty/Win32 protocol events obey the same selected contract.
+ */
 export class TerminalInputDecoder {
   private pending = '';
   private inPaste = false;
   private pasteBuffer = '';
+  private suppressLeadingLF = false;
   private pendingWin32HighSurrogate: { unit: number; repeatCount: number } | null = null;
-  private readonly enterSubmits: boolean;
-  private readonly ctrlDSubmits: boolean;
+  private readonly options: Required<TerminalInputDecoderOptions>;
 
   constructor(options: TerminalInputDecoderOptions = {}) {
-    this.enterSubmits = options.enterSubmits ?? true;
-    this.ctrlDSubmits = options.ctrlDSubmits ?? false;
+    this.options = {
+      enterSubmits: options.enterSubmits ?? true,
+      ctrlDSubmits: options.ctrlDSubmits ?? false,
+    };
   }
 
   private appendWin32Event(
@@ -361,8 +384,6 @@ export class TerminalInputDecoder {
     if (!decoded) return;
 
     if (decoded.type !== 'utf16') {
-      if (decoded.type === 'text' && decoded.text === '') return;
-
       this.pendingWin32HighSurrogate = null;
       events.push(decoded);
       return;
@@ -395,6 +416,12 @@ export class TerminalInputDecoder {
     const events: MultilineInputEvent[] = [];
 
     for (;;) {
+      if (this.suppressLeadingLF) {
+        if (this.pending === '') break;
+        if (this.pending.startsWith('\n')) this.pending = this.pending.slice(1);
+        this.suppressLeadingLF = false;
+      }
+
       if (this.pending === '') break;
 
       if (this.inPaste) {
@@ -429,8 +456,18 @@ export class TerminalInputDecoder {
       const first = this.pending[0]!;
 
       if (first === '\r') {
-        this.pending = this.pending.slice(this.pending.startsWith('\r\n') ? 2 : 1);
-        events.push(this.enterSubmits ? { type: 'submit' } : { type: 'newline' });
+        const hasInlineLF = this.pending.startsWith('\r\n');
+        const splitCRLF = !hasInlineLF && this.pending.length === 1;
+        this.pending = this.pending.slice(hasInlineLF ? 2 : 1);
+
+        if (!this.options.enterSubmits && splitCRLF) {
+          // Native Windows/legacy paste may split CRLF across data events. Emit
+          // the newline immediately so physical Enter stays responsive, then
+          // suppress only an LF at the start of the very next chunk.
+          this.suppressLeadingLF = true;
+        }
+
+        events.push(this.options.enterSubmits ? { type: 'submit' } : { type: 'newline' });
         continue;
       }
 
@@ -440,7 +477,7 @@ export class TerminalInputDecoder {
         continue;
       }
 
-      if (first === '\u0004' && this.ctrlDSubmits) {
+      if (first === '\u0004' && this.options.ctrlDSubmits) {
         this.pending = this.pending.slice(1);
         events.push({ type: 'submit' });
         continue;
@@ -464,7 +501,7 @@ export class TerminalInputDecoder {
         const kitty = /^\u001b\[[0-9:;]+u/.exec(this.pending)?.[0];
         if (kitty) {
           this.pending = this.pending.slice(kitty.length);
-          const event = kittyEvent(kitty);
+          const event = kittyEvent(kitty, this.options);
           if (event) events.push(event);
           continue;
         }
@@ -474,7 +511,7 @@ export class TerminalInputDecoder {
         )?.[0];
         if (win32) {
           this.pending = this.pending.slice(win32.length);
-          this.appendWin32Event(win32Event(win32), events);
+          this.appendWin32Event(win32Event(win32, this.options), events);
           continue;
         }
 
@@ -488,6 +525,8 @@ export class TerminalInputDecoder {
           const tail = this.pending.slice(2);
           if (isPossibleCsiPrefix(tail)) break;
 
+          // Drop only the malformed introducer so the following CR, Ctrl+C,
+          // Unicode character, etc. is still handled normally.
           this.pending = this.pending.slice(2);
           continue;
         }
@@ -498,6 +537,7 @@ export class TerminalInputDecoder {
           continue;
         }
 
+        // Ignore an unknown/standalone Escape without eating the next byte.
         this.pending = this.pending.slice(1);
         continue;
       }
@@ -554,7 +594,7 @@ export function multilineText(
     let settled = false;
     let modesEnabled = false;
 
-    const restoreTerminal = (): void => {
+    function restoreTerminal(): void {
       if (modesEnabled) {
         try {
           output.write(`${WIN32_INPUT_OFF}${KITTY_KEYS_OFF}${BRACKETED_PASTE_OFF}`);
@@ -569,29 +609,19 @@ export function multilineText(
       } catch {
         // The input stream may already be closed.
       }
-    };
+    }
 
-    const onProcessExit = (): void => {
+    function onProcessExit(): void {
       restoreTerminal();
-    };
+    }
 
-    const removeLifecycleListeners = (): void => {
+    function removeLifecycleListeners(): void {
       lifecycle.removeListener('exit', onProcessExit);
       lifecycle.removeListener('SIGTERM', onSigterm);
       lifecycle.removeListener('SIGHUP', onSighup);
-    };
+    }
 
-    const onTermination = (signal: TerminationSignal): void => {
-      restoreTerminal();
-      input.pause();
-      removeLifecycleListeners();
-      reraiseSignal(signal);
-    };
-
-    const onSigterm = (): void => onTermination('SIGTERM');
-    const onSighup = (): void => onTermination('SIGHUP');
-
-    const cleanup = (): boolean => {
+    function cleanup(): boolean {
       if (settled) return false;
       settled = true;
 
@@ -604,9 +634,33 @@ export function multilineText(
       restoreTerminal();
       input.pause();
       return true;
-    };
+    }
 
-    const finish = (): void => {
+    function onTermination(signal: TerminationSignal): void {
+      if (!cleanup()) return;
+
+      try {
+        reraiseSignal(signal);
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+
+      // Normally the re-raised signal terminates the process. If another
+      // listener swallows it, reject instead of leaving a settled-looking UI
+      // backed by a permanently pending Promise.
+      reject(new PromptAborted());
+    }
+
+    function onSigterm(): void {
+      onTermination('SIGTERM');
+    }
+
+    function onSighup(): void {
+      onTermination('SIGHUP');
+    }
+
+    function finish(): void {
       const trimmed = value.trim();
 
       if (trimmed === '') {
@@ -618,15 +672,15 @@ export function multilineText(
       if (!cleanup()) return;
       output.write('\n');
       resolve(trimmed);
-    };
+    }
 
-    const abort = (): void => {
+    function abort(): void {
       if (!cleanup()) return;
       output.write('\n');
       reject(new PromptAborted());
-    };
+    }
 
-    const fail = (error: unknown): void => {
+    function fail(error: unknown): void {
       if (!cleanup()) return;
 
       try {
@@ -636,11 +690,12 @@ export function multilineText(
       }
 
       reject(error instanceof Error ? error : new Error(String(error)));
-    };
+    }
 
     const currentLine = (): string => value.slice(value.lastIndexOf('\n') + 1);
 
     const showEditSnapshot = (): void => {
+      // Append-only feedback avoids cursor-row math on wrapped/wide Unicode.
       output.write(`\n\u001b[2m  edit: \u001b[0m${currentLine()}`);
     };
 
@@ -746,7 +801,11 @@ export function multilineText(
   });
 }
 
-export function windowsMultilineText(
+/**
+ * Safe fallback when paste boundaries/modifier protocols are not known.
+ * Enter is always content; Ctrl+D is the only submit control.
+ */
+export function explicitSubmitMultilineText(
   question: string,
   input: MultilineInput,
   output: Writable,
@@ -767,3 +826,6 @@ export function windowsMultilineText(
     },
   );
 }
+
+/** Backwards-compatible name for the native-Windows explicit-submit mode. */
+export const windowsMultilineText = explicitSubmitMultilineText;
