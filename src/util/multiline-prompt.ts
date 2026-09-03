@@ -2,6 +2,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { Readable, Writable } from 'node:stream';
 
 import { PromptAborted } from './prompt.js';
+import { stripAnsi } from './ansi.js';
 
 export type MultilineInput = Readable & {
   isTTY?: boolean;
@@ -15,6 +16,11 @@ export type MultilineInputEvent =
   | { type: 'submit' }
   | { type: 'backspace' }
   | { type: 'abort' };
+
+interface ExitEmitter {
+  once(event: 'exit', listener: () => void): unknown;
+  removeListener(event: 'exit', listener: () => void): unknown;
+}
 
 const ESC = '\u001b';
 const PASTE_START = `${ESC}[200~`;
@@ -30,7 +36,9 @@ const KITTY_KEYS_ON = `${ESC}[>24u`;
 const KITTY_KEYS_OFF = `${ESC}[<u`;
 
 // Windows Terminal / ConPTY can report the Win32 key record, including Shift,
-// through a VT stream. Unsupported terminals ignore this private mode.
+// through a VT stream. This is useful to Unix-side clients such as WSL; native
+// Node on Windows consumes console INPUT_RECORDs before this representation is
+// exposed, so native Windows falls back to Ctrl+J for a newline.
 const WIN32_INPUT_ON = `${ESC}[?9001h`;
 const WIN32_INPUT_OFF = `${ESC}[?9001l`;
 
@@ -39,6 +47,7 @@ const SHIFT_MASK = 0b001;
 const WIN32_CTRL_MASK = 0x0004 | 0x0008;
 const WIN32_SHIFT_MASK = 0x0010;
 const ERASE_LINE = `${ESC}[2K`;
+const CURSOR_UP = `${ESC}[1A`;
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 function longestMarkerPrefixSuffix(value: string, marker: string): number {
@@ -49,6 +58,33 @@ function longestMarkerPrefixSuffix(value: string, marker: string): number {
   }
 
   return 0;
+}
+
+function isFallbackTextCodePoint(code: number): boolean {
+  if (code < 0x20 || code > 0x10ffff) return false;
+  if (code >= 0x7f && code <= 0x9f) return false;
+  if (code >= 0xd800 && code <= 0xdfff) return false;
+
+  // Kitty reserves the BMP Private Use Area for functional keys. Literal PUA
+  // text is still preserved when it arrives through the associated-text field;
+  // it must never be synthesized from the functional key code itself.
+  if (code >= 0xe000 && code <= 0xf8ff) return false;
+
+  return true;
+}
+
+function sanitizeAssociatedText(codes: number[]): string {
+  return codes
+    .filter(isFallbackTextCodePoint)
+    .map((code) => String.fromCodePoint(code))
+    .join('');
+}
+
+function sanitizePastedText(text: string): string {
+  return stripAnsi(text)
+    .replace(/\r\n?/g, '\n')
+    // Keep only the controls that are meaningful instruction text: tab and LF.
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
 }
 
 function kittyEvent(sequence: string): MultilineInputEvent | null {
@@ -70,8 +106,7 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
   const shift = Boolean(modifiers & SHIFT_MASK);
   const ctrl = Boolean(modifiers & CTRL_MASK);
 
-  if (ctrl && (keyCode === 99 || keyCode === 67)) return { type: 'abort' };
-  if (ctrl && (keyCode === 106 || keyCode === 74)) return { type: 'newline' };
+  // Structural editor keys win even if a terminal supplies associated text.
   if (keyCode === 13) return { type: shift ? 'newline' : 'submit' };
   if (keyCode === 127) return { type: 'backspace' };
   if (keyCode === 9) return { type: 'text', text: '\t' };
@@ -81,14 +116,19 @@ function kittyEvent(sequence: string): MultilineInputEvent | null {
     .filter((value) => value !== '')
     .map(Number)
     .filter((code) => Number.isInteger(code) && code > 0 && code <= 0x10ffff);
+  const associatedText = sanitizeAssociatedText(textCodes);
 
-  if (textCodes.length > 0) {
-    return { type: 'text', text: String.fromCodePoint(...textCodes) };
-  }
+  // Text-producing events take precedence over Ctrl shortcut interpretation.
+  // This is required for layouts where AltGr is represented as Ctrl+Alt.
+  if (associatedText !== '') return { type: 'text', text: associatedText };
+
+  if (ctrl && (keyCode === 99 || keyCode === 67)) return { type: 'abort' };
+  if (ctrl && (keyCode === 106 || keyCode === 74)) return { type: 'newline' };
 
   // Associated text is requested above, but retain a conservative fallback
-  // for terminals that implement report-all-keys without the text field.
-  if (!ctrl && keyCode >= 0x20 && keyCode <= 0x10ffff) {
+  // for terminals that report ordinary printable keys without that field.
+  // Kitty functional keys occupy the PUA and are deliberately excluded.
+  if (!ctrl && isFallbackTextCodePoint(keyCode)) {
     let text = String.fromCodePoint(keyCode);
     if (shift && /^[a-z]$/.test(text)) text = text.toUpperCase();
     return { type: 'text', text };
@@ -114,15 +154,20 @@ function win32Event(sequence: string): MultilineInputEvent | null {
   const ctrl = Boolean(controlState & WIN32_CTRL_MASK);
   const shift = Boolean(controlState & WIN32_SHIFT_MASK);
 
-  if (ctrl && virtualKey === 67) return { type: 'abort' }; // C
-  if (ctrl && virtualKey === 74) return { type: 'newline' }; // J
+  // Structural editor keys are handled before printable text.
   if (virtualKey === 13) return { type: shift ? 'newline' : 'submit' };
   if (virtualKey === 8) return { type: 'backspace' };
   if (virtualKey === 9) return { type: 'text', text: '\t' };
 
-  if (unicodeChar >= 0x20 && unicodeChar <= 0xffff) {
+  // A printable Unicode result means this is text input, even when Windows
+  // also reports Ctrl+Alt (AltGr). Never turn a composed character into a
+  // Ctrl+C/Ctrl+J editor shortcut.
+  if (isFallbackTextCodePoint(unicodeChar)) {
     return { type: 'text', text: String.fromCharCode(unicodeChar).repeat(repeatCount) };
   }
+
+  if (ctrl && virtualKey === 67) return { type: 'abort' }; // C
+  if (ctrl && virtualKey === 74) return { type: 'newline' }; // J
 
   return { type: 'text', text: '' };
 }
@@ -145,22 +190,7 @@ function removeLastGrapheme(text: string): string {
 export class TerminalInputDecoder {
   private pending = '';
   private inPaste = false;
-  private pastePendingCR = false;
-
-  private normalizePasteFragment(text: string, final: boolean): string {
-    let value = `${this.pastePendingCR ? '\r' : ''}${text}`;
-    this.pastePendingCR = false;
-
-    // A PTY may split Windows CRLF between arbitrary data events. Keep the
-    // trailing CR until the next paste fragment arrives so one logical newline
-    // cannot turn into two.
-    if (!final && value.endsWith('\r')) {
-      this.pastePendingCR = true;
-      value = value.slice(0, -1);
-    }
-
-    return value.replace(/\r\n?/g, '\n');
-  }
+  private pasteBuffer = '';
 
   feed(chunk: string): MultilineInputEvent[] {
     this.pending += chunk;
@@ -173,19 +203,21 @@ export class TerminalInputDecoder {
         const end = this.pending.indexOf(PASTE_END);
 
         if (end >= 0) {
-          const text = this.normalizePasteFragment(this.pending.slice(0, end), true);
+          this.pasteBuffer += this.pending.slice(0, end);
+          const text = sanitizePastedText(this.pasteBuffer);
           if (text !== '') events.push({ type: 'text', text });
 
+          this.pasteBuffer = '';
           this.pending = this.pending.slice(end + PASTE_END.length);
           this.inPaste = false;
           continue;
         }
 
+        // Keep only a possible partial paste-end marker in `pending`; buffering
+        // the paste body until the marker arrives makes CRLF and ANSI parsing
+        // independent of arbitrary PTY chunk boundaries.
         const keep = longestMarkerPrefixSuffix(this.pending, PASTE_END);
-        const ready = this.pending.slice(0, this.pending.length - keep);
-        const text = this.normalizePasteFragment(ready, false);
-        if (text !== '') events.push({ type: 'text', text });
-
+        this.pasteBuffer += this.pending.slice(0, this.pending.length - keep);
         this.pending = this.pending.slice(this.pending.length - keep);
         break;
       }
@@ -193,7 +225,7 @@ export class TerminalInputDecoder {
       if (this.pending.startsWith(PASTE_START)) {
         this.pending = this.pending.slice(PASTE_START.length);
         this.inPaste = true;
-        this.pastePendingCR = false;
+        this.pasteBuffer = '';
         continue;
       }
 
@@ -301,13 +333,14 @@ export class TerminalInputDecoder {
 /**
  * Paste-safe multiline editor for long reviewer instructions.
  *
- * Enter submits. Shift+Enter adds a newline when the terminal exposes the
- * modifier through Kitty or Win32 input mode; Ctrl+J is the legacy fallback.
+ * Enter submits. Shift+Enter adds a newline where the terminal protocol
+ * exposes the modifier; Ctrl+J is always the explicit newline fallback.
  */
 export function multilineText(
   question: string,
   input: MultilineInput,
   output: Writable,
+  exitEmitter: ExitEmitter = process,
 ): Promise<string> {
   const setRawMode = input.setRawMode;
 
@@ -323,6 +356,29 @@ export function multilineText(
     let settled = false;
     let modesEnabled = false;
 
+    const restoreTerminal = (): void => {
+      if (modesEnabled) {
+        try {
+          output.write(`${WIN32_INPUT_OFF}${KITTY_KEYS_OFF}${BRACKETED_PASTE_OFF}`);
+        } catch {
+          // Terminal restoration must continue even if the output stream died.
+        }
+        modesEnabled = false;
+      }
+
+      try {
+        setRawMode.call(input, wasRaw);
+      } catch {
+        // The input stream may already be closed; there is nothing left to restore.
+      }
+    };
+
+    const onProcessExit = (): void => {
+      // `exit` is synchronous and there is no next prompt to resume. Best effort
+      // restoration prevents a normal process.exit() path from stranding modes.
+      restoreTerminal();
+    };
+
     const cleanup = (): boolean => {
       if (settled) return false;
       settled = true;
@@ -331,20 +387,9 @@ export function multilineText(
       input.removeListener('end', onEnd);
       input.removeListener('close', onEnd);
       input.removeListener('error', onError);
+      exitEmitter.removeListener('exit', onProcessExit);
 
-      if (modesEnabled) {
-        try {
-          output.write(`${WIN32_INPUT_OFF}${KITTY_KEYS_OFF}${BRACKETED_PASTE_OFF}`);
-        } catch {
-          // Terminal restoration must continue even if the output stream died.
-        }
-      }
-
-      try {
-        setRawMode.call(input, wasRaw);
-      } catch {
-        // The input stream may already be closed; there is nothing left to restore.
-      }
+      restoreTerminal();
       input.pause();
       return true;
     };
@@ -376,10 +421,17 @@ export function multilineText(
       reject(error instanceof Error ? error : new Error(String(error)));
     };
 
-    const redrawCurrentLine = (): void => {
+    const currentLine = (): { lineStart: number; line: string; prefix: string } => {
       const lineStart = value.lastIndexOf('\n') + 1;
-      const line = value.slice(lineStart);
-      const prefix = lineStart === 0 ? '> ' : '';
+      return {
+        lineStart,
+        line: value.slice(lineStart),
+        prefix: lineStart === 0 ? '> ' : '',
+      };
+    };
+
+    const redrawCurrentLine = (): void => {
+      const { line, prefix } = currentLine();
       output.write(`\r${ERASE_LINE}${prefix}${line}`);
     };
 
@@ -396,15 +448,23 @@ export function multilineText(
           output.write('\n');
           return false;
         case 'backspace': {
-          if (value === '' || value.endsWith('\n')) {
+          if (value === '') {
             output.write('\u0007');
             return false;
           }
 
-          const lineStart = value.lastIndexOf('\n') + 1;
-          const line = value.slice(lineStart);
-          const shortened = removeLastGrapheme(line);
-          value = `${value.slice(0, lineStart)}${shortened}`;
+          if (value.endsWith('\n')) {
+            // Join the current empty line back onto the preceding one. Move the
+            // terminal cursor up and redraw that logical line so editing can
+            // continue naturally across a newline boundary.
+            value = value.slice(0, -1);
+            const { line, prefix } = currentLine();
+            output.write(`${CURSOR_UP}\r${ERASE_LINE}${prefix}${line}`);
+            return false;
+          }
+
+          const { lineStart, line } = currentLine();
+          value = `${value.slice(0, lineStart)}${removeLastGrapheme(line)}`;
           redrawCurrentLine();
           return false;
         }
@@ -433,14 +493,20 @@ export function multilineText(
     }
 
     try {
+      const newlineHint =
+        process.platform === 'win32'
+          ? 'Ctrl+J adds a line'
+          : 'Shift+Enter/Ctrl+J adds a line';
+
       output.write(`\n${question}\n`);
       output.write(
-        '\u001b[2m  Enter submits · Shift+Enter/Ctrl+J adds a line · paste is multiline-safe\u001b[0m\n> ',
+        `\u001b[2m  Enter submits · ${newlineHint} · paste is multiline-safe\u001b[0m\n> `,
       );
 
       setRawMode.call(input, true);
       output.write(`${BRACKETED_PASTE_ON}${KITTY_KEYS_ON}${WIN32_INPUT_ON}`);
       modesEnabled = true;
+      exitEmitter.once('exit', onProcessExit);
 
       input.on('data', onData);
       input.once('end', onEnd);
