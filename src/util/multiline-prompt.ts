@@ -576,9 +576,9 @@ export function multilineText(
   reraiseSignal: (signal: TerminationSignal) => void = defaultReraiseSignal,
   options: MultilineTextOptions = {},
 ): Promise<string> {
-  const setRawMode = input.setRawMode;
+  const rawMode = input.setRawMode?.bind(input);
 
-  if (typeof setRawMode !== 'function') {
+  if (!rawMode) {
     throw new Error('Multiline input requires a terminal with raw input support.');
   }
 
@@ -605,7 +605,7 @@ export function multilineText(
       }
 
       try {
-        setRawMode.call(input, wasRaw);
+        rawMode(wasRaw);
       } catch {
         // The input stream may already be closed.
       }
@@ -779,7 +779,7 @@ export function multilineText(
         `\u001b[2m  ${submitHint} · ${newlineHint}${pasteHint}\u001b[0m\n> `,
       );
 
-      setRawMode.call(input, true);
+      rawMode(true);
 
       if (enhancedModes) {
         output.write(`${BRACKETED_PASTE_ON}${KITTY_KEYS_ON}${WIN32_INPUT_ON}`);
