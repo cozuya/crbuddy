@@ -17,12 +17,10 @@ import { isVersionAtLeast } from '../adapters/version.js';
 const DIM = '\u001B[2m';
 const RESET = '\u001B[0m';
 const CLEAR_LINE = '\u001B[2K\r';
-// OSC permits either BEL or ST as its terminator. Use ST so native progress
-// updates cannot be mistaken for audible bells by macOS terminals; the only
-// intentional BEL is the explicit completion bell below.
+const BEL = '\u0007';
 const OSC_ST = '\u001B\\';
-const TAB_PROGRESS_INDETERMINATE = `\u001B]9;4;3;0${OSC_ST}`;
-const TAB_PROGRESS_CLEAR = `\u001B]9;4;0;0${OSC_ST}`;
+const TAB_PROGRESS_INDETERMINATE = '\u001B]9;4;3;0';
+const TAB_PROGRESS_CLEAR = '\u001B]9;4;0;0';
 
 const FRAMES = [
   '\u280B',
@@ -57,6 +55,16 @@ export function supportsTerminalProgress(environment: NodeJS.ProcessEnv): boolea
   if (program === 'ghostty') return isVersionAtLeast(version, '1.2.0');
 
   return false;
+}
+
+/**
+ * iTerm documents ST as the OSC 9;4 terminator. Using BEL there can surface
+ * as an audible notification, which makes lane/progress updates sound like
+ * completion. Keep the documented BEL framing for Windows Terminal and the
+ * other supported implementations.
+ */
+function progressTerminator(environment: NodeJS.ProcessEnv): string {
+  return environment.TERM_PROGRAM?.toLowerCase() === 'iterm.app' ? OSC_ST : BEL;
 }
 
 interface ProgressOutput {
@@ -111,7 +119,9 @@ export class Progress {
     // window, or taskbar progress indicator. VS Code receives the state too,
     // though it displays it only when `${progress}` is in its title template.
     if (supportsTerminalProgress(this.environment) && !this.tabProgressVisible) {
-      this.statusOutput.write(TAB_PROGRESS_INDETERMINATE);
+      this.statusOutput.write(
+        `${TAB_PROGRESS_INDETERMINATE}${progressTerminator(this.environment)}`,
+      );
       this.tabProgressVisible = true;
     }
 
@@ -136,7 +146,9 @@ export class Progress {
     this.pausePulse();
 
     if (this.tabProgressVisible && this.statusOutput) {
-      this.statusOutput.write(TAB_PROGRESS_CLEAR);
+      this.statusOutput.write(
+        `${TAB_PROGRESS_CLEAR}${progressTerminator(this.environment)}`,
+      );
       this.tabProgressVisible = false;
     }
 
@@ -156,7 +168,7 @@ export class Progress {
 
   /** TTY only — this is the one intentional audible completion signal. */
   bell(): void {
-    this.terminalOutput()?.write('\u0007');
+    this.terminalOutput()?.write(BEL);
   }
 
   private withStatusHidden(write: () => void): void {
