@@ -556,14 +556,14 @@ async function buildPanel(
           'operation, so this lane needs explicit review instructions.',
         'warn',
       );
-      instructions = await ui.text('Review instructions');
+      instructions = await ui.multiline('Review instructions');
     } else {
       const custom = await ui.confirm(
         `Give this reviewer custom instructions? ` +
           `(default: ${adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'})`,
         false,
       );
-      instructions = custom ? await ui.text('Review instructions') : undefined;
+      instructions = custom ? await ui.multiline('Review instructions') : undefined;
     }
 
     const seen = new Set(panel.map((entry) => entry.id));
