@@ -53,6 +53,8 @@ test('paste and Shift+Enter are advertised only for known capable terminals', ()
   );
   assert.equal(supportsShiftEnter('darwin', { TERM_PROGRAM: 'iTerm.app' }), false);
 
+  // VS Code supports bracketed paste, but its POSIX terminal does not
+  // guarantee the Kitty/Win32 key protocol needed to distinguish Shift+Enter.
   assert.equal(supportsBracketedPaste('linux', { TERM_PROGRAM: 'vscode' }), true);
-  assert.equal(supportsShiftEnter('linux', { TERM_PROGRAM: 'vscode' }), true);
+  assert.equal(supportsShiftEnter('linux', { TERM_PROGRAM: 'vscode' }), false);
 });
