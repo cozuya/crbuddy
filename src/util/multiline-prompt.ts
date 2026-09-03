@@ -267,7 +267,6 @@ export function multilineText(
     const decoder = new TerminalInputDecoder();
     const utf8 = new StringDecoder('utf8');
     const wasRaw = input.isRaw ?? false;
-    const wasFlowing = input.readableFlowing;
     let value = '';
     let settled = false;
 
@@ -277,7 +276,7 @@ export function multilineText(
       input.removeListener('data', onData);
       output.write(`${WIN32_INPUT_OFF}${KITTY_KEYS_OFF}${BRACKETED_PASTE_OFF}`);
       input.setRawMode?.(wasRaw);
-      if (wasFlowing !== true) input.pause();
+      input.pause();
     };
 
     const finish = (): void => {
