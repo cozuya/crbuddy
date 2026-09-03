@@ -54,8 +54,14 @@ const KITTY_KEYS_OFF = `${ESC}[<u`;
 const WIN32_INPUT_ON = `${ESC}[?9001h`;
 const WIN32_INPUT_OFF = `${ESC}[?9001l`;
 
-const CTRL_MASK = 0b100;
-const SHIFT_MASK = 0b001;
+const SHIFT_MASK = 0b00000001;
+const ALT_MASK = 0b00000010;
+const CTRL_MASK = 0b00000100;
+const SUPER_MASK = 0b00001000;
+const HYPER_MASK = 0b00010000;
+const META_MASK = 0b00100000;
+const KITTY_SHORTCUT_MODIFIER_MASK =
+  ALT_MASK | CTRL_MASK | SUPER_MASK | HYPER_MASK | META_MASK;
 const WIN32_CTRL_MASK = 0x0004 | 0x0008;
 const WIN32_SHIFT_MASK = 0x0010;
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -234,8 +240,8 @@ function kittyEvent(
     .filter((code) => Number.isInteger(code) && code > 0 && code <= 0x10ffff);
   const associatedText = sanitizeAssociatedText(textCodes);
 
-  // Text-producing events take precedence over Ctrl shortcuts. This preserves
-  // AltGr-composed text on layouts where the terminal reports Ctrl+Alt.
+  // Text-producing events take precedence over shortcut modifiers. This keeps
+  // AltGr/composed text intact when the terminal reports associated text.
   if (associatedText !== '') return { type: 'text', text: associatedText };
 
   if (options.ctrlDSubmits && ctrl && (keyCode === 100 || keyCode === 68)) {
@@ -244,7 +250,13 @@ function kittyEvent(
   if (ctrl && (keyCode === 99 || keyCode === 67)) return { type: 'abort' };
   if (ctrl && (keyCode === 106 || keyCode === 74)) return { type: 'newline' };
 
-  if (!ctrl && isKittyFallbackTextCodePoint(keyCode)) {
+  // Without associated text, Alt/Meta/Super/Hyper keypresses are shortcuts,
+  // not literal text. Caps/Num-lock bits are intentionally not part of this
+  // mask so ordinary typing still falls back to the reported key code.
+  if (
+    !(modifiers & KITTY_SHORTCUT_MODIFIER_MASK) &&
+    isKittyFallbackTextCodePoint(keyCode)
+  ) {
     let text = String.fromCodePoint(keyCode);
     if (shift && /^[a-z]$/.test(text)) text = text.toUpperCase();
     return { type: 'text', text };
@@ -354,6 +366,19 @@ export function supportsBracketedPaste(
 
   const program = environment.TERM_PROGRAM?.toLowerCase();
   return program === 'vscode' || program === 'iterm.app';
+}
+
+/** Shared key/paste hint policy for the prompt and injected wizard seam. */
+export function multilineTerminalHints(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): { newlineHint: string; pasteSafe: boolean } {
+  return {
+    newlineHint: supportsShiftEnter(platform, environment)
+      ? 'Shift+Enter/Ctrl+J adds a line'
+      : 'Ctrl+J adds a line',
+    pasteSafe: supportsBracketedPaste(platform, environment),
+  };
 }
 
 /**
@@ -773,12 +798,9 @@ export function multilineText(
 
     try {
       const submitHint = options.submitHint ?? 'Enter submits';
-      const newlineHint =
-        options.newlineHint ??
-        (supportsShiftEnter()
-          ? 'Shift+Enter/Ctrl+J adds a line'
-          : 'Ctrl+J adds a line');
-      const pasteSafe = options.pasteSafe ?? supportsBracketedPaste();
+      const terminalHints = multilineTerminalHints();
+      const newlineHint = options.newlineHint ?? terminalHints.newlineHint;
+      const pasteSafe = options.pasteSafe ?? terminalHints.pasteSafe;
       const pasteHint = pasteSafe ? ' · paste is multiline-safe' : '';
 
       output.write(`\n${question}\n`);
@@ -834,6 +856,3 @@ export function explicitSubmitMultilineText(
     },
   );
 }
-
-/** Backwards-compatible name for the native-Windows explicit-submit mode. */
-export const windowsMultilineText = explicitSubmitMultilineText;
