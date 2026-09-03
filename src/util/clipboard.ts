@@ -40,7 +40,7 @@ export function isWsl(
  */
 export function encodeForClipboard(
   text: string,
-  encoding: BufferEncoding = 'utf8',
+  encoding: BufferEncoding = process.platform === 'win32' ? 'utf16le' : 'utf8',
 ): Buffer {
   return Buffer.from(text, encoding);
 }
