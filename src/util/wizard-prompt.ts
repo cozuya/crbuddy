@@ -39,6 +39,8 @@ export interface WizardUIOptions {
   output?: Writable & { isTTY?: boolean };
   /** Test seam; production callers should let the streams decide. */
   interactive?: boolean;
+  /** Test seam for the native-Windows multiline fallback. */
+  platform?: NodeJS.Platform;
   loadClack?: () => Promise<typeof import('@clack/prompts')>;
 }
 
@@ -57,7 +59,12 @@ export async function createWizardUI(
   if (!interactive) return new LineWizardUI();
 
   const clack = await (options.loadClack ?? (() => import('@clack/prompts')))();
-  return new ClackWizardUI(clack, input, output);
+  return new ClackWizardUI(
+    clack,
+    input,
+    output,
+    options.platform ?? process.platform,
+  );
 }
 
 class LineWizardUI implements WizardUI {
@@ -130,6 +137,7 @@ class ClackWizardUI implements WizardUI {
     private readonly clack: Clack,
     private readonly input: MultilineInput,
     private readonly output: Writable,
+    private readonly platform: NodeJS.Platform,
   ) {}
 
   intro(message: string): void {
@@ -233,7 +241,25 @@ class ClackWizardUI implements WizardUI {
     return value === '' && fallback !== '' ? fallback : value;
   }
 
-  multiline(question: string): Promise<string> {
+  async multiline(question: string): Promise<string> {
+    if (this.platform === 'win32') {
+      // Native Node on Windows receives console INPUT_RECORDs after libuv has
+      // already erased the distinction between physical Enter and pasted CRs.
+      // Clack's explicit submit control keeps arbitrary multiline paste safe:
+      // Enter always adds a line; Tab focuses [submit], then Enter submits.
+      const result = await this.clack.multiline({
+        message: `${question} (Enter adds a line; Tab to submit)`,
+        showSubmit: true,
+        validate(value) {
+          return (value ?? '').trim() === '' ? 'A value is required.' : undefined;
+        },
+        input: this.input,
+        output: this.output,
+      });
+
+      return this.valueOrAbort(result ?? '').trim();
+    }
+
     return multilineText(question, this.input, this.output);
   }
 
