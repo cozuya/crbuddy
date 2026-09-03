@@ -143,6 +143,7 @@ test('Win32 UTF-16 surrogate records combine into supplementary characters', () 
   assert.deepEqual(
     decode(
       '\u001b[0;0;55357;1;0;1_',
+      '\u001b[0;0;55357;0;0;1_',
       '\u001b[0;0;56832;1;0;1_',
     ),
     [{ type: 'text', text: '😀' }],
@@ -150,9 +151,7 @@ test('Win32 UTF-16 surrogate records combine into supplementary characters', () 
 });
 
 test('Win32 input ignores key-up records and emits BMP Unicode key-down text', () => {
-  assert.deepEqual(decode('\u001b[65;30;65;0;16;1_'), [
-    { type: 'text', text: '' },
-  ]);
+  assert.deepEqual(decode('\u001b[65;30;65;0;16;1_'), []);
   assert.deepEqual(decode('\u001b[65;30;65;1;16;1_'), [
     { type: 'text', text: 'A' },
   ]);
