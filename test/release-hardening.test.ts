@@ -45,11 +45,13 @@ test('paste and Shift+Enter are advertised only for known capable terminals', ()
   );
   assert.equal(supportsShiftEnter('linux', { TERM_PROGRAM: 'Apple_Terminal' }), false);
 
+  // iTerm reliably supports bracketed paste, but app-controlled key reporting
+  // (needed to distinguish Shift+Enter) can be disabled per profile.
   assert.equal(
     supportsBracketedPaste('darwin', { TERM_PROGRAM: 'iTerm.app' }),
     true,
   );
-  assert.equal(supportsShiftEnter('darwin', { TERM_PROGRAM: 'iTerm.app' }), true);
+  assert.equal(supportsShiftEnter('darwin', { TERM_PROGRAM: 'iTerm.app' }), false);
 
   assert.equal(supportsBracketedPaste('linux', { TERM_PROGRAM: 'vscode' }), true);
   assert.equal(supportsShiftEnter('linux', { TERM_PROGRAM: 'vscode' }), true);
