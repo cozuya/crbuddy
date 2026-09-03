@@ -87,19 +87,29 @@ test('supported terminals receive indeterminate progress until the pulse stops',
     const progress = new Progress(stderr, stdout, environment);
 
     progress.startPulse(Date.now());
-    assert.equal(stdout.value, '\u001B]9;4;3;0\u0007');
+    assert.equal(stdout.value, '\u001B]9;4;3;0\u001B\\');
+    assert.equal(
+      stdout.value.includes('\u0007'),
+      false,
+      'native progress framing must not ring the terminal bell',
+    );
 
     progress.laneStarted('Codex CLI');
     progress.pausePulse();
     assert.ok(
-      !stdout.value.includes('\u001B]9;4;0;0\u0007'),
+      !stdout.value.includes('\u001B]9;4;0;0\u001B\\'),
       'pausing the inline animation must leave native terminal progress active',
     );
     progress.stopPulse();
 
     assert.ok(
-      stdout.value.endsWith('\u001B]9;4;0;0\u0007'),
+      stdout.value.endsWith('\u001B]9;4;0;0\u001B\\'),
       'the native terminal progress state must be cleared on completion',
+    );
+    assert.equal(
+      stdout.value.includes('\u0007'),
+      false,
+      'native progress updates must remain silent through completion',
     );
   }
 });
@@ -146,11 +156,12 @@ test('process exit cleanup clears native terminal progress without a finally', (
   });
 
   progress.startPulse(Date.now());
-  assert.equal(stdout.value, '\u001B]9;4;3;0\u0007');
+  assert.equal(stdout.value, '\u001B]9;4;3;0\u001B\\');
 
   onExit?.();
 
-  assert.ok(stdout.value.endsWith('\u001B]9;4;0;0\u0007'));
+  assert.ok(stdout.value.endsWith('\u001B]9;4;0;0\u001B\\'));
+  assert.equal(stdout.value.includes('\u0007'), false);
 });
 
 test('the completion bell uses a TTY and stays out of redirected output', () => {
