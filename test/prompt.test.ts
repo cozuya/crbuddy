@@ -38,7 +38,7 @@ test('non-TTY wizard creation does not load the Clack adapter', async () => {
   assert.equal(loads, 0);
 });
 
-test('the TTY adapter maps defaults and disabled choices into Clack', async () => {
+test('the TTY adapter maps defaults and disabled choices into Clack without helper footer', async () => {
   let received: Record<string, unknown> | undefined;
   const input = new PassThrough();
   const output = new PassThrough();
@@ -66,6 +66,7 @@ test('the TTY adapter maps defaults and disabled choices into Clack', async () =
 
   assert.equal(value, 'second');
   assert.equal(received?.initialValue, 'second');
+  assert.equal(received?.showInstructions, false);
   assert.deepEqual(received?.options, [
     { label: 'First', value: 'first', disabled: true },
     { label: 'Second', value: 'second', hint: 'recommended' },
@@ -121,6 +122,26 @@ test('native Windows multiline preserves pasted tabs and CRs until Ctrl+D submit
   input.write('\u0004');
 
   assert.equal(await result, 'first\n\tsecond');
+  assert.deepEqual(input.rawStates, [true, false]);
+});
+
+test('unknown POSIX terminals also use explicit-submit multiline mode', async () => {
+  const input = new TtyInput();
+  const output = new PassThrough();
+  const ui = await createWizardUI({
+    interactive: true,
+    platform: 'darwin',
+    environment: { TERM_PROGRAM: 'Apple_Terminal' },
+    input,
+    output,
+    loadClack: async () => fakeClack(),
+  });
+
+  const result = ui.multiline('Review instructions');
+  input.write('first\rsecond\r');
+  input.write('\u0004');
+
+  assert.equal(await result, 'first\nsecond');
   assert.deepEqual(input.rawStates, [true, false]);
 });
 
