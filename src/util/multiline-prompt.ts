@@ -38,10 +38,8 @@ const CTRL_MASK = 0b100;
 const SHIFT_MASK = 0b001;
 const WIN32_CTRL_MASK = 0x0004 | 0x0008;
 const WIN32_SHIFT_MASK = 0x0010;
-
-function normalizePastedText(text: string): string {
-  return text.replace(/\r\n?/g, '\n');
-}
+const ERASE_LINE = `${ESC}[2K`;
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
 function longestMarkerPrefixSuffix(value: string, marker: string): number {
   const max = Math.min(value.length, marker.length - 1);
@@ -129,6 +127,16 @@ function win32Event(sequence: string): MultilineInputEvent | null {
   return { type: 'text', text: '' };
 }
 
+function removeLastGrapheme(text: string): string {
+  let lastIndex = -1;
+
+  for (const segment of GRAPHEMES.segment(text)) {
+    lastIndex = segment.index;
+  }
+
+  return lastIndex < 0 ? text : text.slice(0, lastIndex);
+}
+
 /**
  * Stateful byte-stream decoder for the small terminal protocol surface the
  * review-instructions editor needs. Keeping this pure makes chunk-boundary
@@ -137,6 +145,22 @@ function win32Event(sequence: string): MultilineInputEvent | null {
 export class TerminalInputDecoder {
   private pending = '';
   private inPaste = false;
+  private pastePendingCR = false;
+
+  private normalizePasteFragment(text: string, final: boolean): string {
+    let value = `${this.pastePendingCR ? '\r' : ''}${text}`;
+    this.pastePendingCR = false;
+
+    // A PTY may split Windows CRLF between arbitrary data events. Keep the
+    // trailing CR until the next paste fragment arrives so one logical newline
+    // cannot turn into two.
+    if (!final && value.endsWith('\r')) {
+      this.pastePendingCR = true;
+      value = value.slice(0, -1);
+    }
+
+    return value.replace(/\r\n?/g, '\n');
+  }
 
   feed(chunk: string): MultilineInputEvent[] {
     this.pending += chunk;
@@ -149,12 +173,9 @@ export class TerminalInputDecoder {
         const end = this.pending.indexOf(PASTE_END);
 
         if (end >= 0) {
-          if (end > 0) {
-            events.push({
-              type: 'text',
-              text: normalizePastedText(this.pending.slice(0, end)),
-            });
-          }
+          const text = this.normalizePasteFragment(this.pending.slice(0, end), true);
+          if (text !== '') events.push({ type: 'text', text });
+
           this.pending = this.pending.slice(end + PASTE_END.length);
           this.inPaste = false;
           continue;
@@ -162,9 +183,9 @@ export class TerminalInputDecoder {
 
         const keep = longestMarkerPrefixSuffix(this.pending, PASTE_END);
         const ready = this.pending.slice(0, this.pending.length - keep);
-        if (ready !== '') {
-          events.push({ type: 'text', text: normalizePastedText(ready) });
-        }
+        const text = this.normalizePasteFragment(ready, false);
+        if (text !== '') events.push({ type: 'text', text });
+
         this.pending = this.pending.slice(this.pending.length - keep);
         break;
       }
@@ -172,6 +193,7 @@ export class TerminalInputDecoder {
       if (this.pending.startsWith(PASTE_START)) {
         this.pending = this.pending.slice(PASTE_START.length);
         this.inPaste = true;
+        this.pastePendingCR = false;
         continue;
       }
 
@@ -215,7 +237,12 @@ export class TerminalInputDecoder {
           continue;
         }
 
-        const win32 = /^\u001b\[[0-9;]+_/.exec(this.pending)?.[0];
+        // Match the exact grammar win32Event accepts. A looser prefix matcher
+        // can consume a sequence and then silently discard it when parsing
+        // fails.
+        const win32 = /^\u001b\[[0-9]+;[0-9]+;[0-9]+;[01];[0-9]+;[0-9]+_/.exec(
+          this.pending,
+        )?.[0];
         if (win32) {
           this.pending = this.pending.slice(win32.length);
           const event = win32Event(win32);
@@ -232,14 +259,37 @@ export class TerminalInputDecoder {
           continue;
         }
 
-        // Unknown single-escape sequence: discard Escape and keep parsing the
-        // following byte as ordinary input.
+        // SS3 is the common application-cursor encoding (ESC O A, etc.). Do
+        // not leak the printable tail into the saved instructions.
+        if (this.pending.startsWith(`${ESC}O`)) {
+          if (this.pending.length < 3) break;
+          this.pending = this.pending.slice(3);
+          continue;
+        }
+
+        // Alt/meta keys arrive as ESC plus the ordinary key in legacy mode.
+        // Neither byte is instruction text, so consume the pair together.
+        this.pending = this.pending.slice(2);
+        continue;
+      }
+
+      if (first === '\t') {
+        this.pending = this.pending.slice(1);
+        events.push({ type: 'text', text: '\t' });
+        continue;
+      }
+
+      const code = first.charCodeAt(0);
+      if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+        // Raw-mode editing keys such as Ctrl+A/Ctrl+D/Ctrl+U are control
+        // events, not text. Ignore unsupported ones rather than persisting
+        // invisible bytes into config.json.
         this.pending = this.pending.slice(1);
         continue;
       }
 
-      const nextControl = this.pending.search(/[\u001b\r\n\u0003\u007f\b]/);
-      const end = nextControl <= 0 ? this.pending.length : nextControl;
+      const nextControl = this.pending.search(/[\u0000-\u001f\u007f-\u009f]/);
+      const end = nextControl < 0 ? this.pending.length : nextControl;
       events.push({ type: 'text', text: this.pending.slice(0, end) });
       this.pending = this.pending.slice(end);
     }
@@ -269,14 +319,32 @@ export function multilineText(
     const wasRaw = input.isRaw ?? false;
     let value = '';
     let settled = false;
+    let modesEnabled = false;
 
-    const cleanup = (): void => {
-      if (settled) return;
+    const cleanup = (): boolean => {
+      if (settled) return false;
       settled = true;
+
       input.removeListener('data', onData);
-      output.write(`${WIN32_INPUT_OFF}${KITTY_KEYS_OFF}${BRACKETED_PASTE_OFF}`);
-      input.setRawMode?.(wasRaw);
+      input.removeListener('end', onEnd);
+      input.removeListener('close', onEnd);
+      input.removeListener('error', onError);
+
+      if (modesEnabled) {
+        try {
+          output.write(`${WIN32_INPUT_OFF}${KITTY_KEYS_OFF}${BRACKETED_PASTE_OFF}`);
+        } catch {
+          // Terminal restoration must continue even if the output stream died.
+        }
+      }
+
+      try {
+        input.setRawMode?.(wasRaw);
+      } catch {
+        // The input stream may already be closed; there is nothing left to restore.
+      }
       input.pause();
+      return true;
     };
 
     const finish = (): void => {
@@ -285,15 +353,32 @@ export function multilineText(
         output.write('\u0007');
         return;
       }
-      cleanup();
+      if (!cleanup()) return;
       output.write('\n');
       resolve(trimmed);
     };
 
     const abort = (): void => {
-      cleanup();
+      if (!cleanup()) return;
       output.write('\n');
       reject(new PromptAborted());
+    };
+
+    const fail = (error: unknown): void => {
+      if (!cleanup()) return;
+      try {
+        output.write('\n');
+      } catch {
+        // Preserve the original input failure.
+      }
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+
+    const redrawCurrentLine = (): void => {
+      const lineStart = value.lastIndexOf('\n') + 1;
+      const line = value.slice(lineStart);
+      const prefix = lineStart === 0 ? '> ' : '';
+      output.write(`\r${ERASE_LINE}${prefix}${line}`);
     };
 
     const apply = (event: MultilineInputEvent): boolean => {
@@ -313,10 +398,12 @@ export function multilineText(
             output.write('\u0007');
             return false;
           }
-          const codepoints = Array.from(value);
-          codepoints.pop();
-          value = codepoints.join('');
-          output.write('\b \b');
+
+          const lineStart = value.lastIndexOf('\n') + 1;
+          const line = value.slice(lineStart);
+          const shortened = removeLastGrapheme(line);
+          value = `${value.slice(0, lineStart)}${shortened}`;
+          redrawCurrentLine();
           return false;
         }
         case 'submit':
@@ -335,14 +422,31 @@ export function multilineText(
       }
     }
 
-    output.write(`\n${question}\n`);
-    output.write(
-      '\u001b[2m  Enter submits · Shift+Enter/Ctrl+J adds a line · paste is multiline-safe\u001b[0m\n> ',
-    );
-    output.write(`${BRACKETED_PASTE_ON}${KITTY_KEYS_ON}${WIN32_INPUT_ON}`);
+    function onEnd(): void {
+      abort();
+    }
 
-    input.setRawMode?.(true);
-    input.resume();
-    input.on('data', onData);
+    function onError(error: Error): void {
+      fail(error);
+    }
+
+    try {
+      output.write(`\n${question}\n`);
+      output.write(
+        '\u001b[2m  Enter submits · Shift+Enter/Ctrl+J adds a line · paste is multiline-safe\u001b[0m\n> ',
+      );
+
+      input.setRawMode(true);
+      output.write(`${BRACKETED_PASTE_ON}${KITTY_KEYS_ON}${WIN32_INPUT_ON}`);
+      modesEnabled = true;
+
+      input.on('data', onData);
+      input.once('end', onEnd);
+      input.once('close', onEnd);
+      input.once('error', onError);
+      input.resume();
+    } catch (error) {
+      fail(error);
+    }
   });
 }
