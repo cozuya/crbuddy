@@ -12,9 +12,10 @@ export interface ClipboardResult {
   reason?: string;
 }
 
-interface Candidate {
+export interface ClipboardCandidate {
   command: string;
   args: string[];
+  encoding: BufferEncoding;
 }
 
 /**
@@ -24,37 +25,49 @@ interface Candidate {
  */
 const TIMEOUT_MS = 5_000;
 
-/**
- * `clip.exe` decodes stdin with the console code page, not UTF-8. The
- * consolidated report always contains U+2026 (the "C1, C2…" note), which
- * arrives as `ΓÇª` under CP437 - a silent corruption, since clip still
- * exits 0. UTF-16LE is decoded correctly and needs no BOM; adding one only
- * prepends a stray U+FEFF to the paste.
- */
-export function encodeForClipboard(text: string): Buffer {
-  return process.platform === 'win32'
-    ? Buffer.from(text, 'utf16le')
-    : Buffer.from(text, 'utf8');
+/** WSL reports Linux to Node even though Windows executables remain invokable. */
+export function isWsl(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return platform === 'linux' && Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP);
 }
 
 /**
- * Ordered by likelihood, not preference. On Linux there is no single answer:
- * Wayland and X11 ship different tools and neither is guaranteed present, so
- * each is tried until one is actually installed.
+ * `clip.exe` decodes redirected stdin as UTF-16LE reliably. Feeding UTF-8 can
+ * silently mojibake non-ASCII report text, both on native Windows and through
+ * WSL interop.
  */
-function candidates(): Candidate[] {
-  if (process.platform === 'win32') {
-    return [{ command: 'clip', args: [] }];
+export function encodeForClipboard(
+  text: string,
+  encoding: BufferEncoding = 'utf8',
+): Buffer {
+  return Buffer.from(text, encoding);
+}
+
+/**
+ * Ordered by likelihood, not preference. WSL gets the host clipboard first,
+ * then ordinary Linux clipboard tools as fallbacks for graphical sessions.
+ */
+export function clipboardCandidates(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): ClipboardCandidate[] {
+  if (platform === 'win32') {
+    return [{ command: 'clip.exe', args: [], encoding: 'utf16le' }];
   }
 
-  if (process.platform === 'darwin') {
-    return [{ command: 'pbcopy', args: [] }];
+  if (platform === 'darwin') {
+    return [{ command: 'pbcopy', args: [], encoding: 'utf8' }];
   }
 
   return [
-    { command: 'wl-copy', args: [] },
-    { command: 'xclip', args: ['-selection', 'clipboard'] },
-    { command: 'xsel', args: ['--clipboard', '--input'] },
+    ...(isWsl(platform, env)
+      ? [{ command: 'clip.exe', args: [], encoding: 'utf16le' as const }]
+      : []),
+    { command: 'wl-copy', args: [], encoding: 'utf8' },
+    { command: 'xclip', args: ['-selection', 'clipboard'], encoding: 'utf8' },
+    { command: 'xsel', args: ['--clipboard', '--input'], encoding: 'utf8' },
   ];
 }
 
@@ -62,7 +75,7 @@ export async function copyToClipboard(text: string): Promise<ClipboardResult> {
   const tried: string[] = [];
   let firstReason: string | undefined;
 
-  for (const candidate of candidates()) {
+  for (const candidate of clipboardCandidates()) {
     tried.push(candidate.command);
 
     const result = await attempt(candidate, text);
@@ -72,18 +85,23 @@ export async function copyToClipboard(text: string): Promise<ClipboardResult> {
     // Every candidate gets a turn even after a real failure, not just after
     // ENOENT. On Linux the list is genuinely alternative tools: `wl-copy`
     // can be installed and still fail on an X11 session, and giving up
-    // there would keep `xclip` from ever running.
+    // there would keep `xclip` from ever running. The same rule lets WSL
+    // fall back if Windows interop has been disabled for that distro/session.
     firstReason ??= result.reason;
   }
 
   return {
     ok: false,
-    reason: firstReason ?? `no clipboard tool found (tried ${tried.join(', ')})`,
+    reason:
+      firstReason ?? `no clipboard tool found (tried ${tried.join(', ')})`,
   };
 }
 
 /** Resolves `{ok:false}` with no reason when the tool is simply absent. */
-function attempt(candidate: Candidate, text: string): Promise<ClipboardResult> {
+function attempt(
+  candidate: ClipboardCandidate,
+  text: string,
+): Promise<ClipboardResult> {
   return new Promise((resolve) => {
     let child;
 
@@ -115,7 +133,11 @@ function attempt(candidate: Candidate, text: string): Promise<ClipboardResult> {
     }
 
     child.on('error', (error: NodeJS.ErrnoException) => {
-      finish(error.code === 'ENOENT' ? { ok: false } : { ok: false, reason: error.message });
+      finish(
+        error.code === 'ENOENT'
+          ? { ok: false }
+          : { ok: false, reason: error.message },
+      );
     });
 
     child.on('close', (code) => {
@@ -129,6 +151,6 @@ function attempt(candidate: Candidate, text: string): Promise<ClipboardResult> {
     // An EPIPE here is the child having died already; `close` carries the
     // real outcome, so the write error is swallowed rather than thrown.
     child.stdin?.on('error', () => {});
-    child.stdin?.end(encodeForClipboard(text));
+    child.stdin?.end(encodeForClipboard(text, candidate.encoding));
   });
 }
