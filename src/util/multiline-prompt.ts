@@ -309,7 +309,9 @@ export function multilineText(
   input: MultilineInput,
   output: Writable,
 ): Promise<string> {
-  if (typeof input.setRawMode !== 'function') {
+  const setRawMode = input.setRawMode;
+
+  if (typeof setRawMode !== 'function') {
     throw new Error('Multiline input requires a terminal with raw input support.');
   }
 
@@ -339,7 +341,7 @@ export function multilineText(
       }
 
       try {
-        input.setRawMode?.(wasRaw);
+        setRawMode.call(input, wasRaw);
       } catch {
         // The input stream may already be closed; there is nothing left to restore.
       }
@@ -436,7 +438,7 @@ export function multilineText(
         '\u001b[2m  Enter submits · Shift+Enter/Ctrl+J adds a line · paste is multiline-safe\u001b[0m\n> ',
       );
 
-      input.setRawMode(true);
+      setRawMode.call(input, true);
       output.write(`${BRACKETED_PASTE_ON}${KITTY_KEYS_ON}${WIN32_INPUT_ON}`);
       modesEnabled = true;
 
