@@ -17,10 +17,12 @@ crbuddy go          # run the panel; blocking
 ## What it does
 
 `crbuddy go` resolves what's under review once and dispatches every configured
-entry against that target. When an entry has no custom `instructions`, crbuddy
-uses that vendor's native code-review operation rather than replacing it with a
-generic "review this diff" prompt. Each reviewer runs independently and never
-sees the other reviewers' output.
+entry against that target. Each reviewer can use the reviewer's default
+behavior, crbuddy's built-in prioritized-findings preset, or custom
+instructions. For Claude Code and Codex, the default is the vendor's native
+code-review operation. Gemini exposes no supported headless native review
+operation, so its default is a maintained crbuddy generic review prompt. Each
+reviewer runs independently and never sees the other reviewers' output.
 
 crbuddy also captures a git snapshot and target metadata for provenance. Native
 review commands differ in how precisely they accept a target: some can take an
@@ -44,13 +46,13 @@ for free.
 
 ## Supported vendor CLIs
 
-crbuddy v0.1 has adapters for exactly three CLI interfaces:
+crbuddy v0.3 has adapters for exactly three CLI interfaces:
 
 | Config `vendor` | Executable | Native diff review | Generic instructed lanes and consolidation |
 |---|---|---|---|
 | `claude` | Claude Code (`claude`) | Yes - `/code-review` | Yes |
 | `codex` | Codex CLI (`codex`) | Yes - `codex exec review` | Yes |
-| `gemini` | Gemini CLI (`gemini`) | No - panel `instructions` are required | Yes |
+| `gemini` | Gemini CLI (`gemini`) | No - crbuddy supplies a generic default | Yes |
 
 An unknown `vendor` value is refused. `vendorArgs` can pass additional flags to
 one of these CLIs, but it cannot add another CLI or a direct API provider.
@@ -78,7 +80,7 @@ separately supported `deepseek` vendor.
 | `crbuddy init` | Interactive setup. Writes a config. |
 | `crbuddy config` | The same command; edits an existing config. |
 | `crbuddy go [instructions]` | Run the panel. |
-| `crbuddy doctor` | Report which vendor CLIs are usable, which flags they accept, and why not. Read-only; contacts no models. Also aliased as `check`. |
+| `crbuddy doctor` | Report which vendor CLIs are usable, which models they report when discovery is available, which flags they accept, and why not. Read-only; it does not invoke a model. Also aliased as `check`. |
 
 `crb` is installed as a second name for the same binary, so `crb go` and
 `crbuddy go` are interchangeable.
@@ -112,12 +114,10 @@ That is a materially different run, so it is worth recognizing in the output.
 No vendor CLI has a native review mode for "the entire repository", so every
 panel entry drops to a general-purpose agent pointed at the working tree
 rather than the vendor's own review workflow. It is broader and slower than a
-diff review, the diff size limit does not apply to it, and Gemini - which
-refuses ordinary diff review because it exposes no headless native lane - can
-take part. The report records all of this and says `Checkout snapshot captured
-at launch: <sha>` in place of a changed-file count. Reviewers run against the
-live working tree; the hash records launch provenance rather than an isolated
-execution tree.
+diff review, and the diff size limit does not apply to it. The report records
+all of this and says `Checkout snapshot captured at launch: <sha>` in place of
+a changed-file count. Reviewers run against the live working tree; the hash
+records launch provenance rather than an isolated execution tree.
 
 ## Configuration
 
@@ -131,7 +131,7 @@ A copyable configuration is shipped in
 
 ```jsonc
 {
-  "configVersion": 1,
+  "configVersion": 2,
 
   // "file" writes a report; "terminal" prints it and writes nothing.
   // The paths are relative to the repository root, so one config serves
@@ -158,12 +158,27 @@ A copyable configuration is shipped in
   },
 
   "panel": [
+    // Reviewer default: Claude's native /code-review.
     { "vendor": "claude", "model": "opus", "effort": "max" },
-    { "vendor": "codex", "model": "gpt-5.6-sol", "effort": "xhigh" },
+
+    // A versioned crbuddy-maintained preset, expanded only when the run starts.
+    {
+      "vendor": "codex",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "instructionsPreset": "prioritized-findings-v1"
+    },
+
+    // Gemini has no native review command; its default is crbuddy's maintained
+    // generic review prompt.
+    { "vendor": "gemini", "model": "gemini-2.5-pro" },
+
+    // Free-form custom instructions remain available.
     {
       "id": "security",
-      "vendor": "gemini",
-      "model": "gemini-2.5-pro",
+      "vendor": "claude",
+      "model": "sonnet",
+      "effort": "high",
       "instructions": "Review only for security issues: injection, authz, secrets handling."
     }
   ]
@@ -180,13 +195,18 @@ than a failed startup.
 
 ### Panel entries
 
-`instructions` is optional for vendors with a supported headless native review
-operation. Without it, the adapter runs that vendor's own review behavior.
-With it, the adapter runs a generic read-only agent given those instructions.
+After choosing vendor, model, and effort, `crbuddy init` offers the same three
+instruction modes for every reviewer:
 
-Not every vendor exposes a usable headless native review surface. For those
-vendors, `crbuddy init` requires explicit `instructions` rather than creating a
-lane that would later be refused. Gemini is currently in this category.
+1. **Prioritized findings** - a built-in project-neutral P0-P3 review preset.
+2. **Custom instructions** - free-form instructions entered during setup.
+3. **Reviewer default** - the preselected choice. Claude and Codex use their
+   native review operation; Gemini uses crbuddy's maintained generic default.
+
+The prioritized preset is persisted as the versioned identifier
+`prioritized-findings-v1`, not copied into the config as a long prompt. That
+keeps saved behavior stable if a later release adds a revised preset. The
+preset and a free-form `instructions` value are mutually exclusive.
 
 For Claude Code, native review uses `/code-review` through print mode and gives
 the command crbuddy's captured git range. For Codex, native review uses
@@ -195,22 +215,44 @@ Those target interfaces are not identical, which is why the snapshot is stable
 provenance rather than a claim that every native lane consumes the exact same
 SHA range.
 
+Run metadata records whether each reviewer used its default behavior, a
+built-in preset, custom instructions, or the one-off command-line override. If
+a maintained crbuddy prompt was used, its versioned preset id is recorded too.
+
 `vendorArgs` is an escape hatch for CLI flags crbuddy does not model. crbuddy
 rejects known per-vendor flags that can select permissions or policy, load
 settings or capabilities, extend accessible roots, or choose Codex config
 layers. This is best-effort matching against changing vendor CLIs, not a
 security boundary or proof that an unknown flag is inert.
 
+### Models and discovery
+
+Model ids are vendor-native strings. During `init`, crbuddy asks an installed
+CLI for its current model catalog when that CLI exposes a usable programmatic
+surface. Codex is discovered through its effective model catalog, including
+model-specific reasoning effort values when advertised; Gemini is discovered
+through the same ACP model list used by its interactive model UI. Claude Code
+does not currently expose a supported noninteractive model-list surface, so
+crbuddy uses its maintained fallback list there.
+
+Discovery is best-effort. A timeout, authentication/protocol failure, empty
+catalog, or vendor interface change falls back to crbuddy's built-in list
+instead of breaking setup. `Other…` always remains available for an arbitrary
+model id accepted by the CLI. An existing configured model that is absent from
+the current discovered list is also retained as a selectable choice when
+editing config.
+
 ### Effort
 
 Effort values are **vendor-native and passed through verbatim**. There is no
 crbuddy effort vocabulary and no translation.
 
-`crbuddy init` offers each vendor's own values - Claude Code's `low` through
-`max`, Codex's `none` through `max`, nothing at all for a CLI without an
-effort setting - plus an "Other…" escape for anything the shipped list
-doesn't cover. Whatever you pick is written to config and handed to the CLI
-unchanged.
+`crbuddy init` uses model-specific effort values reported by model discovery
+when available; otherwise it offers the adapter's maintained vendor values.
+`Other…` remains an escape hatch for any value the installed CLI accepts.
+Whatever you pick is written to config and handed to the CLI unchanged. The
+terminal lane label includes the configured value, for example `Claude Code
+(opus xhigh) - started`.
 
 An earlier design had a portable vocabulary (`low | medium | high | max`)
 translated and clamped per vendor. It was removed. `model` was already a
@@ -272,19 +314,22 @@ findings is done by a heuristic that guarantees losslessness: concatenating
 the segments reproduces the review byte for byte. A bad split produces a
 finding that's too large or too small - never one that's missing.
 
-**Flags and versions are detected, not assumed.** Vendor CLI behavior churns
-between releases. Preflight checks each adapter's minimum supported CLI version
-and refuses to guess when the installed binary is older or its version cannot
-be parsed. It also reads the adapter's appropriate help surface and only passes
-optional flags it advertises. A missing **safety** flag - read-only enforcement
-- refuses that lane instead. Parent and nested subcommand help are not
-interchangeable; Codex, for example, keeps crbuddy's sandbox/config flags on
-`codex exec --help`.
+**Flags, versions, and model catalogs are detected rather than silently
+assumed where the vendor exposes them.** Preflight checks each adapter's minimum
+supported CLI version and refuses to guess when the installed binary is older
+or its version cannot be parsed. It also reads the adapter's appropriate help
+surface and only passes optional flags it advertises. A missing **safety** flag
+- read-only enforcement - refuses that lane instead. Parent and nested
+subcommand help are not interchangeable; Codex, for example, keeps crbuddy's
+sandbox/config flags on `codex exec --help`. Model discovery is softer: failure
+to enumerate models falls back to the maintained list because a stale picker
+should not make an otherwise usable CLI unavailable.
 
 **Preflight checks presence/version, not authentication.** crbuddy does not
-probe whether you're logged in: there's no uniform, free way to do that across
-vendors, and a wrong check rots per vendor. An expired login shows up as a lane
-failure.
+make a separate model call just to prove you're logged in. Model-catalog
+discovery may itself require the vendor's existing authentication; if that
+fails during setup or `doctor`, crbuddy reports the discovery problem and uses
+the fallback list. An expired login during `go` shows up as a lane failure.
 
 **Concurrency is unmanaged by default.** Six entries means six subprocesses.
 That will hit per-subscription rate limits well before it hits your machine.
@@ -377,9 +422,11 @@ predictable path in a shared OS temp directory.
 ## How output is structured
 
 Consolidated reports carry YAML frontmatter with the captured snapshot and
-base SHAs, diff digest, per-run CLI versions and applied effort, failures with
-reasons, and consolidation state. Unconsolidated reports omit that verbose
-block and begin with the review itself. Their visible report block still gives
+base SHAs, diff digest, per-run CLI versions, applied effort, instruction source
+(default/preset/custom/override), maintained preset id when applicable,
+failures with reasons, and consolidation state. Unconsolidated reports omit
+that verbose block and begin with the review itself, but each review heading
+also states the instruction mode used. Their visible report block still gives
 the review count, failures, warnings, target range, and file count. A compact
 hidden marker keeps the run ID so a raw file can be matched to its consolidated
 companion without restoring the large metadata block.
