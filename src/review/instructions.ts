@@ -15,6 +15,8 @@ export const WHOLE_CHECKOUT_DEFAULT_PRESET_ID = 'whole-checkout-default-v1' as c
 
 export type InstructionSource = 'default' | 'preset' | 'custom' | 'override';
 
+type ReviewSubject = 'diff' | 'whole-checkout';
+
 export interface ReviewInstructionSelection {
   operation: Operation;
   source: InstructionSource;
@@ -22,9 +24,25 @@ export interface ReviewInstructionSelection {
   presetId: string | null;
 }
 
-const PRIORITIZED_FINDINGS_V1 = `Review the changes in the supplied branch or commit range against its base branch. Read the current code around each change; do not rely only on the diff, commit messages, comments, or tests.
+function prioritizedFindingsV1(subject: ReviewSubject): string {
+  const opening =
+    subject === 'diff'
+      ? 'Review the changes in the supplied branch or commit range against its base branch. Read the current code around each change; do not rely only on the diff, commit messages, comments, or tests.'
+      : 'Review this repository as it currently stands. There is no diff to review, so treat the checked-out code itself as the subject. Read the current code around each area you inspect; do not rely only on comments or tests.';
 
-Report actionable defects introduced by the changes. Prioritize every finding with exactly one severity:
+  const findingScope =
+    subject === 'diff'
+      ? 'Report actionable defects introduced by the changes.'
+      : 'Report actionable defects present in the checked-out code.';
+
+  const focusRule =
+    subject === 'diff'
+      ? 'Focus on defects caused by the reviewed changes or made reachable by them.'
+      : 'Focus on reachable defects in the reviewed checkout.';
+
+  return `${opening}
+
+${findingScope} Prioritize every finding with exactly one severity:
 
 - P0: catastrophic security failure, destructive data loss, credential exposure, or corruption with broad/immediate impact.
 - P1: must fix before merge or release; the primary workflow is broken, a security or correctness boundary is bypassed, recovery is impossible, or persisted/public results can be materially false.
@@ -41,7 +59,7 @@ Output requirements:
 
    Explain the exact triggering condition, trace the resulting behavior, and state the concrete impact. Include a minimal reproduction or regression-test shape when practical.
 
-4. Focus on defects caused by the reviewed changes or made reachable by them.
+4. ${focusRule}
 5. Deduplicate findings with the same root cause.
 6. Verify that each premise can actually occur in production. Do not present speculation as a finding.
 7. Treat passing tests as evidence, not proof: check that a test exercises the real dependency and failure mode it claims to cover.
@@ -50,6 +68,7 @@ Output requirements:
 10. End with a concise coverage note naming the areas inspected and commands or tests actually run.
 
 Return Markdown, not JSON. Keep the main report focused on actionable P0-P2 findings.`;
+}
 
 const GENERIC_DEFAULT_REVIEW_V1 =
   'Review the supplied changes for concrete, actionable defects. Read the current code ' +
@@ -71,10 +90,13 @@ export function isReviewPresetId(value: unknown): value is ReviewPresetId {
   return value === PRIORITIZED_FINDINGS_PRESET_ID;
 }
 
-export function reviewPresetInstructions(id: ReviewPresetId): string {
+export function reviewPresetInstructions(
+  id: ReviewPresetId,
+  subject: ReviewSubject = 'diff',
+): string {
   switch (id) {
     case PRIORITIZED_FINDINGS_PRESET_ID:
-      return PRIORITIZED_FINDINGS_V1;
+      return prioritizedFindingsV1(subject);
   }
 }
 
@@ -115,7 +137,10 @@ export function buildReviewerOperation(options: {
     instructions = instructionsOverride;
     source = 'override';
   } else if (entry.instructionsPreset) {
-    instructions = reviewPresetInstructions(entry.instructionsPreset);
+    instructions = reviewPresetInstructions(
+      entry.instructionsPreset,
+      wholeCheckout ? 'whole-checkout' : 'diff',
+    );
     source = 'preset';
     presetId = entry.instructionsPreset;
   } else if (entry.instructions) {
@@ -124,11 +149,16 @@ export function buildReviewerOperation(options: {
   }
 
   if (wholeCheckout) {
+    const wholeInstructions =
+      source === 'preset' && instructions
+        ? `${instructions}\n\nDo not modify any files.`
+        : wholeCheckoutPrompt(instructions);
+
     return {
       operation: {
         kind: 'generic',
         target: null,
-        instructions: wholeCheckoutPrompt(instructions),
+        instructions: wholeInstructions,
       },
       source,
       presetId:
