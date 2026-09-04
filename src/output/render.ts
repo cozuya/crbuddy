@@ -19,9 +19,10 @@ export interface RunRecord {
   modelRequested: string;
   effortRequested: string | null;
   effortApplied: string | null;
-  instructionSource: InstructionSource;
+  /** Added in v0.3.0; optional so older test/fixture records still render. */
+  instructionSource?: InstructionSource;
   /** Named maintained prompt actually used, if any. */
-  instructionsPreset: string | null;
+  instructionsPreset?: string | null;
   ok: boolean;
   reason?: string;
   wallClockMs: number;
@@ -134,7 +135,7 @@ export function renderFrontmatter(context: ReportContext): string {
         `cliVersion: ${yamlString(run.cliVersion ?? 'unknown')}, ` +
         `model: ${yamlString(run.modelRequested)}, ` +
         `effort: ${yamlString(run.effortApplied ?? 'none')}, ` +
-        `instructions: ${yamlString(run.instructionSource)}, ` +
+        `instructions: ${yamlString(instructionSource(run))}, ` +
         `preset: ${yamlString(run.instructionsPreset ?? 'none')}, ` +
         `wallClockMs: ${run.wallClockMs} }`,
     );
@@ -226,7 +227,7 @@ export function renderRaw(context: ReportContext): string {
   for (const run of context.runs) {
     parts.push(
       `<!-- crbuddy:review id=${run.id} vendor=${run.vendor} model=${run.modelRequested} ` +
-        `instructions=${run.instructionSource} preset=${run.instructionsPreset ?? 'none'} -->`,
+        `instructions=${instructionSource(run)} preset=${run.instructionsPreset ?? 'none'} -->`,
     );
 
     parts.push(`## ${run.id} - ${run.vendor} / ${run.modelRequested}\n`);
@@ -347,13 +348,19 @@ export function renderMerged(
   return parts.join('\n');
 }
 
+function instructionSource(run: RunRecord): InstructionSource {
+  return run.instructionSource ?? 'default';
+}
+
 function instructionDescription(run: RunRecord): string {
-  if (run.instructionSource === 'preset') {
+  const source = instructionSource(run);
+
+  if (source === 'preset') {
     return run.instructionsPreset ?? 'built-in preset';
   }
 
-  if (run.instructionSource === 'custom') return 'custom';
-  if (run.instructionSource === 'override') return 'one-off command-line override';
+  if (source === 'custom') return 'custom';
+  if (source === 'override') return 'one-off command-line override';
 
   return run.instructionsPreset
     ? `reviewer default (${run.instructionsPreset})`
