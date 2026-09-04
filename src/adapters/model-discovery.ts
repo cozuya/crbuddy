@@ -7,7 +7,7 @@ import { createInterface } from 'node:readline';
 import crossSpawn from 'cross-spawn';
 
 import { killTree, runProcess } from '../run/spawn.js';
-import { Adapter, ModelDiscoveryContext, VendorModel } from './types.js';
+import type { Adapter, ModelDiscoveryContext, VendorModel } from './types.js';
 
 const DISCOVERY_TIMEOUT_MS = 20_000;
 const isWindows = process.platform === 'win32';
@@ -148,8 +148,8 @@ export function parseCodexModelCatalog(text: string): VendorModel[] {
 
 /**
  * Gemini CLI exposes the same model list used by its `/model` UI through ACP
- * session setup. This performs the protocol handshake in order: initialize,
- * initialized notification, then session/new. No model prompt is sent.
+ * session setup. Match Gemini's own ClientSideConnection flow: wait for the
+ * `initialize` response, then send `session/new`. No model prompt is sent.
  */
 export async function discoverGeminiModels(
   command: string,
@@ -222,7 +222,6 @@ async function geminiAcpNewSession(
         }
 
         initialized = true;
-        send({ jsonrpc: '2.0', method: 'notifications/initialized' });
         send({
           jsonrpc: '2.0',
           id: 2,
