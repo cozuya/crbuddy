@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { withModelDiscovery } from '../adapters/model-discovery.js';
 import { ADAPTERS } from '../adapters/vendors.js';
 import { isNewerThanStamp } from '../adapters/effort.js';
 import { isVersionAtLeast } from '../adapters/version.js';
@@ -59,8 +60,10 @@ function supported(help: string, flag: string): boolean {
 /**
  * `crbuddy doctor` — everything crbuddy knows about this machine.
  *
- * Read-only: it runs `--version` and `--help` on each vendor CLI and reports
- * what it found. It contacts no models, writes nothing, and changes nothing.
+ * Read-only: it runs vendor version/help surfaces and, where supported, asks
+ * the installed CLI for its model catalog. It sends no model prompt, writes
+ * no repository files, and falls back to crbuddy's built-in catalog if live
+ * discovery is unavailable.
  */
 export async function runDoctor(): Promise<number> {
   const scratch = await mkdtemp(path.join(tmpdir(), 'crbuddy-doctor-'));
@@ -75,6 +78,7 @@ export async function runDoctor(): Promise<number> {
     }
 
     const repoRoot = await findRepoRoot(process.cwd()).catch(() => null);
+    const discoveryCwd = repoRoot ?? process.cwd();
     console.log(`git repo      ${repoRoot ?? '(not inside a working tree)'}`);
     console.log('');
     console.log('Vendor CLIs');
@@ -82,11 +86,30 @@ export async function runDoctor(): Promise<number> {
 
     let usable = 0;
 
-    for (const adapter of ADAPTERS) {
+    for (const registered of ADAPTERS) {
+      const adapter = withModelDiscovery(registered);
       const result = await probe(adapter.command, adapter.versionArgs());
       const version = result.present ? adapter.parseVersion(result.output ?? '') : null;
       const versionOk = version !== null && isVersionAtLeast(version, adapter.minVersion);
       const mark = !result.present ? 'MISS' : versionOk ? 'OK  ' : 'OLD ';
+
+      let models = adapter.models;
+      let modelSource: 'reported by CLI' | 'fallback list' = 'fallback list';
+      let modelError: string | null = null;
+
+      if (result.present && adapter.discoverModels) {
+        try {
+          const discovered = await adapter.discoverModels({ cwd: discoveryCwd });
+          if (discovered && discovered.length > 0) {
+            models = discovered;
+            modelSource = 'reported by CLI';
+          } else {
+            modelError = 'the CLI returned no usable models';
+          }
+        } catch (error) {
+          modelError = error instanceof Error ? error.message : String(error);
+        }
+      }
 
       console.log(`  ${mark} ${adapter.label} - \`${adapter.command}\``);
 
@@ -97,7 +120,7 @@ export async function runDoctor(): Promise<number> {
       if (result.present) {
         if (version) {
           console.log(
-            `       version:  ${version} (minimum ${adapter.minVersion}; lists written for ${adapter.listsStampedFor})`,
+            `       version:  ${version} (minimum ${adapter.minVersion}; fallback lists written for ${adapter.listsStampedFor})`,
           );
 
           if (!versionOk) {
@@ -108,9 +131,13 @@ export async function runDoctor(): Promise<number> {
             usable += 1;
           }
 
-          if (versionOk && isNewerThanStamp(version, adapter.listsStampedFor)) {
+          if (
+            versionOk &&
+            modelSource === 'fallback list' &&
+            isNewerThanStamp(version, adapter.listsStampedFor)
+          ) {
             console.log(
-              `       note:     newer than crbuddy's lists; init may not offer` +
+              `       note:     newer than crbuddy's fallback lists; init may not offer` +
                 ` every model or effort value this CLI supports`,
             );
           }
@@ -122,13 +149,23 @@ export async function runDoctor(): Promise<number> {
         }
 
         console.log(
-          `       models:   ${adapter.models.map((m) => m.id).join(', ')}`,
+          `       models:   ${models.map((model) => model.id).join(', ')} (${modelSource})`,
         );
 
-        if (adapter.efforts.length > 0) {
+        if (modelError) {
+          console.log(`       models:   discovery failed: ${modelError}`);
+        }
+
+        const catalogEfforts = [
+          ...new Set(models.flatMap((model) => model.efforts ?? [])),
+        ];
+
+        if (modelSource === 'reported by CLI' && catalogEfforts.length > 0) {
+          console.log(`       effort:   model-specific: ${catalogEfforts.join(', ')}`);
+        } else if (adapter.efforts.length > 0) {
           console.log(`       effort:   ${adapter.efforts.join(', ')}`);
         } else {
-          console.log(`       effort:   (this CLI has no effort control)`);
+          console.log(`       effort:   (this CLI has no thinking-effort setting)`);
         }
 
         const help = await readHelp(adapter, scratch);
@@ -162,7 +199,7 @@ export async function runDoctor(): Promise<number> {
 
     console.log(
       `${usable} of ${ADAPTERS.length} vendor CLI(s) usable. ` +
-        `crbuddy does not check whether they are logged in.`,
+        `Model catalog discovery is best-effort; failures use fallback lists.`,
     );
     console.log('');
 
