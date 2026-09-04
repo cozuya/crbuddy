@@ -1,6 +1,6 @@
 {
   "name": "crbuddy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Fan one code review out across several vendor coding agents in parallel, then consolidate.",
   "repository": {
     "type": "git",
