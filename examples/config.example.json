@@ -6,7 +6,7 @@
   },
   "target": "uncommitted",
   "refuseIfOutputExists": false,
-  "timeoutMs": 3600000,
+  "timeoutMs": 5400000,
   "mergeTimeoutMs": 3600000,
   "maxConcurrent": 0,
   "maxDiffBytes": 2000000,
