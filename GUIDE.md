@@ -150,6 +150,10 @@ A copyable configuration is shipped in
   // "uncommitted", or { "base": "main" } for a branch-style review
   "target": "uncommitted",
 
+  // Maximum silence from a reviewer. stdout/stderr activity resets it.
+  "timeoutMs": 5400000,
+  "mergeTimeoutMs": 3600000,
+
   "merge": {
     "enabled": true,
     "vendor": "claude",
@@ -186,8 +190,8 @@ A copyable configuration is shipped in
 ```
 
 Other keys, all optional: `refuseIfOutputExists` (default `false`),
-`timeoutMs` and `mergeTimeoutMs` (both default to one hour),
-`maxConcurrent` (`0` = unlimited),
+`timeoutMs` (90 minutes of inactivity by default), `mergeTimeoutMs` (one hour
+of inactivity by default), `maxConcurrent` (`0` = unlimited), and
 `maxDiffBytes`.
 
 Unknown keys are a hard error. A typo that silently does nothing is worse
@@ -270,6 +274,24 @@ effort setting unless their adapter documents a default.
 `ultra` is intentionally not a normal Claude effort in crbuddy. It selects the
 separate cloud Ultrareview product, which is asynchronous under `claude -p` and
 may consume paid usage credits. crbuddy refuses it on the normal Claude lane.
+
+### Timeouts
+
+`timeoutMs` is an **inactivity timeout**, not a fixed runtime budget. The timer
+is reset whenever the vendor process writes to stdout or stderr. This matters
+for long native reviews: a reviewer that is still reading files and emitting
+progress is not treated the same as a wedged process that has gone silent.
+
+New configs default to 90 minutes (`5400000` ms). Existing configs keep their
+numeric value, so an older `3600000` setting becomes "60 minutes with no
+output" rather than "kill this run after exactly one hour." The process runner
+also enforces a separate hard wall-clock ceiling at four times the configured
+inactivity timeout. With the new default that ceiling is six hours; it exists
+only to stop a continuously chatty runaway process from living forever.
+
+`mergeTimeoutMs` uses the same activity-aware watchdog and defaults to one hour.
+Short diagnostic/probe commands explicitly keep their own fixed short hard
+ceilings.
 
 ## Caveats
 
