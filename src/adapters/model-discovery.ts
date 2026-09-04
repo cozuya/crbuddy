@@ -3,12 +3,37 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { runProcess } from '../run/spawn.js';
-import { ModelDiscoveryContext, VendorModel } from './types.js';
+import { Adapter, ModelDiscoveryContext, VendorModel } from './types.js';
 
 const DISCOVERY_TIMEOUT_MS = 20_000;
 
 interface JsonObject {
   [key: string]: unknown;
+}
+
+/**
+ * Keep the base vendor registry usable without discovery. Callers that want
+ * live catalogs wrap those adapters here; unsupported vendors are returned
+ * unchanged and therefore use their built-in model list.
+ */
+export function withModelDiscovery(adapter: Adapter): Adapter {
+  if (adapter.discoverModels) return adapter;
+
+  if (adapter.name === 'codex') {
+    return {
+      ...adapter,
+      discoverModels: (context) => discoverCodexModels(adapter.command, context),
+    };
+  }
+
+  if (adapter.name === 'gemini') {
+    return {
+      ...adapter,
+      discoverModels: (context) => discoverGeminiModels(adapter.command, context),
+    };
+  }
+
+  return adapter;
 }
 
 async function runDiscovery(
