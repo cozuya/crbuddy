@@ -21,7 +21,7 @@ test('accepts a minimal config and fills defaults', () => {
   assert.equal(config.configVersion, CONFIG_VERSION);
   assert.equal(config.target, 'uncommitted');
   assert.equal(config.refuseIfOutputExists, false);
-  assert.equal(config.timeoutMs, 60 * 60 * 1000);
+  assert.equal(config.timeoutMs, 90 * 60 * 1000);
   assert.equal(config.mergeTimeoutMs, 60 * 60 * 1000);
   assert.equal(config.output.merged, 'CODE-REVIEW-HANDOFF.md');
   assert.equal(config.merge.enabled, false);
