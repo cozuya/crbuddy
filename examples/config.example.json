@@ -1,5 +1,5 @@
 {
-  "configVersion": 1,
+  "configVersion": 2,
   "output": {
     "merged": "CODE-REVIEW-HANDOFF.md",
     "raw": "CODE-REVIEW-HANDOFF.raw.md"
@@ -18,12 +18,13 @@
   },
   "panel": [
     { "vendor": "claude", "model": "opus", "effort": "max" },
-    { "vendor": "codex", "model": "gpt-5.6-sol", "effort": "xhigh" },
     {
-      "vendor": "gemini",
-      "model": "gemini-2.5-pro",
-      "instructions": "Review the changes for correctness, regressions, and missing tests."
+      "vendor": "codex",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "instructionsPreset": "prioritized-findings-v1"
     },
+    { "vendor": "gemini", "model": "gemini-2.5-pro" },
     {
       "id": "security",
       "vendor": "claude",
