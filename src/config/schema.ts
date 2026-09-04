@@ -4,7 +4,9 @@
  * Named fields only — no positional tuples.
  */
 
-export const CONFIG_VERSION = 1;
+import type { ReviewPresetId } from '../review/instructions.js';
+
+export const CONFIG_VERSION = 2;
 
 /**
  * Effort is a VENDOR-NATIVE string, passed through verbatim — not a portable
@@ -29,11 +31,13 @@ export interface PanelEntry {
   model: string;
   effort?: Effort;
   /**
-   * Optional review criteria. When absent the adapter runs its native
-   * review operation over the crbuddy-resolved target. When present the
-   * adapter runs a generic read-only agent with these instructions.
+   * Optional free-form review criteria. When absent and no preset is selected,
+   * a native-review adapter uses its own default review operation; an adapter
+   * without one uses crbuddy's maintained generic default.
    */
   instructions?: string;
+  /** Named/versioned built-in instructions, expanded only when the run starts. */
+  instructionsPreset?: ReviewPresetId;
   /** Escape hatch: extra argv appended verbatim. See DESIGN.md §7. */
   vendorArgs?: string[];
 }
@@ -68,9 +72,12 @@ export interface Config {
    * mechanism — see DESIGN.md §6.
    */
   refuseIfOutputExists: boolean;
-  /** Per-run wall-clock ceiling. Converts a hang into an ordinary failure. */
+  /**
+   * Maximum reviewer inactivity. stdout or stderr activity resets the timer;
+   * the process runner still enforces a separate hard wall-clock ceiling.
+   */
   timeoutMs: number;
-  /** Separate ceiling for the consolidation pass. */
+  /** Separate inactivity limit for the consolidation pass. */
   mergeTimeoutMs: number;
   /** 0 means unlimited. The semaphore exists from day one regardless. */
   maxConcurrent: number;
@@ -92,7 +99,7 @@ export const DEFAULTS = {
   configVersion: CONFIG_VERSION,
   target: 'uncommitted' as Target,
   refuseIfOutputExists: false,
-  timeoutMs: 60 * 60 * 1000,
+  timeoutMs: 90 * 60 * 1000,
   mergeTimeoutMs: 60 * 60 * 1000,
   maxConcurrent: 0,
   maxDiffBytes: 2_000_000,

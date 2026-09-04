@@ -33,9 +33,15 @@ TypeScript/Node is intentional. Do not add another implementation language merel
 
 Run the configured panel. Blocking by design.
 
-With no positional `instructions`, each panel entry uses its vendor's **native code-review operation** when crbuddy has a supported headless native path for that vendor.
+With no positional `instructions`, each panel entry resolves its configured instruction mode:
 
-Supplying positional `instructions` is an explicit override for the whole run. It replaces every panel entry's configured instructions, so those lanes run as generic read-only agents under the supplied criteria instead of using the vendor-native review flow.
+1. a versioned crbuddy preset, if `instructionsPreset` is present
+2. free-form custom `instructions`, if present
+3. reviewer default otherwise
+
+For a vendor with a supported headless native review path, reviewer default means the vendor's **native code-review operation**. For a vendor without one, reviewer default means crbuddy's maintained generic review prompt. The adapter's semantic `review` operation itself remains native-only and must never be faked with that prompt.
+
+Supplying positional `instructions` is an explicit override for the whole run. It replaces every panel entry's configured preset or instructions, so all lanes run as generic read-only agents under the supplied criteria instead of using their configured/default review flow.
 
 Flags:
 
@@ -63,7 +69,7 @@ Named fields only. Model and effort identifiers are vendor-native strings.
 
 ```jsonc
 {
-  "configVersion": 1,
+  "configVersion": 2,
   "output": {
     "merged": "CODE-REVIEW-HANDOFF.md",
     "raw": "CODE-REVIEW-HANDOFF.raw.md"
@@ -88,24 +94,44 @@ Named fields only. Model and effort identifiers are vendor-native strings.
       "effort": "high"
     },
     {
-      "id": "security-gemini",
+      "id": "prioritized-codex",
+      "vendor": "codex",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "instructionsPreset": "prioritized-findings-v1"
+    },
+    {
+      "id": "gemini-default",
       "vendor": "gemini",
-      "model": "gemini-2.5-pro",
+      "model": "gemini-2.5-pro"
+    },
+    {
+      "id": "security-claude",
+      "vendor": "claude",
+      "model": "sonnet",
       "instructions": "Review only for security defects."
     }
   ]
 }
 ```
 
-Unknown keys are fatal. Panel IDs are stable provenance labels. `vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not model. It must never be able to weaken read-only, sandbox, approval, or permission policy; those controls are owned by crbuddy even when config is project-local.
+Unknown keys are fatal. Panel IDs are stable provenance labels. `instructions` and `instructionsPreset` are mutually exclusive. Persisted preset IDs are versioned so a saved config keeps the behavior it selected when later releases add revised presets. `vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not model. It must never be able to weaken read-only, sandbox, approval, or permission policy; those controls are owned by crbuddy even when config is project-local.
 
 ### Wizard behavior
 
-The wizard detects installed vendor CLIs, builds the panel, configures consolidation, and chooses the target.
+The wizard detects installed vendor CLIs, discovers model catalogs where a supported programmatic surface exists, builds the panel, configures consolidation, and chooses the target.
 
-Adapter metadata declares whether a vendor has a supported **headless native review** operation. A vendor without one may still be used as a generic reviewer, but the wizard must require explicit review instructions for that lane. It must not offer “vendor's own review behavior” and then write a configuration that `go` will deterministically refuse.
+Model discovery is best-effort rather than a prerequisite for using the CLI. If discovery fails, times out, returns no usable models, or the vendor does not expose a supported discovery surface, the adapter's maintained fallback list is used. `Other…` remains available for arbitrary vendor-native model IDs, and an already-configured model is retained while editing even if the current catalog does not report it.
 
-Detection establishes CLI presence/version/capability, not authentication. Each adapter declares a minimum supported CLI version. `go` refuses an older or unparseable version rather than guessing at version-sensitive native-review behavior; `check` reports the same condition before a paid run starts.
+After vendor/model/effort selection, every reviewer gets the same three instruction choices:
+
+1. built-in prioritized findings preset
+2. free-form custom instructions
+3. reviewer default, preselected
+
+Adapter metadata declares whether a vendor has a supported **headless native review** operation. If it does, reviewer default resolves to that native operation. If it does not, reviewer default resolves at orchestration time to crbuddy's maintained generic review prompt. The wizard therefore never creates a default lane that `go` will deterministically refuse.
+
+Detection establishes CLI presence/version/capability, not a separate authentication guarantee. Each adapter declares a minimum supported CLI version. `go` refuses an older or unparseable version rather than guessing at version-sensitive native-review behavior; `check` reports the same condition before a paid run starts. Model discovery may itself use the vendor's existing authenticated catalog surface; failure there falls back rather than making the CLI unavailable.
 
 ---
 
@@ -166,11 +192,13 @@ The snapshot still provides stable report identity, diff-size checks, manifest g
 Adapters expose semantic operations:
 
 1. `review` - invoke the vendor's own supported native review feature
-2. `generic` - run a read-only agent with explicit user instructions
+2. `generic` - run a read-only agent with explicit instructions
 
-The distinction is architectural. `review` must not be implemented as a generic prompt like “review this diff.”
+The distinction is architectural. `review` must not be implemented as a generic prompt like “review this diff.” A crbuddy-maintained default for a vendor without native review is resolved by orchestration into `generic`; it does not change the adapter's `nativeReview` declaration.
 
 Each adapter declares `nativeReview: boolean`. This is consumed by configuration UX as well as execution.
+
+Adapters may also expose optional model discovery. Discovery returns vendor-native model IDs and display metadata, plus model-specific effort values when the vendor reports them. Failure is advisory and falls back to maintained adapter metadata.
 
 ### Claude Code
 
@@ -190,6 +218,8 @@ Anthropic's current documentation explicitly says a non-`ultra` `/code-review` r
 
 A known status-only response was observed during development: `Still waiting for the code-review skill's verification/synthesis stage to complete.` Because that violates the documented foreground contract for local `-p` review, crbuddy treats that response as `incomplete_review` rather than accepting a zero exit as completed findings.
 
+Claude Code currently has no supported noninteractive model-list surface modeled by crbuddy, so setup uses the maintained Claude model list and retains `Other…`.
+
 ### Codex CLI
 
 Use Codex's native headless review subcommand rather than ordinary `codex exec` with a review prompt.
@@ -201,13 +231,16 @@ Use Codex's native headless review subcommand rather than ordinary `codex exec` 
 
 Capability probing must read the help surface where **the flags crbuddy itself passes** are defined. For Codex, sandbox/config/ephemeral options are `exec`-level flags, so probe `codex exec --help`; probing only `codex exec review --help` can falsely report a safe parent option as missing.
 
+Model discovery uses Codex's effective `debug models` JSON catalog without `--bundled`, so an authenticated installation can surface models added after the crbuddy release. The parser accepts both known raw-catalog field spellings and uses model-specific supported reasoning effort metadata when present.
+
 ### Gemini CLI
 
 No supported headless native code-review operation is currently modeled.
 
-- implicit/native review is refused
-- Gemini remains usable with explicit `instructions` as a generic read-only lane
-- `init` must require those instructions rather than creating an unusable implicit lane
+- the adapter's semantic `review` operation remains refused
+- reviewer default is resolved by crbuddy into a maintained generic read-only review prompt
+- the built-in prioritized-findings preset and free-form custom instructions use the same generic lane
+- model discovery uses Gemini ACP session setup and reads the `models.availableModels` list used by its model UI; no review/model prompt is sent
 
 ### Capability and safety probing
 
@@ -241,6 +274,8 @@ The help surface is adapter-specific. “Deepest subcommand” is not inherently
 One `crbuddy go`, one terminal, wait. Discrete events are appended to terminal output, with a TTY-only live status line and terminal bell after successful completion. Recognized terminals with OSC 9;4 support also receive native indeterminate progress through consolidation and output commit. Detection is conservative because OSC 9;4 collides with the older OSC 9 notification protocol: Windows Terminal and ConEmu are identified by their environment markers, while iTerm2 and Ghostty are version-gated. VS Code receives the progress state, but stock VS Code does not render it unless `${progress}` is present in the configured terminal tab title or description.
 
 Panel entries run concurrently by default. `maxConcurrent: 0` means unlimited; the semaphore is still part of the execution path so a cap is a policy setting rather than an architectural rewrite.
+
+Status labels include the configured vendor-native effort when one is present, for example `Claude Code (opus xhigh) - started`. Different effort levels therefore remain distinguishable even for repeated lanes using the same vendor/model.
 
 ### Timeouts and cancellation
 
@@ -297,7 +332,7 @@ Merge failure is separate from reviewer failure and counts as partial success wh
 
 Effort is vendor-native and passed through verbatim **except when a vendor reuses an effort-looking token to select a different product or execution mode**. There is no portable crbuddy effort vocabulary and no translation/clamping layer.
 
-Each adapter supplies advisory values and a default for the wizard. Config validation accepts any non-empty string so a vendor adding a new value does not normally require a crbuddy release before users can select it manually. The adapter may still refuse a reserved value whose semantics violate crbuddy's execution contract; Claude `ultra` is the current example because it selects asynchronous cloud Ultrareview rather than local synchronous review.
+Model discovery may supply model-specific effort values to the wizard. If it does not, each adapter supplies advisory fallback values and a default. Config validation accepts any non-empty string so a vendor adding a new value does not normally require a crbuddy release before users can select it manually. The adapter may still refuse a reserved value whose semantics violate crbuddy's execution contract; Claude `ultra` is the current example because it selects asynchronous cloud Ultrareview rather than local synchronous review.
 
 Native Claude review is additionally deterministic when effort is omitted from a hand-edited config: the adapter explicitly applies its documented default (`high`) rather than allowing Claude Code to reuse prior interactive state.
 
@@ -305,7 +340,25 @@ The applied value, or lack of one, is recorded in output provenance.
 
 ---
 
-## 8. Consolidation
+## 8. Review instruction presets
+
+Built-in reviewer prompts are maintained centrally and identified by a persisted semantic/version id. The first preset is `prioritized-findings-v1`.
+
+Requirements:
+
+- the versioned id, not a copy of the prompt text, is persisted in config
+- the prompt is expanded only when the lane starts
+- a new semantic revision gets a new id rather than silently changing saved configs
+- preset and free-form `instructions` cannot both control one panel entry
+- the same preset semantics are used by Claude, Codex, and Gemini generic lanes
+- a one-off positional `go [instructions]` override wins over both configured forms
+- run provenance records `default`, `preset`, `custom`, or `override` plus the maintained prompt id when one was actually used
+
+The prioritized-findings v1 prompt is project-neutral. It asks reviewers to inspect code around the changes, report only reachable actionable defects, assign exactly one P0-P3 severity, deduplicate root causes, verify premises, and keep the main report focused on actionable P0-P2 findings. Repository-specific policy belongs in custom instructions rather than in the shared preset.
+
+---
+
+## 9. Consolidation
 
 The consolidation model has **no authority to remove or rewrite a source finding**.
 
@@ -329,7 +382,7 @@ Clusters are ordered by the number of distinct successful review lanes represent
 
 ---
 
-## 9. Output format
+## 10. Output format
 
 Both merged and raw output are rendered from structured in-memory data. Markdown is never parsed back into internal state.
 
@@ -340,24 +393,26 @@ Consolidated output has YAML frontmatter recording at least:
 - target kind, snapshot/base/range metadata, digest, file/byte counts
 - configured/succeeded/failed lane counts
 - lane failures
-- per-lane CLI version, model, applied effort, and wall-clock time
+- per-lane CLI version, model, applied effort, instruction source, maintained prompt/preset id when applicable, and wall-clock time
 - consolidation state and failure reason when applicable
 
 Unconsolidated output omits the verbose frontmatter. Its visible report block
 retains the review count, failures, warnings, target range, and file count; the
-per-review markers retain vendor, model, and stable lane IDs. A compact hidden
-marker retains the run ID so a raw/consolidated mismatch remains detectable.
+per-review markers retain vendor, model, stable lane IDs, and instruction-mode
+provenance. A compact hidden marker retains the run ID so a raw/consolidated
+mismatch remains detectable.
 
 HTML comments delimit human-navigation sections, but they are not parser boundaries because verbatim model output can contain the same strings.
 
 ---
 
-## 10. Known version-sensitive surfaces
+## 11. Known version-sensitive surfaces
 
 These are expected maintenance points rather than reasons to weaken the architecture:
 
 - vendor minimum CLI versions
-- vendor model and effort lists
+- vendor fallback model and effort lists
+- vendor model-discovery commands/protocols and catalog schemas
 - vendor CLI flags and their help hierarchy
 - native review invocation syntax
 - Claude local-vs-Ultrareview command semantics
@@ -365,11 +420,11 @@ These are expected maintenance points rather than reasons to weaken the architec
 - Windows shim/process-tree behavior
 - POSIX process-group behavior on macOS/Linux
 
-`crbuddy doctor`/diagnostics should make version mismatches observable before a long paid run whenever possible.
+`crbuddy doctor`/diagnostics should make version mismatches and model-discovery failures observable before a long paid run whenever possible.
 
 ---
 
-## 11. Deliberately open
+## 12. Deliberately open
 
 Repository-local crbuddy configuration and vendor configuration are trusted
 inputs. Safe execution of configuration from an untrusted repository is not a
@@ -377,7 +432,6 @@ design claim.
 
 - whether repeated identical model lanes should contribute equally to agreement ordering
 - whether `init` should support a non-interactive mode
-- whether model lists should stay advisory/hardcoded or be queried when vendors expose stable discovery
 - whether a future design should remove project-local configuration from the trusted-input boundary for authenticated agents
 - whether `vendorArgs` should invert from a per-vendor blocked set to an allowlist of known-inert flags; this would provide a stronger boundary but require crbuddy releases for newly added vendor flags
 - whether report artifacts should eventually live outside the reviewed tree

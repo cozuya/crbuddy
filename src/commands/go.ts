@@ -50,6 +50,7 @@ import { progress } from '../run/progress.js';
 import { copyToClipboard } from '../util/clipboard.js';
 import { PromptAborted, dim, select } from '../util/prompt.js';
 import { formatClock, formatElapsed, formatSize } from '../util/format.js';
+import { buildReviewerOperation } from '../review/instructions.js';
 
 /** Below this, a "successful" review is more likely a status message. */
 const SUSPICIOUSLY_SHORT = 200;
@@ -714,7 +715,7 @@ async function detectVersion(adapter: Adapter, scratch: string): Promise<string 
   return adapter.parseVersion(`${result.stdout}\n${result.stderr}`);
 }
 
-function displayNames(
+export function displayNames(
   panel: PanelEntry[],
   adapters: Map<string, Adapter>,
 ): Map<string, string> {
@@ -723,7 +724,10 @@ function displayNames(
 
   for (const entry of panel) {
     const label = adapters.get(entry.vendor)?.label ?? entry.vendor;
-    const name = `${label} (${entry.model})`;
+    const modelAndEffort = entry.effort
+      ? `${entry.model} ${entry.effort}`
+      : entry.model;
+    const name = `${label} (${modelAndEffort})`;
 
     base.set(entry.id, name);
     counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -756,7 +760,15 @@ interface ExecuteArgs {
 
 async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
   const { entry, adapter, target } = args;
-  const instructions = args.instructionsOverride ?? entry.instructions;
+  const instructionSelection = buildReviewerOperation({
+    entry,
+    target,
+    nativeReview: adapter.nativeReview,
+    wholeCheckout: args.wholeCheckout ?? false,
+    ...(args.instructionsOverride
+      ? { instructionsOverride: args.instructionsOverride }
+      : {}),
+  });
 
   const base = {
     id: entry.id,
@@ -766,6 +778,8 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     modelRequested: entry.model,
     effortRequested: entry.effort ?? null,
     effortApplied: null as string | null,
+    instructionSource: instructionSelection.source,
+    instructionsPreset: instructionSelection.presetId,
     wallClockMs: 0,
   };
 
@@ -773,23 +787,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
 
   try {
     invocation = adapter.build({
-      // With no diff there is no range for a native review to anchor to, so
-      // every entry drops to a general-purpose run — including entries that
-      // would normally use the vendor's own review workflow. A configured
-      // `instructions` still wins; it is what the user asked for either way.
-      operation: args.wholeCheckout
-        ? {
-            kind: 'generic',
-            target: null,
-            // `genericPrompt` appends the read-only reminder only when there
-            // is a range, so a whole-checkout run carries it itself. The
-            // sandbox flags are the real guarantee; this just stops the
-            // prompt from contradicting them.
-            instructions: wholeCheckoutPrompt(instructions),
-          }
-        : instructions
-          ? { kind: 'generic', target, instructions }
-          : { kind: 'review', target },
+      operation: instructionSelection.operation,
       model: entry.model,
       ...(entry.effort ? { effort: entry.effort } : {}),
       ...(entry.vendorArgs ? { vendorArgs: entry.vendorArgs } : {}),
@@ -1207,8 +1205,7 @@ async function printReport(document: string): Promise<void> {
   // No leading blank line: a redirect must begin with the report itself,
   // whether that is consolidated YAML frontmatter or an unconsolidated
   // heading. Terminal spacing comes from progress output on stderr.
-  process.stdout.write(`${document.trimEnd()}
-`);
+  process.stdout.write(`${document.trimEnd()}\n`);
 
   // stdout matters as much as stdin here: `select` draws its menu there, so
   // prompting under `crbuddy go > review.md` would write the menu into the
@@ -1301,7 +1298,7 @@ function firstLine(text: string | undefined): string {
     .find((entry) => entry !== '');
 
   if (!line) return '';
-  return line.length > 160 ? `${line.slice(0, 157)}\u2026` : line;
+  return line.length > 160 ? `${line.slice(0, 157)}…` : line;
 }
 
 async function flagProbe(
