@@ -5,7 +5,7 @@ import { ConfigError, validate } from '../src/config/load.js';
 import { CONFIG_VERSION } from '../src/config/schema.js';
 import { PRIORITIZED_FINDINGS_PRESET_ID } from '../src/review/instructions.js';
 
-function baseConfig(configVersion = CONFIG_VERSION) {
+function baseConfig(configVersion = CONFIG_VERSION): Record<string, unknown> {
   return {
     configVersion,
     output: {
