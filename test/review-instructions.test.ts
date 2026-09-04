@@ -154,3 +154,22 @@ test('whole-checkout default is explicitly versioned in run provenance', () => {
     assert.match(selection.operation.instructions, /There is no diff to review/);
   }
 });
+
+test('prioritized preset adapts its subject when an empty diff becomes a whole-checkout run', () => {
+  const selection = buildReviewerOperation({
+    entry: { instructionsPreset: PRIORITIZED_FINDINGS_PRESET_ID },
+    target,
+    nativeReview: true,
+    wholeCheckout: true,
+  });
+
+  assert.equal(selection.source, 'preset');
+  assert.equal(selection.presetId, PRIORITIZED_FINDINGS_PRESET_ID);
+  assert.equal(selection.operation.kind, 'generic');
+
+  if (selection.operation.kind === 'generic') {
+    assert.match(selection.operation.instructions, /There is no diff to review/);
+    assert.match(selection.operation.instructions, /defects present in the checked-out code/);
+    assert.doesNotMatch(selection.operation.instructions, /supplied branch or commit range/);
+  }
+});
