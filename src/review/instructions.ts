@@ -1,6 +1,6 @@
-import { Operation } from '../adapters/types.js';
-import { PanelEntry } from '../config/schema.js';
-import { ResolvedTarget } from '../git/target.js';
+import type { Operation } from '../adapters/types.js';
+import type { PanelEntry } from '../config/schema.js';
+import type { ResolvedTarget } from '../git/target.js';
 
 /**
  * Persisted preset ids include a semantic version so a saved config keeps the
