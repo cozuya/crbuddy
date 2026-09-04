@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 
 import { runProcess } from '../src/run/spawn.js';
 
-async function scratch(t: Parameters<typeof test>[1] extends (arg: infer T) => unknown ? T : never) {
+async function scratch(t: TestContext): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'crbuddy-timeout-test-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   return dir;
