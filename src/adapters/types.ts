@@ -47,6 +47,12 @@ export interface VendorModel {
   efforts?: string[];
 }
 
+export interface ModelDiscoveryContext {
+  /** Working directory whose vendor/project configuration should apply. */
+  cwd: string;
+  signal?: AbortSignal;
+}
+
 /**
  * Thrown when crbuddy cannot construct an operation with its required safety
  * guarantees, or when a requested native operation does not exist.
@@ -74,14 +80,25 @@ export interface Adapter {
   readonly efforts: string[];
   /** Pre-selected in `init`. Null when the vendor has no effort control. */
   readonly defaultEffort: string | null;
-  /** CLI version the advisory model/effort lists were written against. */
+  /** CLI version the fallback model/effort lists were written against. */
   readonly listsStampedFor: string;
-  /** Models offered by `crbuddy init`; config may still use any string. */
+  /**
+   * Fallback models used when this vendor has no discovery surface or model
+   * discovery fails. Config may still use any string.
+   */
   readonly models: VendorModel[];
-  /** Which model `init` pre-selects. */
+  /** Which model `init` prefers when it appears in the effective catalog. */
   readonly defaultModel: string;
   /** Minimum CLI version this adapter was written against. */
   readonly minVersion: string;
+
+  /**
+   * Best-effort model discovery from the installed/authenticated vendor CLI.
+   * Return null when no usable catalog can be obtained; callers fall back to
+   * `models`. Throwing is also treated as a discovery failure, not a fatal
+   * setup error.
+   */
+  discoverModels?(context: ModelDiscoveryContext): Promise<VendorModel[] | null>;
 
   /** Argv that prints a version. */
   versionArgs(): string[];
