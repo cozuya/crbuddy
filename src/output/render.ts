@@ -1,6 +1,7 @@
 import { Cluster } from '../merge/cluster.js';
 import { Finding } from '../merge/segment.js';
 import { ResolvedTarget } from '../git/target.js';
+import type { InstructionSource } from '../review/instructions.js';
 
 /**
  * Rendering (DESIGN.md §9). Both files are rendered FROM STRUCTURED DATA -
@@ -18,6 +19,9 @@ export interface RunRecord {
   modelRequested: string;
   effortRequested: string | null;
   effortApplied: string | null;
+  instructionSource: InstructionSource;
+  /** Named maintained prompt actually used, if any. */
+  instructionsPreset: string | null;
   ok: boolean;
   reason?: string;
   wallClockMs: number;
@@ -130,6 +134,8 @@ export function renderFrontmatter(context: ReportContext): string {
         `cliVersion: ${yamlString(run.cliVersion ?? 'unknown')}, ` +
         `model: ${yamlString(run.modelRequested)}, ` +
         `effort: ${yamlString(run.effortApplied ?? 'none')}, ` +
+        `instructions: ${yamlString(run.instructionSource)}, ` +
+        `preset: ${yamlString(run.instructionsPreset ?? 'none')}, ` +
         `wallClockMs: ${run.wallClockMs} }`,
     );
   }
@@ -219,10 +225,12 @@ export function renderRaw(context: ReportContext): string {
 
   for (const run of context.runs) {
     parts.push(
-      `<!-- crbuddy:review id=${run.id} vendor=${run.vendor} model=${run.modelRequested} -->`,
+      `<!-- crbuddy:review id=${run.id} vendor=${run.vendor} model=${run.modelRequested} ` +
+        `instructions=${run.instructionSource} preset=${run.instructionsPreset ?? 'none'} -->`,
     );
 
     parts.push(`## ${run.id} - ${run.vendor} / ${run.modelRequested}\n`);
+    parts.push(`_Instructions: ${instructionDescription(run)}._\n`);
 
     if (run.ok) {
       parts.push(run.output.trim(), '');
@@ -337,6 +345,19 @@ export function renderMerged(
   }
 
   return parts.join('\n');
+}
+
+function instructionDescription(run: RunRecord): string {
+  if (run.instructionSource === 'preset') {
+    return run.instructionsPreset ?? 'built-in preset';
+  }
+
+  if (run.instructionSource === 'custom') return 'custom';
+  if (run.instructionSource === 'override') return 'one-off command-line override';
+
+  return run.instructionsPreset
+    ? `reviewer default (${run.instructionsPreset})`
+    : 'reviewer default';
 }
 
 function diagnosticsLabel(run: RunRecord): string {
