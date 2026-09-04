@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { geminiAdapter } from '../src/adapters/vendors.js';
 import type { ResolvedTarget } from '../src/git/target.js';
 import {
   GENERIC_DEFAULT_REVIEW_PRESET_ID,
@@ -75,6 +76,30 @@ test('a reviewer without native review gets the maintained generic default', () 
     assert.match(selection.operation.instructions, /concrete, actionable defects/);
     assert.match(selection.operation.instructions, /say plainly if there are no actionable findings/);
   }
+});
+
+test('Gemini default resolves to a safe generic invocation instead of native review', () => {
+  const selection = buildReviewerOperation({
+    entry: {},
+    target,
+    nativeReview: geminiAdapter.nativeReview,
+    wholeCheckout: false,
+  });
+
+  const invocation = geminiAdapter.build({
+    operation: selection.operation,
+    model: 'gemini-2.5-pro',
+    repoRoot: '/repo',
+    supports: () => true,
+  });
+
+  assert.equal(selection.operation.kind, 'generic');
+  assert.equal(selection.presetId, GENERIC_DEFAULT_REVIEW_PRESET_ID);
+  assert.ok(invocation.args.includes('--approval-mode'));
+  assert.ok(invocation.args.includes('plan'));
+
+  const promptCarrier = `${invocation.stdin ?? ''}\n${invocation.args.join('\n')}`;
+  assert.match(promptCarrier, /concrete, actionable defects/);
 });
 
 test('custom instructions remain generic and are not reclassified as a preset', () => {
