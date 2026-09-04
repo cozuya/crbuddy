@@ -72,9 +72,12 @@ export interface Config {
    * mechanism — see DESIGN.md §6.
    */
   refuseIfOutputExists: boolean;
-  /** Per-run wall-clock ceiling. Converts a hang into an ordinary failure. */
+  /**
+   * Maximum reviewer inactivity. stdout or stderr activity resets the timer;
+   * the process runner still enforces a separate hard wall-clock ceiling.
+   */
   timeoutMs: number;
-  /** Separate ceiling for the consolidation pass. */
+  /** Separate inactivity limit for the consolidation pass. */
   mergeTimeoutMs: number;
   /** 0 means unlimited. The semaphore exists from day one regardless. */
   maxConcurrent: number;
@@ -96,7 +99,7 @@ export const DEFAULTS = {
   configVersion: CONFIG_VERSION,
   target: 'uncommitted' as Target,
   refuseIfOutputExists: false,
-  timeoutMs: 60 * 60 * 1000,
+  timeoutMs: 90 * 60 * 1000,
   mergeTimeoutMs: 60 * 60 * 1000,
   maxConcurrent: 0,
   maxDiffBytes: 2_000_000,
