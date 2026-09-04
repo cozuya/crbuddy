@@ -76,7 +76,7 @@ Named fields only. Model and effort identifiers are vendor-native strings.
   },
   "target": "uncommitted",
   "refuseIfOutputExists": false,
-  "timeoutMs": 3600000,
+  "timeoutMs": 5400000,
   "mergeTimeoutMs": 3600000,
   "maxConcurrent": 0,
   "maxDiffBytes": 2000000,
@@ -116,6 +116,8 @@ Named fields only. Model and effort identifiers are vendor-native strings.
 ```
 
 Unknown keys are fatal. Panel IDs are stable provenance labels. `instructions` and `instructionsPreset` are mutually exclusive. Persisted preset IDs are versioned so a saved config keeps the behavior it selected when later releases add revised presets. `vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not model. It must never be able to weaken read-only, sandbox, approval, or permission policy; those controls are owned by crbuddy even when config is project-local.
+
+`timeoutMs` is the maximum interval with no stdout/stderr activity from a reviewer. New configs default to 90 minutes. `mergeTimeoutMs` uses the same activity-aware semantics and defaults to one hour. The process runner also applies a hard wall-clock ceiling at four times the configured inactivity timeout so continuous output cannot keep a runaway process alive forever.
 
 ### Wizard behavior
 
@@ -259,7 +261,8 @@ The help surface is adapter-specific. “Deepest subcommand” is not inherently
 - direct spawn with argv arrays; never shell command strings
 - neutralize shared stdin except when intentionally providing prompt input
 - continuously drain child output
-- time out every lane
+- reset the inactivity watchdog on stdout or stderr activity
+- retain a separate hard wall-clock ceiling so continuous chatter cannot prevent timeout forever
 - strip terminal control sequences from captured output
 - kill process trees on cancellation
 - support Windows `.cmd` shims through the platform spawning layer
@@ -279,7 +282,11 @@ Status labels include the configured vendor-native effort when one is present, f
 
 ### Timeouts and cancellation
 
-Every review lane has a timeout; the consolidation step has a separate timeout.
+Reviewer timeout is based on **inactivity**, not total elapsed runtime. Any stdout or stderr data resets the inactivity timer because coding CLIs commonly stream progress on stderr while reserving stdout for their final response. A reviewer that remains observably active may therefore run longer than `timeoutMs`.
+
+`timeoutMs` defaults to 90 minutes. Existing configs preserve their stored numeric value under the new semantics, so a legacy one-hour value becomes one hour of silence rather than an unconditional one-hour kill. Every process also receives an absolute wall-clock ceiling of four times its inactivity timeout; with the default reviewer setting that is six hours. The hard ceiling is a runaway guard, not the normal completion budget.
+
+The consolidation process uses the same activity-aware mechanism with its separate `mergeTimeoutMs` value, which defaults to one hour. Short preflight/probe commands may explicitly set their hard ceiling equal to their inactivity timeout so their historical fixed short deadline remains fixed.
 
 Ctrl-C aborts the run and restores prior output. A second interrupt escalates process-tree termination.
 
