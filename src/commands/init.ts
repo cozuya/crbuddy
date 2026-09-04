@@ -27,6 +27,10 @@ import { ADAPTERS, getAdapter } from '../adapters/vendors.js';
 import { withModelDiscovery } from '../adapters/model-discovery.js';
 import { probe } from '../run/spawn.js';
 import { Adapter, VendorModel } from '../adapters/types.js';
+import {
+  PRIORITIZED_FINDINGS_PRESET_ID,
+  ReviewPresetId,
+} from '../review/instructions.js';
 import { PromptAborted } from '../util/prompt.js';
 import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
 
@@ -410,24 +414,29 @@ function formatDetection(detection: Detection): string {
 function formatReviewer(entry: PanelEntry, adapters: Adapter[] = ADAPTERS): string {
   let vendorLabel = entry.vendor;
   let modelLabel = entry.model;
+  let nativeReview: boolean | undefined;
 
   try {
     const adapter =
       adapters.find((candidate) => candidate.name === entry.vendor) ??
       getAdapter(entry.vendor);
     vendorLabel = adapter.label;
+    nativeReview = adapter.nativeReview;
     modelLabel =
       adapter.models.find((model) => model.id === entry.model)?.label ?? entry.model;
   } catch {
     // Existing hand-edited configs may name an adapter unknown to this build.
   }
 
-  return [
-    vendorLabel,
-    modelLabel,
-    entry.effort,
-    entry.instructions ? 'custom instructions' : undefined,
-  ]
+  const instructionLabel = entry.instructionsPreset
+    ? 'prioritized findings'
+    : entry.instructions
+      ? 'custom instructions'
+      : nativeReview === false
+        ? 'crbuddy default'
+        : undefined;
+
+  return [vendorLabel, modelLabel, entry.effort, instructionLabel]
     .filter((part): part is string => Boolean(part))
     .join(' \u00b7 ');
 }
@@ -570,6 +579,49 @@ async function pickEffort(
   return chosen === OTHER ? ui.text('Effort value', current ?? '') : chosen;
 }
 
+type ReviewerInstructionChoice = 'preset' | 'custom' | 'default';
+
+async function pickReviewerInstructions(
+  ui: WizardUI,
+  adapter: Adapter,
+): Promise<{ instructions?: string; instructionsPreset?: ReviewPresetId }> {
+  const defaultHint = adapter.nativeReview
+    ? adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'
+    : 'crbuddy generic review';
+
+  const choice = await ui.select<ReviewerInstructionChoice>(
+    'Choose instructions for this reviewer',
+    [
+      {
+        label: 'Prioritized findings',
+        value: 'preset',
+        hint: 'built-in P0–P3 preset; no prompt entry required',
+      },
+      {
+        label: 'Custom instructions…',
+        value: 'custom',
+        hint: 'enter your own review prompt',
+      },
+      {
+        label: 'Reviewer default',
+        value: 'default',
+        hint: defaultHint,
+      },
+    ],
+    2,
+  );
+
+  if (choice === 'preset') {
+    return { instructionsPreset: PRIORITIZED_FINDINGS_PRESET_ID };
+  }
+
+  if (choice === 'custom') {
+    return { instructions: await ui.multiline('Review instructions') };
+  }
+
+  return {};
+}
+
 async function buildPanel(
   ui: WizardUI,
   available: Adapter[],
@@ -618,24 +670,7 @@ async function buildPanel(
 
     const model = await pickModel(ui, adapter);
     const effort = await pickEffort(ui, adapter, model);
-
-    let instructions: string | undefined;
-
-    if (!adapter.nativeReview) {
-      ui.message(
-        `${adapter.label} does not expose a supported headless native code-review ` +
-          'operation, so this lane needs explicit review instructions.',
-        'warn',
-      );
-      instructions = await ui.multiline('Review instructions');
-    } else {
-      const custom = await ui.confirm(
-        `Give this reviewer custom instructions? ` +
-          `(default: ${adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'})`,
-        false,
-      );
-      instructions = custom ? await ui.multiline('Review instructions') : undefined;
-    }
+    const instructionConfig = await pickReviewerInstructions(ui, adapter);
 
     const seen = new Set(panel.map((entry) => entry.id));
     const base = slug(`${adapter.name}-${model}`);
@@ -648,9 +683,13 @@ async function buildPanel(
       n += 1;
     }
 
-    const entry: PanelEntry = { id, vendor: adapter.name, model };
+    const entry: PanelEntry = {
+      id,
+      vendor: adapter.name,
+      model,
+      ...instructionConfig,
+    };
     if (effort) entry.effort = effort;
-    if (instructions) entry.instructions = instructions;
 
     panel.push(entry);
     ui.message(`Added ${formatReviewer(entry, available)}`, 'success');
