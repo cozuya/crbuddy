@@ -17,6 +17,7 @@ import {
   PanelEntry,
   Target,
 } from './schema.js';
+import { isReviewPresetId } from '../review/instructions.js';
 
 export class ConfigError extends Error {}
 
@@ -179,6 +180,7 @@ const ENTRY_KEYS = new Set([
   'model',
   'effort',
   'instructions',
+  'instructionsPreset',
   'vendorArgs',
 ]);
 
@@ -595,6 +597,21 @@ function validatePanel(value: unknown, where: string): PanelEntry[] {
 
     if (raw.instructions !== undefined) {
       entry.instructions = str(raw.instructions, undefined, `${at}.instructions`);
+    }
+
+    if (raw.instructionsPreset !== undefined) {
+      if (!isReviewPresetId(raw.instructionsPreset)) {
+        throw new ConfigError(
+          `${at}.instructionsPreset: unknown preset ${JSON.stringify(raw.instructionsPreset)}.`,
+        );
+      }
+      entry.instructionsPreset = raw.instructionsPreset;
+    }
+
+    if (entry.instructions && entry.instructionsPreset) {
+      throw new ConfigError(
+        `${at}: "instructions" and "instructionsPreset" are mutually exclusive.`,
+      );
     }
 
     if (raw.vendorArgs !== undefined) {

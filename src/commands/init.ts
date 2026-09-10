@@ -24,8 +24,13 @@ import {
   slug,
 } from '../config/load.js';
 import { ADAPTERS, getAdapter } from '../adapters/vendors.js';
+import { withModelDiscovery } from '../adapters/model-discovery.js';
 import { probe } from '../run/spawn.js';
-import { Adapter } from '../adapters/types.js';
+import { Adapter, VendorModel } from '../adapters/types.js';
+import {
+  PRIORITIZED_FINDINGS_PRESET_ID,
+  ReviewPresetId,
+} from '../review/instructions.js';
 import { PromptAborted } from '../util/prompt.js';
 import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
 
@@ -44,9 +49,13 @@ export async function runInit(
   dependencies: InitDependencies = {},
 ): Promise<number> {
   const ui = dependencies.ui ?? (await createWizardUI());
+  const discoveryCwd = options.repoRoot ?? process.cwd();
+  const detect =
+    dependencies.detect ??
+    ((signal?: AbortSignal) => detectAdapters(discoveryCwd, signal));
 
   try {
-    return await wizard(options, ui, dependencies.detect ?? detectAdapters);
+    return await wizard(options, ui, detect);
   } catch (error) {
     const name = (error as { name?: string })?.name;
 
@@ -152,11 +161,13 @@ async function wizard(
   }
 
   const detections = await ui.spinner(
-    'Checking vendor CLIs',
+    'Checking vendor CLIs and model catalogs',
     detect,
     'Vendor CLIs checked',
   );
-  const available = detections.filter((d) => d.present).map((d) => d.adapter);
+  const available = detections
+    .filter((detection) => detection.present)
+    .map(effectiveAdapter);
 
   ui.note(detections.map(formatDetection).join('\n'), 'Vendor CLIs');
 
@@ -170,7 +181,8 @@ async function wizard(
   }
 
   ui.message(
-    'Detection checks presence only; crbuddy does not check whether CLIs are logged in.',
+    'Model discovery is best-effort. If a CLI does not expose a usable catalog, ' +
+      'crbuddy falls back to its built-in list; `Other…` still accepts any model id.',
   );
 
   const panel = await buildPanel(ui, available, existing?.panel ?? []);
@@ -204,7 +216,7 @@ async function wizard(
       : null;
 
   ui.note(
-    formatConfigSummary(scope, targetFile, config, gitignorePlan),
+    formatConfigSummary(scope, targetFile, config, gitignorePlan, available),
     'Configuration',
   );
 
@@ -313,21 +325,53 @@ export interface Detection {
   adapter: Adapter;
   present: boolean;
   version: string | null;
+  models?: VendorModel[];
+  modelSource?: 'discovered' | 'fallback';
+  modelError?: string;
   error?: string;
 }
 
-async function detectAdapters(signal?: AbortSignal): Promise<Detection[]> {
+async function detectAdapters(
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<Detection[]> {
   const results: Detection[] = [];
 
-  for (const adapter of ADAPTERS) {
+  for (const registered of ADAPTERS) {
+    const adapter = withModelDiscovery(registered);
     const result = await probe(adapter.command, adapter.versionArgs(), signal);
 
     if (signal?.aborted) throw new PromptAborted();
+
+    let models = adapter.models;
+    let modelSource: 'discovered' | 'fallback' = 'fallback';
+    let modelError: string | undefined;
+
+    if (result.present && adapter.discoverModels) {
+      try {
+        const discovered = await adapter.discoverModels({ cwd, signal });
+
+        if (signal?.aborted) throw new PromptAborted();
+
+        if (discovered && discovered.length > 0) {
+          models = discovered;
+          modelSource = 'discovered';
+        } else {
+          modelError = 'the CLI returned no usable models';
+        }
+      } catch (error) {
+        if (signal?.aborted) throw new PromptAborted();
+        modelError = error instanceof Error ? error.message : String(error);
+      }
+    }
 
     results.push({
       adapter,
       present: result.present,
       version: result.present ? adapter.parseVersion(result.output ?? '') : null,
+      models,
+      modelSource,
+      ...(modelError ? { modelError } : {}),
       ...(result.error ? { error: result.error } : {}),
     });
   }
@@ -335,43 +379,70 @@ async function detectAdapters(signal?: AbortSignal): Promise<Detection[]> {
   return results;
 }
 
+function effectiveAdapter(detection: Detection): Adapter {
+  return detection.models
+    ? { ...detection.adapter, models: detection.models }
+    : detection.adapter;
+}
+
 function formatDetection(detection: Detection): string {
   const mark = detection.present ? '\u2713' : '\u00b7';
   const version = detection.present
     ? detection.version ?? 'installed; version unknown'
     : 'unavailable';
-  const summary =
-    `${mark} ${detection.adapter.label}  ${version} ` +
-    `(${detection.adapter.command})`;
+  const lines = [
+    `${mark} ${detection.adapter.label}  ${version} (${detection.adapter.command})`,
+  ];
 
-  return detection.error ? `${summary}\n  ${detection.error}` : summary;
+  if (detection.present) {
+    const models = detection.models ?? detection.adapter.models;
+    lines.push(
+      `  models: ${models.length} ${
+        detection.modelSource === 'discovered' ? 'reported by CLI' : 'from fallback list'
+      }`,
+    );
+
+    if (detection.modelError) {
+      lines.push(`  model discovery: ${detection.modelError}`);
+    }
+  }
+
+  if (detection.error) lines.push(`  ${detection.error}`);
+  return lines.join('\n');
 }
 
-function formatReviewer(entry: PanelEntry): string {
+function formatReviewer(entry: PanelEntry, adapters: Adapter[] = ADAPTERS): string {
   let vendorLabel = entry.vendor;
   let modelLabel = entry.model;
+  let nativeReview: boolean | undefined;
 
   try {
-    const adapter = getAdapter(entry.vendor);
+    const adapter =
+      adapters.find((candidate) => candidate.name === entry.vendor) ??
+      getAdapter(entry.vendor);
     vendorLabel = adapter.label;
+    nativeReview = adapter.nativeReview;
     modelLabel =
       adapter.models.find((model) => model.id === entry.model)?.label ?? entry.model;
   } catch {
     // Existing hand-edited configs may name an adapter unknown to this build.
   }
 
-  return [
-    vendorLabel,
-    modelLabel,
-    entry.effort,
-    entry.instructions ? 'custom instructions' : undefined,
-  ]
+  const instructionLabel = entry.instructionsPreset
+    ? 'prioritized findings'
+    : entry.instructions
+      ? 'custom instructions'
+      : nativeReview === false
+        ? 'crbuddy default'
+        : undefined;
+
+  return [vendorLabel, modelLabel, entry.effort, instructionLabel]
     .filter((part): part is string => Boolean(part))
     .join(' \u00b7 ');
 }
 
-function formatPanel(panel: PanelEntry[]): string {
-  return panel.map(formatReviewer).join('\n');
+function formatPanel(panel: PanelEntry[], adapters: Adapter[] = ADAPTERS): string {
+  return panel.map((entry) => formatReviewer(entry, adapters)).join('\n');
 }
 
 function formatConfigSummary(
@@ -379,13 +450,14 @@ function formatConfigSummary(
   targetFile: string,
   config: Config,
   gitignorePlan: GitignorePlan | null,
+  adapters: Adapter[] = ADAPTERS,
 ): string {
   const lines = [
     `Config: ${scope === 'project' ? 'This repository' : 'Global'}`,
     `Path: ${targetFile}`,
     '',
     'Reviewers:',
-    ...config.panel.map((entry) => `  ${formatReviewer(entry)}`),
+    ...config.panel.map((entry) => `  ${formatReviewer(entry, adapters)}`),
     '',
   ];
 
@@ -396,7 +468,7 @@ function formatConfigSummary(
       model: config.merge.model,
       ...(config.merge.effort ? { effort: config.merge.effort } : {}),
     };
-    lines.push(`Consolidation: Enabled \u00b7 ${formatReviewer(merger)}`);
+    lines.push(`Consolidation: Enabled \u00b7 ${formatReviewer(merger, adapters)}`);
   } else {
     lines.push('Consolidation: Disabled');
   }
@@ -436,6 +508,14 @@ async function pickModel(
     ...(model.hint ? { hint: model.hint } : {}),
   }));
 
+  if (current && !adapter.models.some((model) => model.id === current)) {
+    choices.unshift({
+      label: current,
+      value: current,
+      hint: 'currently configured; not reported by the current model catalog',
+    });
+  }
+
   choices.push({
     label: 'Other\u2026',
     value: OTHER,
@@ -443,7 +523,7 @@ async function pickModel(
   });
 
   const preferred = current ?? adapter.defaultModel;
-  const index = adapter.models.findIndex((model) => model.id === preferred);
+  const index = choices.findIndex((choice) => choice.value === preferred);
 
   const chosen = await ui.select(
     `Model for ${adapter.label}`,
@@ -499,6 +579,49 @@ async function pickEffort(
   return chosen === OTHER ? ui.text('Effort value', current ?? '') : chosen;
 }
 
+type ReviewerInstructionChoice = 'preset' | 'custom' | 'default';
+
+async function pickReviewerInstructions(
+  ui: WizardUI,
+  adapter: Adapter,
+): Promise<{ instructions?: string; instructionsPreset?: ReviewPresetId }> {
+  const defaultHint = adapter.nativeReview
+    ? adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'
+    : 'crbuddy generic review';
+
+  const choice = await ui.select<ReviewerInstructionChoice>(
+    'Choose instructions for this reviewer',
+    [
+      {
+        label: 'Prioritized findings',
+        value: 'preset',
+        hint: 'built-in P0–P3 preset; no prompt entry required',
+      },
+      {
+        label: 'Custom instructions…',
+        value: 'custom',
+        hint: 'enter your own review prompt',
+      },
+      {
+        label: 'Reviewer default',
+        value: 'default',
+        hint: defaultHint,
+      },
+    ],
+    2,
+  );
+
+  if (choice === 'preset') {
+    return { instructionsPreset: PRIORITIZED_FINDINGS_PRESET_ID };
+  }
+
+  if (choice === 'custom') {
+    return { instructions: await ui.multiline('Review instructions') };
+  }
+
+  return {};
+}
+
 async function buildPanel(
   ui: WizardUI,
   available: Adapter[],
@@ -507,11 +630,11 @@ async function buildPanel(
   const panel: PanelEntry[] = [];
 
   if (existing.length > 0) {
-    ui.note(formatPanel(existing), 'Current panel');
+    ui.note(formatPanel(existing, available), 'Current panel');
 
     if (await ui.confirm('Keep these reviewers?', true)) {
       panel.push(...existing);
-      ui.note(formatPanel(panel), 'Panel');
+      ui.note(formatPanel(panel, available), 'Panel');
     } else {
       // Said out loud because nothing else on screen changes: the listing
       // above stays visible, and without this the next prompt reads as if
@@ -547,24 +670,7 @@ async function buildPanel(
 
     const model = await pickModel(ui, adapter);
     const effort = await pickEffort(ui, adapter, model);
-
-    let instructions: string | undefined;
-
-    if (!adapter.nativeReview) {
-      ui.message(
-        `${adapter.label} does not expose a supported headless native code-review ` +
-          'operation, so this lane needs explicit review instructions.',
-        'warn',
-      );
-      instructions = await ui.multiline('Review instructions');
-    } else {
-      const custom = await ui.confirm(
-        `Give this reviewer custom instructions? ` +
-          `(default: ${adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'})`,
-        false,
-      );
-      instructions = custom ? await ui.multiline('Review instructions') : undefined;
-    }
+    const instructionConfig = await pickReviewerInstructions(ui, adapter);
 
     const seen = new Set(panel.map((entry) => entry.id));
     const base = slug(`${adapter.name}-${model}`);
@@ -577,13 +683,17 @@ async function buildPanel(
       n += 1;
     }
 
-    const entry: PanelEntry = { id, vendor: adapter.name, model };
+    const entry: PanelEntry = {
+      id,
+      vendor: adapter.name,
+      model,
+      ...instructionConfig,
+    };
     if (effort) entry.effort = effort;
-    if (instructions) entry.instructions = instructions;
 
     panel.push(entry);
-    ui.message(`Added ${formatReviewer(entry)}`, 'success');
-    ui.note(formatPanel(panel), 'Panel');
+    ui.message(`Added ${formatReviewer(entry, available)}`, 'success');
+    ui.note(formatPanel(panel, available), 'Panel');
   }
 
   if (panel.length === 0) {

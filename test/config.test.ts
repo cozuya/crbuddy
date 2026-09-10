@@ -9,6 +9,7 @@ import {
   stripJsonComments,
   validate,
 } from '../src/config/load.js';
+import { CONFIG_VERSION } from '../src/config/schema.js';
 
 const minimal = {
   panel: [{ vendor: 'claude', model: 'opus' }],
@@ -17,10 +18,10 @@ const minimal = {
 test('accepts a minimal config and fills defaults', () => {
   const config = validate(minimal);
 
-  assert.equal(config.configVersion, 1);
+  assert.equal(config.configVersion, CONFIG_VERSION);
   assert.equal(config.target, 'uncommitted');
   assert.equal(config.refuseIfOutputExists, false);
-  assert.equal(config.timeoutMs, 60 * 60 * 1000);
+  assert.equal(config.timeoutMs, 90 * 60 * 1000);
   assert.equal(config.mergeTimeoutMs, 60 * 60 * 1000);
   assert.equal(config.output.merged, 'CODE-REVIEW-HANDOFF.md');
   assert.equal(config.merge.enabled, false);

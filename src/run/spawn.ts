@@ -31,7 +31,14 @@ export interface SpawnRequest {
   cwd: string;
   stdin?: string;
   env?: Record<string, string>;
+  /** Maximum time with no stdout/stderr activity before the process is terminated. */
   timeoutMs: number;
+  /**
+   * Absolute wall-clock ceiling even while output remains active. Defaults to
+   * four times timeoutMs so activity can extend real agent work without making
+   * a chatty runaway process immortal.
+   */
+  hardTimeoutMs?: number;
   /** Where stdout/stderr are spooled. Large outputs never sit in memory. */
   scratchDir: string;
   id: string;
@@ -160,6 +167,36 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
   request.signal?.addEventListener('abort', onAbort, { once: true });
   if (request.signal?.aborted) terminate();
 
+  let timedOut = false;
+  let idleTimer: NodeJS.Timeout | undefined;
+  let hardTimer: NodeJS.Timeout | undefined;
+
+  const timeout = (): void => {
+    if (terminating) return;
+    timedOut = true;
+    terminate();
+  };
+
+  const armIdleTimer = (): void => {
+    if (terminating) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(timeout, request.timeoutMs);
+    idleTimer.unref();
+  };
+
+  // Agent CLIs commonly stream progress to stderr while reserving stdout for
+  // the final answer. Either stream is evidence that the process is alive and
+  // making observable progress, so both reset the inactivity watchdog.
+  child.stdout?.on('data', armIdleTimer);
+  child.stderr?.on('data', armIdleTimer);
+  armIdleTimer();
+
+  hardTimer = setTimeout(
+    timeout,
+    request.hardTimeoutMs ?? request.timeoutMs * 4,
+  );
+  hardTimer.unref();
+
   // Drain both pipes continuously or the child backpressures and stalls.
   child.stdout?.pipe(outFile);
   child.stderr?.pipe(errFile);
@@ -181,13 +218,6 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
 
     child.stdin.end();
   }
-
-  let timedOut = false;
-
-  const timer = setTimeout(() => {
-    timedOut = true;
-    terminate();
-  }, request.timeoutMs);
 
   let code: number | null = null;
   let signal: NodeJS.Signals | null = null;
@@ -225,7 +255,8 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
       spawnError: String(error),
     };
   } finally {
-    clearTimeout(timer);
+    if (idleTimer) clearTimeout(idleTimer);
+    if (hardTimer) clearTimeout(hardTimer);
 
     if (killTimer) {
       // The direct child closed before its grace period elapsed. Detached
@@ -332,6 +363,7 @@ async function runProbe(
     args,
     cwd: scratch,
     timeoutMs: 20_000,
+    hardTimeoutMs: 20_000,
     scratchDir: scratch,
     id: `probe-${command}-${process.pid}`,
     signal,

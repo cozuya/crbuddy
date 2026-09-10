@@ -1,12 +1,12 @@
 {
-  "configVersion": 1,
+  "configVersion": 2,
   "output": {
     "merged": "CODE-REVIEW-HANDOFF.md",
     "raw": "CODE-REVIEW-HANDOFF.raw.md"
   },
   "target": "uncommitted",
   "refuseIfOutputExists": false,
-  "timeoutMs": 3600000,
+  "timeoutMs": 5400000,
   "mergeTimeoutMs": 3600000,
   "maxConcurrent": 0,
   "maxDiffBytes": 2000000,
@@ -18,12 +18,13 @@
   },
   "panel": [
     { "vendor": "claude", "model": "opus", "effort": "max" },
-    { "vendor": "codex", "model": "gpt-5.6-sol", "effort": "xhigh" },
     {
-      "vendor": "gemini",
-      "model": "gemini-2.5-pro",
-      "instructions": "Review the changes for correctness, regressions, and missing tests."
+      "vendor": "codex",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "instructionsPreset": "prioritized-findings-v1"
     },
+    { "vendor": "gemini", "model": "gemini-2.5-pro" },
     {
       "id": "security",
       "vendor": "claude",
