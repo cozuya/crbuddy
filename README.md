@@ -8,6 +8,11 @@ crbuddy turns all that into one command, `crb go`, and outputs either a file con
 
 More details can be found in [`GUIDE.md`](GUIDE.md), but this should be enough information for most users to get started.  This application currently supports Codex CLI, Claude Code, and Gemini CLI.
 
+`crb init` / `crb config` can optionally enable ntfy push notifications when a
+`crb go` review finishes. Notifications default to off and apply across all
+repositories. The Codex model picker includes GPT-6 Astra; GPT-5.6 Sol remains
+the default.
+
 ## Note on AI usage
 
 This app does not have "AI inside of it", it uses yours and will spend tokens on your behalf just like a manual code review from an agent.

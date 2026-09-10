@@ -39,6 +39,8 @@ export interface SpawnRequest {
   signal?: AbortSignal;
   /** Override the termination grace period in focused process-tree tests. */
   killGraceMs?: number;
+  /** Child startup; a Windows shim can still report a later spawnError. */
+  onStart?: () => void;
 }
 
 export interface SpawnResult {
@@ -131,6 +133,7 @@ export async function runProcess(request: SpawnRequest): Promise<SpawnResult> {
   }
 
   live.add(child);
+  if (request.onStart) child.once('spawn', request.onStart);
 
   let killTimer: NodeJS.Timeout | undefined;
   let terminating = false;

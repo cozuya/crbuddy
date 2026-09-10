@@ -44,7 +44,7 @@ for free.
 
 ## Supported vendor CLIs
 
-crbuddy v0.1 has adapters for exactly three CLI interfaces:
+crbuddy has adapters for exactly three CLI interfaces:
 
 | Config `vendor` | Executable | Native diff review | Generic instructed lanes and consolidation |
 |---|---|---|---|
@@ -126,6 +126,9 @@ Global at `~/.crbuddy/config.json`, or per-repository at
 entirely** - there is no merging, because merging arrays of panel entries is
 ambiguous and makes "which panel actually ran?" hard to answer.
 
+Notification preferences are separate: `~/.crbuddy/settings.json` is global-only
+and applies even when a repository supplies its own review config.
+
 A copyable configuration is shipped in
 [`examples/config.example.json`](examples/config.example.json).
 
@@ -178,6 +181,46 @@ Other keys, all optional: `refuseIfOutputExists` (default `false`),
 Unknown keys are a hard error. A typo that silently does nothing is worse
 than a failed startup.
 
+### Optional ntfy notifications
+
+At the end of `crb init` / `crb config`, choose whether to receive a push when
+`crb go` finishes. The first-time default is No. Choose Yes, select ntfy, and
+enter `https://ntfy.sh/<topic>`. Subscribe to the same topic in the ntfy app.
+Use a long, unguessable topic name: the topic acts like a shared secret.
+[ntfy topic names](https://docs.ntfy.sh/publish/#picking-a-topic) use 1–64 letters,
+numbers, underscores or dashes. Only hosted ntfy URLs are supported, without
+credentials, extra paths, non-default ports, query strings or fragments.
+
+Reopening setup defaults to Yes and offers the existing URL as its text
+default; Enter retains it. Choosing No removes the stored endpoint. These
+preferences are saved globally even while editing a repository's review config.
+Piped setup hides entered URLs and saved defaults from its output; Enter still
+retains a saved URL. Interactive setup displays the URL for editing.
+Setup sends no test push. In piped setup, notification answers follow all the
+existing review and `.gitignore` answers: No ends the questions; Yes adds the
+service choice and URL. The final save confirmation remains TTY-only.
+Piped scripts must supply those answers too: append `n` to disable notifications,
+or `y`, a service answer and a URL answer to enable or retain them. As with other
+wizard questions, running out of answers cancels setup before anything is saved.
+
+If the review config saves but global preferences cannot be saved, setup reports
+both facts and exits with code 1. Previous notification preferences remain
+unchanged; the review config and any approved `.gitignore` update are still saved.
+
+After at least one reviewer starts, a finished run sends one POST with the
+repository name and a complete, partial or failed status. It includes no code,
+findings, local paths or topic URL. Setup, diagnostics, argument/config/preflight
+errors, empty-diff refusals and Ctrl+C cancellation during the review do not
+send a push. In terminal mode, delivery happens after the report is printed and
+before the final clipboard menu waits for input. Ctrl+C at that menu closes it
+without sending another push; the completed review has already been notified.
+
+Delivery is best-effort, with a two-second total budget and no retries or redirects.
+If delivery cannot be confirmed, crbuddy prints a concise warning without the
+endpoint and preserves the review's exit code. A timed-out request may still have
+delivered a push. Missing settings disable notifications; malformed settings warn
+and allow the review to proceed. Run `crb config` to repair them.
+
 ### Panel entries
 
 `instructions` is optional for vendors with a supported headless native review
@@ -201,7 +244,18 @@ settings or capabilities, extend accessible roots, or choose Codex config
 layers. This is best-effort matching against changing vendor CLIs, not a
 security boundary or proof that an unknown flag is inert.
 
-### Effort
+### Models and effort
+
+The Codex model picker offers GPT-6 Astra alongside GPT-5.6 Sol, Terra and Luna.
+Sol remains the default, and “Other…” still accepts arbitrary model IDs. Astra
+must be supported by your installed Codex CLI and account; adding it does not
+raise crbuddy's minimum Codex CLI version.
+Changing the consolidation vendor uses the new vendor's model and effort defaults.
+Re-enabling consolidation without a saved model also uses the vendor's default.
+
+For piped setup, Codex model numbers in v0.3.0 are `1` Astra, `2` Sol, `3` Terra,
+`4` Luna, `5` Other; update scripts that used the v0.2.0 positions. An empty
+model answer still accepts the configured model or, on first setup, Sol.
 
 Effort values are **vendor-native and passed through verbatim**. There is no
 crbuddy effort vocabulary and no translation.
