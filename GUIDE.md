@@ -219,7 +219,9 @@ Delivery is best-effort, with a two-second total budget and no retries or redire
 If delivery cannot be confirmed, crbuddy prints a concise warning without the
 endpoint and preserves the review's exit code. A timed-out request may still have
 delivered a push. Missing settings disable notifications; malformed settings warn
-and allow the review to proceed. Run `crb config` to repair them.
+and allow the review to proceed. Repair `~/.crbuddy/settings.json` manually to
+preserve its values, or run `crb config` to replace them with your new choices.
+Choosing No clears the saved setting even if the previous file could not be read.
 
 ### Panel entries
 

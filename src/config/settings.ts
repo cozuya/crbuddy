@@ -71,7 +71,8 @@ export async function loadGlobalSettings(
       // JSON and filesystem errors can contain user data. Never echo them.
       warn(
         'Warning: could not read global notification settings; notifications ' +
-          'are disabled. Run `crb config` to repair ~/.crbuddy/settings.json.',
+          'are disabled. Repair ~/.crbuddy/settings.json manually to preserve ' +
+          'its values, or run `crb config` to replace them.',
       );
     }
 
