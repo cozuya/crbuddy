@@ -1,7 +1,7 @@
 {
   "name": "crbuddy",
-  "version": "0.2.0",
-  "description": "Fan one code review out across several vendor coding agents in parallel, then consolidate.",
+  "version": "0.3.0",
+  "description": "Run independent multi-model code reviews with Claude Code, OpenAI Codex, and Gemini CLI in parallel, then write one handoff.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cozuya/crbuddy.git"
@@ -38,8 +38,20 @@
   },
   "keywords": [
     "code-review",
-    "cli",
-    "multi-agent"
+    "ai-code-review",
+    "independent-review",
+    "second-opinion",
+    "parallel-code-review",
+    "multi-model",
+    "cross-model",
+    "multi-agent",
+    "claude-code",
+    "codex",
+    "codex-cli",
+    "openai-codex",
+    "gemini-cli",
+    "developer-tools",
+    "cli"
   ],
   "license": "MIT",
   "devDependencies": {

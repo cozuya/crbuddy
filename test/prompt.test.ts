@@ -73,6 +73,28 @@ test('the TTY adapter maps defaults and disabled choices into Clack without help
   ]);
 });
 
+test('real Clack renders Other but skips the disabled service when navigating', { timeout: 2_000 }, async (t) => {
+  // The enabled case is a control: prove that Arrow Down actually moves the cursor.
+  for (const disabled of [false, true]) {
+    const input = new TtyInput();
+    const output = new PassThrough();
+    t.after(() => { input.destroy(); output.destroy(); });
+    let rendered = '';
+    output.on('data', (chunk: Buffer) => { rendered += chunk.toString(); });
+    // Use the installed Clack implementation, not a mock that chooses its own value.
+    const ui = await createWizardUI({ interactive: true, input, output });
+    const selected = ui.select('Notification service', [
+      { label: 'ntfy', value: 'ntfy' },
+      { label: 'Other', value: 'other', disabled, hint: 'coming later' },
+    ], 0);
+    input.write('\u001b[B'); // Try moving down to Other, then submit.
+    input.write('\r');
+    assert.equal(await selected, disabled ? 'ntfy' : 'other');
+    assert.match(rendered, /Other.*coming later/s);
+    assert.equal(input.isRaw, false);
+  }
+});
+
 test('the TTY adapter normalizes Clack cancellation to PromptAborted', async () => {
   const cancelled = Symbol('cancelled');
   const ui = await createWizardUI({
@@ -104,6 +126,23 @@ test('TTY text uses the fallback for whitespace-only input', async () => {
   });
 
   assert.equal(await ui.text('Base branch', 'main'), 'main');
+});
+
+test('TTY text offers the ntfy endpoint as an Enter-accepting default', async () => {
+  const endpoint = 'https://ntfy.sh/private-test-topic';
+  const ui = await createWizardUI({
+    interactive: true,
+    input: new PassThrough(),
+    output: new PassThrough(),
+    loadClack: async () => fakeClack({
+      text: async (options: Record<string, unknown>) => {
+        assert.equal(options.placeholder, endpoint);
+        assert.equal(options.defaultValue, endpoint);
+        return '';
+      },
+    }),
+  });
+  assert.equal(await ui.text('ntfy topic URL', endpoint, { redactPiped: true }), endpoint);
 });
 
 test('native Windows multiline preserves pasted tabs and CRs until Ctrl+D submits', async () => {

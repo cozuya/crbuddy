@@ -25,6 +25,11 @@ export interface Choice<T> {
   hint?: string;
 }
 
+export interface TextOptions {
+  /** Hide entered values and saved defaults in piped output, preserving TTY editing. */
+  redactPiped?: boolean;
+}
+
 const CURSOR_HIDE = '\u001B[?25l';
 const CURSOR_SHOW = '\u001B[?25h';
 const DIM = '\u001B[2m';
@@ -70,13 +75,13 @@ async function nextPipedLine(): Promise<string | null> {
 }
 
 /** Ask on a TTY, or take the next piped line. */
-async function ask(question: string): Promise<string> {
+async function ask(question: string, redactPiped = false): Promise<string> {
   if (!supportsInteractive()) {
     const line = await nextPipedLine();
 
     if (line === null) throw new PromptAborted();
 
-    process.stdout.write(`${question} ${line}\n`);
+    process.stdout.write(`${question} ${redactPiped ? '[hidden]' : line}\n`);
     return line.trim();
   }
 
@@ -259,9 +264,15 @@ export async function confirm(question: string, defaultYes: boolean): Promise<bo
   }
 }
 
-export async function text(question: string, fallback = ''): Promise<string> {
+export async function text(
+  question: string,
+  fallback = '',
+  options: TextOptions = {},
+): Promise<string> {
+  const redactPiped = options.redactPiped && !supportsInteractive();
+  const hint = fallback ? ` [${redactPiped ? 'saved value' : fallback}]` : '';
   for (;;) {
-    const answer = await ask(`${question}${fallback ? ` [${fallback}]` : ''}`);
+    const answer = await ask(`${question}${hint}`, redactPiped);
 
     if (answer !== '') return answer;
     if (fallback !== '') return fallback;

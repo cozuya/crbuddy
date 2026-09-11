@@ -318,6 +318,7 @@ export const codexAdapter: Adapter = {
   minVersion: '0.130.0',
 
   models: [
+    { id: 'gpt-6-astra', label: 'GPT-6 Astra', hint: 'frontier' },
     { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', hint: 'flagship' },
     { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', hint: 'balanced workhorse' },
     { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', hint: 'fast and cheap' },
@@ -326,7 +327,7 @@ export const codexAdapter: Adapter = {
 
   efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'high',
-  listsStampedFor: '0.149.0',
+  listsStampedFor: '0.153.4',
 
   versionArgs() {
     return ['--version'];

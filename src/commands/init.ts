@@ -28,6 +28,12 @@ import { probe } from '../run/spawn.js';
 import { Adapter } from '../adapters/types.js';
 import { PromptAborted } from '../util/prompt.js';
 import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
+import {
+  GlobalSettings,
+  isNtfyEndpoint,
+  loadGlobalSettings,
+  saveGlobalSettings,
+} from '../config/settings.js';
 
 export interface InitOptions {
   repoRoot: string | null;
@@ -37,6 +43,8 @@ export interface InitOptions {
 export interface InitDependencies {
   ui?: WizardUI;
   detect?: (signal?: AbortSignal) => Promise<Detection[]>;
+  /** Test seam; normal setup always uses the global user settings file. */
+  settingsFile?: string;
 }
 
 export async function runInit(
@@ -46,7 +54,12 @@ export async function runInit(
   const ui = dependencies.ui ?? (await createWizardUI());
 
   try {
-    return await wizard(options, ui, dependencies.detect ?? detectAdapters);
+    return await wizard(
+      options,
+      ui,
+      dependencies.detect ?? detectAdapters,
+      dependencies.settingsFile,
+    );
   } catch (error) {
     const name = (error as { name?: string })?.name;
 
@@ -63,6 +76,7 @@ async function wizard(
   options: InitOptions,
   ui: WizardUI,
   detect: (signal?: AbortSignal) => Promise<Detection[]>,
+  settingsFile?: string,
 ): Promise<number> {
   ui.intro('crbuddy setup');
 
@@ -203,13 +217,16 @@ async function wizard(
       ? await planGitignore(ui, options.repoRoot, config)
       : null;
 
+  const settings = await buildNotifications(ui, settingsFile);
+
   ui.note(
-    formatConfigSummary(scope, targetFile, config, gitignorePlan),
+    formatConfigSummary(scope, targetFile, config, gitignorePlan) +
+      `\nNotifications (global): ${settings.notifications ? 'ntfy' : 'Off'}`,
     'Configuration',
   );
 
-  // Piped setup deliberately keeps its existing answer sequence. The final
-  // confirmation is a TTY safeguard and defaults to yes there.
+  // Notification questions are appended to the existing piped answer
+  // sequence. The final save confirmation remains a TTY-only safeguard.
   if (ui.interactive && !(await ui.confirm('Save this config?', true))) {
     ui.cancel('Setup cancelled. No config was written.');
     return 1;
@@ -217,12 +234,75 @@ async function wizard(
 
   await mkdir(path.dirname(targetFile), { recursive: true });
   await writeFile(targetFile, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  let settingsSaved = true;
+  try {
+    await saveGlobalSettings(settings, settingsFile);
+  } catch {
+    settingsSaved = false;
+    ui.message(
+      'Review config saved, but global notification preferences could not be ' +
+        'saved. Previous notification preferences remain unchanged. Check ' +
+        '~/.crbuddy/settings.json and run `crb config` again.',
+      'warn',
+    );
+  }
 
   if (gitignorePlan) await applyGitignorePlan(ui, gitignorePlan);
 
   ui.outro(`Config saved to ${targetFile}\n   Run \`crbuddy go\` to start a review.`);
 
-  return 0;
+  return settingsSaved ? 0 : 1;
+}
+
+async function buildNotifications(
+  ui: WizardUI,
+  settingsFile?: string,
+): Promise<GlobalSettings> {
+  const existing = await loadGlobalSettings(
+    (message) => ui.message(message, 'warn'),
+    settingsFile,
+  );
+
+  const enabled = await ui.confirm(
+    'Notify you when crbuddy finishes a review (`crb go`)?',
+    Boolean(existing.notifications),
+  );
+
+  if (!enabled) return {};
+
+  await ui.select(
+    'Notification service',
+    [
+      { label: 'ntfy', value: 'ntfy' },
+      { label: 'Other', value: 'other', disabled: true, hint: 'coming later' },
+    ],
+    0,
+  );
+
+  ui.note(
+    'Subscribe to this same topic in the ntfy app.\n' +
+      'Use a long, unguessable topic name — the topic acts like a shared secret.\n' +
+      'This preference applies to `crb go` in every repository.',
+    'ntfy notifications',
+  );
+
+  for (;;) {
+    const endpoint = await ui.text(
+      'ntfy topic URL',
+      existing.notifications?.endpoint ?? '',
+      { redactPiped: true },
+    );
+
+    if (isNtfyEndpoint(endpoint)) {
+      return { notifications: { provider: 'ntfy', endpoint } };
+    }
+
+    ui.message(
+      'Use https://ntfy.sh/<topic> with 1–64 letters, numbers, underscores or ' +
+        'dashes. No credentials, extra paths, non-default ports, query or fragment.',
+      'error',
+    );
+  }
 }
 
 export function effectiveInitScope(
@@ -430,6 +510,7 @@ async function pickModel(
   adapter: Adapter,
   current?: string,
 ): Promise<string> {
+  const savedModel = current?.trim() ? current : undefined;
   const choices = adapter.models.map((model) => ({
     label: model.label,
     value: model.id,
@@ -442,8 +523,15 @@ async function pickModel(
     hint: `any id \`${adapter.command}\` accepts, passed through unchecked`,
   });
 
-  const preferred = current ?? adapter.defaultModel;
-  const index = adapter.models.findIndex((model) => model.id === preferred);
+  const preferred = savedModel ?? adapter.defaultModel;
+  let index = adapter.models.findIndex((model) => model.id === preferred);
+
+  if (index < 0 && savedModel) {
+    // Enter keeps a custom ID without another prompt. Append it so existing
+    // numbered choices, including Other, keep their positions in piped setup.
+    index = choices.length;
+    choices.push({ label: savedModel, value: savedModel, hint: 'current model' });
+  }
 
   const chosen = await ui.select(
     `Model for ${adapter.label}`,
@@ -458,7 +546,7 @@ async function pickModel(
         ` or check the vendor's docs for current ids.`,
     );
 
-    return ui.text('Model id', current ?? '');
+    return ui.text('Model id', savedModel ?? '');
   }
 
   return chosen;
@@ -674,8 +762,10 @@ async function buildMerge(
     currentIndex >= 0 ? currentIndex : 0,
   );
 
-  const model = await pickModel(ui, adapter, existing?.model);
-  const effort = await pickEffort(ui, adapter, model, existing?.effort);
+  // Model and effort IDs belong to the vendor that saved them.
+  const current = existing?.vendor === adapter.name ? existing : undefined;
+  const model = await pickModel(ui, adapter, current?.model);
+  const effort = await pickEffort(ui, adapter, model, current?.effort);
 
   const merge: MergeConfig = { enabled: true, vendor: adapter.name, model };
   if (effort) merge.effort = effort;
