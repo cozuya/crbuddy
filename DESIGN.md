@@ -59,6 +59,16 @@ Locations:
 
 A project-local config replaces the global config entirely. There is no implicit merging.
 
+Global user preferences live separately in `~/.crbuddy/settings.json` and do not
+participate in review-config replacement. Its optional `notifications` object
+contains `{ "provider": "ntfy", "endpoint": "https://ntfy.sh/<topic>" }`.
+Missing settings disable notifications; unreadable or invalid settings warn
+without blocking review. Selecting No in setup removes the saved endpoint.
+Saving atomically replaces the settings file with a private (0600) file on
+POSIX, including when the previous file had broader permissions. A failed
+settings save leaves old preferences intact and explicitly reports partial
+setup with exit code 1; the review config and approved `.gitignore` plan are saved.
+
 Named fields only. Model and effort identifiers are vendor-native strings.
 
 ```jsonc
@@ -102,6 +112,13 @@ Unknown keys are fatal. Panel IDs are stable provenance labels. `vendorArgs` is 
 ### Wizard behavior
 
 The wizard detects installed vendor CLIs, builds the panel, configures consolidation, and chooses the target.
+
+Notification questions come last, after review and `.gitignore` questions, and
+always edit the global preference regardless of review-config scope. They
+default to disabled on first setup and retain existing values on Enter.
+Setup performs no notification HTTP request. The topic field redacts both
+entered answers and saved defaults in piped output, including validation retries.
+TTY editing still displays the saved URL and accepts it with Enter.
 
 Adapter metadata declares whether a vendor has a supported **headless native review** operation. A vendor without one may still be used as a generic reviewer, but the wizard must require explicit review instructions for that lane. It must not offer “vendor's own review behavior” and then write a configuration that `go` will deterministically refuse.
 
@@ -247,6 +264,21 @@ Panel entries run concurrently by default. `maxConcurrent: 0` means unlimited; t
 Every review lane has a timeout; the consolidation step has a separate timeout.
 
 Ctrl-C aborts the run and restores prior output. A second interrupt escalates process-tree termination.
+
+Optional ntfy delivery has one terminal hook after run cleanup, gated on a
+reviewer process having launched. It reports complete, partial or failed using
+the existing result semantics, including consolidation fallback. Pre-launch
+failures and cancellation during reviewer/consolidation work do not notify.
+The final report is committed or printed before delivery; optional clipboard
+UI runs only after delivery settles. Closing that menu, including with Ctrl-C,
+cannot send another notification. Delivery uses built-in `fetch` in a short-lived
+worker that is terminated after delivery or a two-second deadline, including
+worker startup and connection setup. This closes pending TLS connections too;
+aborting the fetch promise alone can leave them keeping Node alive. There are
+no redirects or retries, and only a success flag crosses back from the worker.
+A fixed warning reports unconfirmed delivery
+without exposing the topic URL; a timeout cannot prove the push was not received.
+Delivery never changes the review's output or exit code.
 
 ### Self-contamination
 

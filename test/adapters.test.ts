@@ -224,6 +224,19 @@ test('Codex vendorArgs cannot use arbitrary config overrides around safety', () 
   );
 });
 
+test('Codex offers Astra first while preserving its existing models and defaults', () => {
+  assert.deepEqual(codexAdapter.models.map(({ id, label }) => ({ id, label })), [
+    { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
+    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
+  ]);
+  assert.equal(codexAdapter.defaultModel, 'gpt-5.6-sol');
+  assert.equal(codexAdapter.defaultEffort, 'high');
+  assert.equal(codexAdapter.minVersion, '0.130.0');
+  assert.equal(codexAdapter.listsStampedFor, '0.153.4');
+});
+
 test('known per-vendor safety and configuration flags are rejected in split and equals forms', () => {
   const blocked: Record<VendorName, string[]> = {
     claude: [

@@ -50,6 +50,7 @@ import { progress } from '../run/progress.js';
 import { copyToClipboard } from '../util/clipboard.js';
 import { PromptAborted, dim, select } from '../util/prompt.js';
 import { formatClock, formatElapsed, formatSize } from '../util/format.js';
+import { notifyFinished, ReviewOutcome } from '../run/notify.js';
 
 /** Below this, a "successful" review is more likely a status message. */
 const SUSPICIOUSLY_SHORT = 200;
@@ -160,8 +161,15 @@ export async function runGo(options: GoOptions): Promise<number> {
 
   let stashed: Awaited<ReturnType<typeof stashExistingOutputs>> | null = null;
   let interrupted = false;
+  const launchedReviewers = new Set<string>();
+  let notificationOutcome: ReviewOutcome = 'failed';
+  const notificationCancellation = new AbortController();
+  const cancelNotification = () => notificationCancellation.abort();
+  let terminalReport: string | null = null;
+  let exitCode = EXIT_OK;
 
   const onInterrupt = () => {
+    cancelNotification();
     if (interrupted) {
       // Second Ctrl-C: stop being polite.
       progress.stopPulse();
@@ -480,6 +488,8 @@ export async function runGo(options: GoOptions): Promise<number> {
             repoRoot,
             scratch,
             timeoutMs: config.timeoutMs,
+            onStart: () => { launchedReviewers.add(entry.id); },
+            onSpawnFailure: () => { launchedReviewers.delete(entry.id); },
             ...(wholeCheckout ? { wholeCheckout: true } : {}),
             ...(options.instructionsOverride
               ? { instructionsOverride: options.instructionsOverride }
@@ -635,7 +645,8 @@ export async function runGo(options: GoOptions): Promise<number> {
       // Only the deliverable is rendered in this mode: the unmerged reviews
       // are an audit trail worth keeping on disk, not worth doubling the
       // scrollback for, so they are never built at all.
-      await printReport(deliverable);
+      printReport(deliverable);
+      terminalReport = deliverable;
     } else {
       const files =
         context.mergeState === 'ok'
@@ -675,20 +686,36 @@ export async function runGo(options: GoOptions): Promise<number> {
 
     const partial =
       succeeded.length < records.length || context.mergeState === 'failed';
+    notificationOutcome = partial ? 'partial' : 'complete';
 
-    if (partial && options.strict) return EXIT_PARTIAL;
-
-    return EXIT_OK;
+    exitCode = partial && options.strict ? EXIT_PARTIAL : EXIT_OK;
   } finally {
     progress.stopPulse();
     process.off('SIGINT', onInterrupt);
     process.off('SIGTERM', onInterrupt);
 
-    await restorePreviousOutput().catch(() => {});
-
-    await cleanupRunState();
-    await releaseRunLocks();
+    try {
+      await restorePreviousOutput().catch(() => {});
+      await cleanupRunState();
+      await releaseRunLocks();
+    } catch (error) {
+      notificationOutcome = 'failed';
+      throw error;
+    } finally {
+      if (launchedReviewers.size > 0 && !notificationCancellation.signal.aborted) {
+        await notifyFinished(
+          path.basename(repoRoot),
+          notificationOutcome,
+          notificationCancellation.signal,
+        );
+      }
+    }
   }
+
+  // The review result and notification are settled before waiting for input.
+  // Early failures return through the same finally without opening this menu.
+  if (terminalReport !== null) await offerClipboard(terminalReport);
+  return exitCode;
 }
 
 export class PreflightError extends Error {}
@@ -740,6 +767,8 @@ function displayNames(
 }
 
 interface ExecuteArgs {
+  onStart: () => void;
+  onSpawnFailure: () => void;
   entry: PanelEntry;
   adapter: Adapter;
   cliVersion: string | null;
@@ -835,6 +864,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     timeoutMs: args.timeoutMs,
     scratchDir: args.scratch,
     id: entry.id,
+    onStart: args.onStart,
   });
 
   progress.laneFinished(args.display);
@@ -860,6 +890,9 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
   };
 
   if (result.spawnError) {
+    // On Windows the shim host may emit 'spawn' before cross-spawn reports
+    // that the requested executable did not exist. That is not reviewer work.
+    args.onSpawnFailure();
     return report({
       ...record,
       ok: false,
@@ -1203,13 +1236,16 @@ async function releaseAll(locks: Lock[]): Promise<void> {
  * stays in the scrollback after the process exits and can be selected by
  * hand if the clipboard is unavailable.
  */
-async function printReport(document: string): Promise<void> {
+function printReport(document: string): void {
   // No leading blank line: a redirect must begin with the report itself,
   // whether that is consolidated YAML frontmatter or an unconsolidated
   // heading. Terminal spacing comes from progress output on stderr.
   process.stdout.write(`${document.trimEnd()}
 `);
+}
 
+/** Optional post-run UI; report output and notification have already finished. */
+async function offerClipboard(document: string): Promise<void> {
   // stdout matters as much as stdin here: `select` draws its menu there, so
   // prompting under `crbuddy go > review.md` would write the menu into the
   // file. A redirect or a pipe wants the report and nothing else.

@@ -8,7 +8,7 @@ import {
   supportsBracketedPaste,
   type MultilineInput,
 } from './multiline-prompt.js';
-import type { Choice } from './prompt.js';
+import type { Choice, TextOptions } from './prompt.js';
 import {
   PromptAborted,
   confirm as lineConfirm,
@@ -37,7 +37,7 @@ export interface WizardUI {
     initialIndex?: number,
   ): Promise<T>;
   confirm(question: string, defaultYes: boolean): Promise<boolean>;
-  text(question: string, fallback?: string): Promise<string>;
+  text(question: string, fallback?: string, options?: TextOptions): Promise<string>;
   multiline(question: string): Promise<string>;
 }
 
@@ -125,8 +125,8 @@ class LineWizardUI implements WizardUI {
     return lineConfirm(question, defaultYes);
   }
 
-  text(question: string, fallback = ''): Promise<string> {
-    return lineText(question, fallback);
+  text(question: string, fallback = '', options: TextOptions = {}): Promise<string> {
+    return lineText(question, fallback, options);
   }
 
   // Piped setup intentionally stays one answer per line. Multiline editing is
