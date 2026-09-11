@@ -633,3 +633,25 @@ test('piped consolidation defaults work after a vendor change or re-enabling wit
     assert.deepEqual(result.posts, []);
   }
 });
+
+test('piped custom consolidation models preserve answer order and keep Other at its existing number', async (t) => {
+  const f = await fixture(t);
+  for (const [previous, answer, typed, model] of [
+    ['my-custom-id', '', [], 'my-custom-id'],
+    ['my-custom-id', '5', ['replacement-model'], 'replacement-model'],
+    [' \t ', '5', ['', 'replacement-model'], 'replacement-model'],
+  ] as const) {
+    f.config.merge = { enabled: previous.trim() !== '', vendor: 'codex', model: previous };
+    await f.saveConfig();
+    // Keep panel, add none, file output, enable consolidation, keep location/vendor.
+    // After the model answer(s), choose medium effort and a named branch target.
+    const answers = ['', 'n', '', 'y', '', '', answer, ...typed, '3', '2', 'review-base', 'n', 'n'];
+    const result = await f.run(['config', '--project'], {}, answers.join('\n'));
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const written = JSON.parse(await readFile(f.configFile, 'utf8'));
+    assert.deepEqual(written.merge, { enabled: true, vendor: 'codex', model, effort: 'medium' });
+    assert.deepEqual(written.target, { base: 'review-base' });
+    if (answer === '') assert.doesNotMatch(result.stdout, /Model id/);
+    assert.deepEqual(result.posts, []);
+  }
+});

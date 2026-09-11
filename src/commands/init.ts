@@ -510,6 +510,7 @@ async function pickModel(
   adapter: Adapter,
   current?: string,
 ): Promise<string> {
+  const savedModel = current?.trim() ? current : undefined;
   const choices = adapter.models.map((model) => ({
     label: model.label,
     value: model.id,
@@ -522,14 +523,20 @@ async function pickModel(
     hint: `any id \`${adapter.command}\` accepts, passed through unchecked`,
   });
 
-  const preferred = current || adapter.defaultModel;
-  const index = adapter.models.findIndex((model) => model.id === preferred);
+  const preferred = savedModel ?? adapter.defaultModel;
+  let index = adapter.models.findIndex((model) => model.id === preferred);
+
+  if (index < 0 && savedModel) {
+    // Enter keeps a custom ID without another prompt. Append it so existing
+    // numbered choices, including Other, keep their positions in piped setup.
+    index = choices.length;
+    choices.push({ label: savedModel, value: savedModel, hint: 'current model' });
+  }
 
   const chosen = await ui.select(
     `Model for ${adapter.label}`,
     choices,
-    // Keep a configured custom ID through Other's existing text default.
-    index >= 0 ? index : current ? choices.length - 1 : 0,
+    index >= 0 ? index : 0,
   );
 
   if (chosen === OTHER) {
@@ -539,7 +546,7 @@ async function pickModel(
         ` or check the vendor's docs for current ids.`,
     );
 
-    return ui.text('Model id', current ?? '');
+    return ui.text('Model id', savedModel ?? '');
   }
 
   return chosen;

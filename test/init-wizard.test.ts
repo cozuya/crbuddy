@@ -12,6 +12,7 @@ import {
   runInit,
   type Detection,
 } from '../src/commands/init.js';
+import { readAndValidate } from '../src/config/load.js';
 import {
   CONFIG_VERSION,
   DEFAULTS,
@@ -248,15 +249,18 @@ test('the Codex model wizard offers Other and retains existing arbitrary model I
   assert.equal(code, 0);
   const config = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
   assert.equal(config.panel[0].model, 'future-custom-model');
+  assert.equal(config.merge.model, 'future-custom-model');
+  let modelPrompts = 0;
   class KeepCustomModelUI extends DefaultingUI {
     override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
       if (question === 'Model for Codex CLI') {
-        assert.equal(choices[initialIndex]?.label, 'Other…');
+        modelPrompts++;
+        assert.equal(choices[initialIndex]?.value, 'future-custom-model');
       }
       return super.select(question, choices, initialIndex);
     }
     override async text(question: string, fallback = ''): Promise<string> {
-      if (question === 'Model id') assert.equal(fallback, 'future-custom-model');
+      assert.notEqual(question, 'Model id', 'retaining a custom model must not consume another answer');
       return super.text(question, fallback);
     }
   }
@@ -268,6 +272,7 @@ test('the Codex model wizard offers Other and retains existing arbitrary model I
       settingsFile: path.join(repo, 'settings.json'),
     },
   ), 0);
+  assert.equal(modelPrompts, 1);
   assert.deepEqual(JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8')), config);
 });
 
@@ -323,20 +328,23 @@ test('changing consolidation vendors selects the new vendor defaults without a c
   }
 });
 
-test('re-enabling consolidation with an empty model defaults to Sol', async (t) => {
+test('re-enabling consolidation with an empty or whitespace-only model defaults to Sol', async (t) => {
   // Both the wizard's disabled shape and a retained vendor with no model are valid.
-  for (const vendor of ['', 'codex']) {
+  for (const [vendor, model] of [
+    ['', ''], ['codex', ''], ['codex', '   '], ['codex', '\t \r\n'],
+  ] as const) {
     const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-merge-enable-'));
     t.after(() => rm(repo, { recursive: true, force: true }));
     const configPath = path.join(repo, '.crbuddy', 'config.json');
     const config: Config = {
       ...DEFAULTS,
       output: { ...DEFAULT_OUTPUT },
-      merge: { enabled: false, vendor, model: '' },
+      merge: { enabled: false, vendor, model },
       panel: [{ id: 'reviewer', vendor: 'codex', model: 'gpt-5.6-sol' }],
     };
     await mkdir(path.dirname(configPath));
     await writeFile(configPath, JSON.stringify(config));
+    assert.equal((await readAndValidate(configPath)).merge.model, model);
     let modelPrompts = 0;
     class EnableMergeUI extends DefaultingUI {
       override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
@@ -351,13 +359,17 @@ test('re-enabling consolidation with an empty model defaults to Sol', async (t) 
         }
         return super.select(question, choices, initialIndex);
       }
+      override async text(question: string, fallback = ''): Promise<string> {
+        assert.notEqual(question, 'Model id', 'a blank saved model must use the vendor default');
+        return super.text(question, fallback);
+      }
     }
     assert.equal(await runInit(
       { repoRoot: repo, scope: 'project' },
       { ui: new EnableMergeUI(), detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
     ), 0);
     assert.equal(modelPrompts, 1);
-    assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')).merge, {
+    assert.deepEqual((await readAndValidate(configPath)).merge, {
       enabled: true, vendor: 'codex', model: 'gpt-5.6-sol', effort: 'high',
     });
   }

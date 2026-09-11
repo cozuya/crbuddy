@@ -258,6 +258,8 @@ Re-enabling consolidation without a saved model also uses the vendor's default.
 For piped setup, Codex model numbers in v0.3.0 are `1` Astra, `2` Sol, `3` Terra,
 `4` Luna, `5` Other; update scripts that used the v0.2.0 positions. An empty
 model answer still accepts the configured model or, on first setup, Sol.
+A saved custom model appears after Other as the default choice, so retaining it
+uses just one answer. Selecting Other explicitly still asks for a model ID.
 
 Effort values are **vendor-native and passed through verbatim**. There is no
 crbuddy effort vocabulary and no translation.
