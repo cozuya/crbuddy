@@ -25,14 +25,11 @@ crb go
 - Optionally groups findings that appear to describe the same defect without letting the consolidator reject, rewrite, or delete findings.
 - Writes `CODE-REVIEW-HANDOFF.md` for the agent or human that will act on the reviews. The raw unmerged reviews are preserved when consolidation is enabled.
 
-This is useful when you want independent code review, cross-model code review, parallel code review, or a second opinion from another model family without manually opening several coding-agent harnesses, prompting each one, collecting the outputs, and assembling a handoff.
+This is useful when you want independent code review, cross-model code review, or a second opinion from another model family without manually opening several coding-agent harnesses, prompting each one, collecting the outputs, and assembling a handoff.
 
 crbuddy is a local CLI, not a hosted AI service. It holds no model credentials and uses your existing Claude Code, Codex, and Gemini CLI authentication and entitlements.
 
-## v0.3.0
-
-- `crb init` / `crb config` can optionally enable ntfy push notifications when a `crb go` review finishes. Notifications default to off and apply across all repositories.
-- The Codex model picker includes GPT-6 Astra; GPT-5.6 Sol remains the default.
+`crb init` / `crb config` can optionally enable ntfy push notifications when a `crb go` review finishes. Notifications default to off and apply across all repositories. The Codex model picker includes GPT-6 Astra; GPT-5.6 Sol remains the default.
 
 For configuration, targeting, consolidation, vendor behavior, and other details, see [`GUIDE.md`](GUIDE.md).
 
