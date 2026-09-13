@@ -13,7 +13,6 @@ import {
  * than trying to imitate it with a generic prompt. Custom instructions are a
  * separate generic-agent operation by design.
  */
-
 function genericPrompt(instructions: string, range: string | null): string {
   if (!range) return instructions;
 
@@ -71,8 +70,10 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
     '--append-system-prompt',
     '--append-system-prompt-file',
     // crbuddy validates Claude's terminal marker in plain-text stdout.
-    // Structured output wraps that text in an envelope and changes this contract.
+    // Structured output changes that contract, whether selected as an
+    // envelope format or requested through a JSON schema.
     '--output-format',
+    '--json-schema',
   ]),
   codex: blockedVendorArgs([
     '--config',
@@ -172,6 +173,19 @@ function stripClaudeCompletionMarker(output: string): string {
   if (!trimmed.endsWith(CLAUDE_COMPLETION_MARKER)) return output;
 
   return trimmed.slice(0, -CLAUDE_COMPLETION_MARKER.length).trimEnd();
+}
+
+function countClaudeCompletionMarkers(output: string): number {
+  let count = 0;
+  let from = 0;
+
+  while (true) {
+    const found = output.indexOf(CLAUDE_COMPLETION_MARKER, from);
+    if (found === -1) return count;
+
+    count += 1;
+    from = found + CLAUDE_COMPLETION_MARKER.length;
+  }
 }
 
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
@@ -326,7 +340,10 @@ export const claudeAdapter: Adapter = {
     if (!base.ok) return base;
 
     const body = result.stdout.trimEnd();
-    if (!body.endsWith(CLAUDE_COMPLETION_MARKER)) {
+    if (
+      !body.endsWith(CLAUDE_COMPLETION_MARKER) ||
+      countClaudeCompletionMarkers(body) !== 1
+    ) {
       return { ok: false, reason: 'incomplete_review' };
     }
 
