@@ -46,6 +46,14 @@ test('Claude accepts a terse completed review when the completion marker is pres
   );
 });
 
+test('Claude strips protocol framing from an exact JSON task payload', () => {
+  const payload = '{"clusters":[{"findingIds":["f1"]}]}';
+  const stdout = `${payload}\n${CLAUDE_COMPLETION_MARKER}\n`;
+
+  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
+  assert.equal(claudeAdapter.finalOutput(result(stdout)), payload);
+});
+
 test('Claude requires review content before the completion marker', () => {
   assert.deepEqual(
     claudeAdapter.checkCompletion(result(`${CLAUDE_COMPLETION_MARKER}\n`)),
@@ -75,6 +83,8 @@ test('Claude invocation appends the completion protocol to the system prompt', (
   assert.ok(flag >= 0);
   assert.match(invocation.args[flag + 1] ?? '', /background agents/);
   assert.match(invocation.args[flag + 1] ?? '', /crbuddy:review-complete/);
+  assert.match(invocation.args[flag + 1] ?? '', /protocol framing/);
+  assert.match(invocation.args[flag + 1] ?? '', /JSON-only/);
   assert.equal(invocation.args.at(-1), `/code-review high ${target.range}`);
 });
 
@@ -92,4 +102,24 @@ test('Claude fails closed when the completion-protocol flag is unavailable', () 
       error instanceof UnsafeInvocationError &&
       /completion protocol/.test(error.message),
   );
+});
+
+test('Claude rejects structured output modes that bypass the text completion contract', () => {
+  for (const vendorArgs of [
+    ['--output-format', 'json'],
+    ['--output-format=stream-json'],
+  ]) {
+    assert.throws(
+      () =>
+        claudeAdapter.build({
+          operation: { kind: 'review', target },
+          model: 'opus',
+          effort: 'high',
+          vendorArgs,
+          repoRoot: '/repo',
+          supports: () => true,
+        }),
+      UnsafeInvocationError,
+    );
+  }
 });
