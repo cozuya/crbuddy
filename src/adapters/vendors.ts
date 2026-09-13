@@ -13,7 +13,6 @@ import {
  * than trying to imitate it with a generic prompt. Custom instructions are a
  * separate generic-agent operation by design.
  */
-
 function genericPrompt(instructions: string, range: string | null): string {
   if (!range) return instructions;
 
@@ -70,6 +69,11 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
     '--system-prompt-file',
     '--append-system-prompt',
     '--append-system-prompt-file',
+    // crbuddy validates Claude's terminal marker in plain-text stdout.
+    // Structured output changes that contract, whether selected as an
+    // envelope format or requested through a JSON schema.
+    '--output-format',
+    '--json-schema',
   ]),
   codex: blockedVendorArgs([
     '--config',
@@ -151,6 +155,36 @@ function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void 
   }
 }
 
+export const CLAUDE_COMPLETION_MARKER = '<!-- crbuddy:review-complete -->';
+
+const CLAUDE_COMPLETION_INSTRUCTION =
+  'crbuddy completion protocol: Do not end your top-level response while any ' +
+  'background agents, subagents, or delegated tasks are still running. Once all ' +
+  'delegated work is complete and you have produced the final payload for the ' +
+  `current task, append exactly ${CLAUDE_COMPLETION_MARKER} on its own line. ` +
+  'This marker is protocol framing, not part of the task payload: if the task ' +
+  'requires an exact format such as JSON-only output, produce that payload first ' +
+  'and then the marker. Emit the marker exactly once, only as the final ' +
+  'non-whitespace content.';
+
+function stripClaudeCompletionMarker(output: string): string {
+  const trimmed = output.trimEnd();
+
+  if (!hasTrailingClaudeCompletionMarkerLine(trimmed)) return output;
+
+  const markerStart = trimmed.lastIndexOf(CLAUDE_COMPLETION_MARKER);
+  return trimmed.slice(0, markerStart).trimEnd();
+}
+
+function hasTrailingClaudeCompletionMarkerLine(output: string): boolean {
+  const lastLine = output
+    .trimEnd()
+    .split(/\r\n|\r|\n/)
+    .at(-1);
+
+  return lastLine?.trim() === CLAUDE_COMPLETION_MARKER;
+}
+
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
 export const claudeAdapter: Adapter = {
   name: 'claude',
@@ -198,6 +232,15 @@ export const claudeAdapter: Adapter = {
     );
 
     args.push(permission, 'plan');
+
+    const completionPrompt = requireSafetyFlag(
+      request,
+      ['--append-system-prompt'],
+      'the Claude completion protocol',
+      this.command,
+    );
+
+    args.push(completionPrompt, CLAUDE_COMPLETION_INSTRUCTION);
 
     const noSession = firstSupported(request, [
       '--no-session-persistence',
@@ -286,25 +329,29 @@ export const claudeAdapter: Adapter = {
   },
 
   finalOutput(result) {
-    return result.stdout;
+    return stripClaudeCompletionMarker(result.stdout);
   },
 
   checkCompletion(result): CompletionCheck {
-    const body = result.stdout.trim();
+    const base = defaultCompletion({ ...result, body: result.stdout });
+    if (!base.ok) return base;
 
-    // This exact class of status-only response was observed during the initial
-    // build. It violates Claude Code's current documented non-interactive
-    // contract (local /code-review should wait and return findings), so never
-    // let a zero exit turn it into a successful review artifact.
-    if (
-      result.code === 0 &&
-      body.length < 500 &&
-      /still waiting for .*code-review.*verification\/synthesis stage to complete/i.test(body)
-    ) {
+    const body = result.stdout.trimEnd();
+    if (!hasTrailingClaudeCompletionMarkerLine(body)) {
       return { ok: false, reason: 'incomplete_review' };
     }
 
-    return defaultCompletion({ ...result, body: result.stdout });
+    const review = stripClaudeCompletionMarker(body).trim();
+    if (review === '') return { ok: false, reason: 'empty' };
+
+    // A second marker immediately before the terminal one is framing, not
+    // review content. Earlier marker text is allowed so a review can discuss
+    // this protocol without invalidating itself.
+    if (hasTrailingClaudeCompletionMarkerLine(review)) {
+      return { ok: false, reason: 'incomplete_review' };
+    }
+
+    return { ok: true };
   },
 };
 

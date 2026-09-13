@@ -52,9 +52,6 @@ import { PromptAborted, dim, select } from '../util/prompt.js';
 import { formatClock, formatElapsed, formatSize } from '../util/format.js';
 import { notifyFinished, ReviewOutcome } from '../run/notify.js';
 
-/** Below this, a "successful" review is more likely a status message. */
-const SUSPICIOUSLY_SHORT = 200;
-
 /** What every whole-checkout run has to establish before anything else. */
 const WHOLE_CHECKOUT_SUBJECT =
   'Review this repository as it currently stands. There is no diff to review, ' +
@@ -927,24 +924,10 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
 
   const output = relativizePaths(body, args.repoRoot);
 
-  // A vendor CLI can exit zero having returned a progress or status message
-  // rather than a review — seen in the wild as "still waiting for the
-  // code-review skill to complete". It is not a failure crbuddy can prove,
-  // so it is surfaced as a warning rather than discarded.
-  const suspicious = output.trim().length < SUSPICIOUSLY_SHORT;
-
-  if (suspicious) {
-    progress.line(
-      `  ${args.display} - warning: returned only ${output.trim().length} characters; ` +
-        `this may be a status message rather than a review.`,
-    );
-  }
-
   return report({
     ...record,
     ok: true,
     output,
-    ...(suspicious ? { suspiciouslyShort: true } : {}),
   });
 }
 

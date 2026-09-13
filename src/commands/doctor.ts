@@ -17,6 +17,7 @@ interface FlagCheck {
 const FLAG_CHECKS: Record<string, FlagCheck[]> = {
   claude: [
     { candidates: ['--permission-mode'], required: true },
+    { candidates: ['--append-system-prompt'], required: true },
     { candidates: ['--no-session-persistence', '--no-save-session'] },
     { candidates: ['--effort', '--reasoning-effort'] },
   ],
@@ -86,7 +87,32 @@ export async function runDoctor(): Promise<number> {
       const result = await probe(adapter.command, adapter.versionArgs());
       const version = result.present ? adapter.parseVersion(result.output ?? '') : null;
       const versionOk = version !== null && isVersionAtLeast(version, adapter.minVersion);
-      const mark = !result.present ? 'MISS' : versionOk ? 'OK  ' : 'OLD ';
+      const help = result.present ? await readHelp(adapter, scratch) : null;
+      const checks = FLAG_CHECKS[adapter.name] ?? [];
+      const flagResults =
+        help === null
+          ? []
+          : checks.map((entry) => ({
+              entry,
+              found: entry.candidates.find((flag) => supported(help, flag)),
+            }));
+      const missingRequired = flagResults.filter(
+        ({ entry, found }) => entry.required && !found,
+      );
+      // Preserve the existing fallback when help itself cannot be read: doctor
+      // cannot prove a required flag is absent, so it reports the uncertainty
+      // and lets go perform the authoritative build-time check.
+      const requiredFlagsOk = help === null || missingRequired.length === 0;
+      const adapterUsable = result.present && versionOk && requiredFlagsOk;
+      const mark = !result.present
+        ? 'MISS'
+        : !versionOk
+          ? 'OLD '
+          : requiredFlagsOk
+            ? 'OK  '
+            : 'BAD ';
+
+      if (adapterUsable) usable += 1;
 
       console.log(`  ${mark} ${adapter.label} - \`${adapter.command}\``);
 
@@ -104,8 +130,6 @@ export async function runDoctor(): Promise<number> {
             console.log(
               `       problem:  too old for this adapter; update to ${adapter.minVersion} or newer`,
             );
-          } else {
-            usable += 1;
           }
 
           if (versionOk && isNewerThanStamp(version, adapter.listsStampedFor)) {
@@ -131,24 +155,24 @@ export async function runDoctor(): Promise<number> {
           console.log(`       effort:   (this CLI has no effort control)`);
         }
 
-        const help = await readHelp(adapter, scratch);
-
         if (help === null) {
           console.log(`       flags:    could not read \`${adapter.command} ` +
             `${adapter.helpArgs().join(' ')}\`; all flags assumed supported`);
         } else {
-          const checks = FLAG_CHECKS[adapter.name] ?? [];
-
-          const report = checks.map((entry) => {
-            const found = entry.candidates.find((flag) => supported(help, flag));
-
-            return found
+          const report = flagResults.map(({ entry, found }) =>
+            found
               ? `${found}`
-              : `${entry.candidates[0]} MISSING${entry.required ? ' (required)' : ''}`;
-          });
+              : `${entry.candidates[0]} MISSING${entry.required ? ' (required)' : ''}`,
+          );
 
           if (report.length > 0) {
             console.log(`       flags:    ${report.join('  ')}`);
+          }
+
+          if (missingRequired.length > 0) {
+            console.log(
+              `       problem:  required flag(s) missing; crbuddy go will refuse this adapter`,
+            );
           }
         }
       }
