@@ -24,8 +24,6 @@ export interface RunRecord {
   output: string;
   /** Truncated diagnostics, kept when a run fails and has nowhere else to go. */
   diagnostics?: string;
-  /** Completed, but returned so little it may not be a review at all. */
-  suspiciouslyShort?: boolean;
 }
 
 export interface ReportContext {
@@ -169,13 +167,6 @@ export function renderReportBlock(context: ReportContext): string {
 
   for (const run of context.runs.filter((r) => !r.ok)) {
     body.push(`- \`${run.id}\` (${run.vendor}) failed: ${run.reason ?? 'unknown'}`);
-  }
-
-  for (const run of context.runs.filter((r) => r.suspiciouslyShort)) {
-    body.push(
-      `- \`${run.id}\` completed but returned very little text; check whether ` +
-        `it actually produced a review.`,
-    );
   }
 
   if (context.mergeState === 'failed') {
