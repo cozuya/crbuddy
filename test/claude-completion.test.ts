@@ -61,6 +61,22 @@ test('Claude requires review content before the completion marker', () => {
   );
 });
 
+test('Claude rejects repeated completion markers as malformed framing', () => {
+  assert.deepEqual(
+    claudeAdapter.checkCompletion(
+      result(`${CLAUDE_COMPLETION_MARKER}\n${CLAUDE_COMPLETION_MARKER}\n`),
+    ),
+    { ok: false, reason: 'incomplete_review' },
+  );
+
+  assert.deepEqual(
+    claudeAdapter.checkCompletion(
+      result(`Actual review\n${CLAUDE_COMPLETION_MARKER}\n${CLAUDE_COMPLETION_MARKER}\n`),
+    ),
+    { ok: false, reason: 'incomplete_review' },
+  );
+});
+
 test('Claude preserves nonzero exit classification even if a marker is present', () => {
   assert.deepEqual(
     claudeAdapter.checkCompletion(
@@ -108,6 +124,8 @@ test('Claude rejects structured output modes that bypass the text completion con
   for (const vendorArgs of [
     ['--output-format', 'json'],
     ['--output-format=stream-json'],
+    ['--json-schema', '{"type":"object"}'],
+    ['--json-schema={"type":"object"}'],
   ]) {
     assert.throws(
       () =>
