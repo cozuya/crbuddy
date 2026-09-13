@@ -61,7 +61,7 @@ test('Claude requires review content before the completion marker', () => {
   );
 });
 
-test('Claude rejects repeated completion markers as malformed framing', () => {
+test('Claude rejects repeated trailing completion markers as malformed framing', () => {
   assert.deepEqual(
     claudeAdapter.checkCompletion(
       result(`${CLAUDE_COMPLETION_MARKER}\n${CLAUDE_COMPLETION_MARKER}\n`),
@@ -74,6 +74,18 @@ test('Claude rejects repeated completion markers as malformed framing', () => {
       result(`Actual review\n${CLAUDE_COMPLETION_MARKER}\n${CLAUDE_COMPLETION_MARKER}\n`),
     ),
     { ok: false, reason: 'incomplete_review' },
+  );
+});
+
+test('Claude may discuss the completion marker inside a completed review', () => {
+  const stdout =
+    `The protocol requires \`${CLAUDE_COMPLETION_MARKER}\` at the end.\n` +
+    `${CLAUDE_COMPLETION_MARKER}\n`;
+
+  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
+  assert.equal(
+    claudeAdapter.finalOutput(result(stdout)),
+    `The protocol requires \`${CLAUDE_COMPLETION_MARKER}\` at the end.`,
   );
 });
 
