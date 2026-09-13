@@ -9,6 +9,7 @@ import { PreflightError, runGo } from './commands/go.js';
 import { parseGoArguments } from './commands/go-options.js';
 import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
+import { configureClaudeBackgroundWait } from './run/claude-background-wait.js';
 
 const HELP = `crbuddy - fan one code review across several agent CLIs, then consolidate.
 
@@ -109,6 +110,11 @@ async function main(argv: string[]): Promise<number> {
     );
     return 1;
   }
+
+  // Claude Code print mode otherwise gives background agents only ten minutes
+  // to finish after the top-level turn. crbuddy already has its own run timeout,
+  // so make that timeout the single hard ceiling for Claude review work.
+  configureClaudeBackgroundWait();
 
   const loaded = await loadConfig(repoRoot);
 
