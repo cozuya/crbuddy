@@ -70,6 +70,9 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
     '--system-prompt-file',
     '--append-system-prompt',
     '--append-system-prompt-file',
+    // crbuddy validates Claude's terminal marker in plain-text stdout.
+    // Structured output wraps that text in an envelope and changes this contract.
+    '--output-format',
   ]),
   codex: blockedVendorArgs([
     '--config',
@@ -156,10 +159,12 @@ export const CLAUDE_COMPLETION_MARKER = '<!-- crbuddy:review-complete -->';
 const CLAUDE_COMPLETION_INSTRUCTION =
   'crbuddy completion protocol: Do not end your top-level response while any ' +
   'background agents, subagents, or delegated tasks are still running. Once all ' +
-  'delegated work is complete and you have produced your final answer, end your ' +
-  `response with exactly ${CLAUDE_COMPLETION_MARKER} on its own line. Emit this ` +
-  'marker exactly once, only as the final non-whitespace content, including when ' +
-  'the completed review has no findings.';
+  'delegated work is complete and you have produced the final payload for the ' +
+  `current task, append exactly ${CLAUDE_COMPLETION_MARKER} on its own line. ` +
+  'This marker is protocol framing, not part of the task payload: if the task ' +
+  'requires an exact format such as JSON-only output, produce that payload first ' +
+  'and then the marker. Emit the marker exactly once, only as the final ' +
+  'non-whitespace content.';
 
 function stripClaudeCompletionMarker(output: string): string {
   const trimmed = output.trimEnd();
