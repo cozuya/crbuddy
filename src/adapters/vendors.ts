@@ -170,22 +170,19 @@ const CLAUDE_COMPLETION_INSTRUCTION =
 function stripClaudeCompletionMarker(output: string): string {
   const trimmed = output.trimEnd();
 
-  if (!trimmed.endsWith(CLAUDE_COMPLETION_MARKER)) return output;
+  if (!hasTrailingClaudeCompletionMarkerLine(trimmed)) return output;
 
-  return trimmed.slice(0, -CLAUDE_COMPLETION_MARKER.length).trimEnd();
+  const markerStart = trimmed.lastIndexOf(CLAUDE_COMPLETION_MARKER);
+  return trimmed.slice(0, markerStart).trimEnd();
 }
 
-function countClaudeCompletionMarkers(output: string): number {
-  let count = 0;
-  let from = 0;
+function hasTrailingClaudeCompletionMarkerLine(output: string): boolean {
+  const lastLine = output
+    .trimEnd()
+    .split(/\r\n|\r|\n/)
+    .at(-1);
 
-  while (true) {
-    const found = output.indexOf(CLAUDE_COMPLETION_MARKER, from);
-    if (found === -1) return count;
-
-    count += 1;
-    from = found + CLAUDE_COMPLETION_MARKER.length;
-  }
+  return lastLine?.trim() === CLAUDE_COMPLETION_MARKER;
 }
 
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
@@ -340,18 +337,21 @@ export const claudeAdapter: Adapter = {
     if (!base.ok) return base;
 
     const body = result.stdout.trimEnd();
-    if (
-      !body.endsWith(CLAUDE_COMPLETION_MARKER) ||
-      countClaudeCompletionMarkers(body) !== 1
-    ) {
+    if (!hasTrailingClaudeCompletionMarkerLine(body)) {
       return { ok: false, reason: 'incomplete_review' };
     }
 
-    const review = body
-      .slice(0, -CLAUDE_COMPLETION_MARKER.length)
-      .trim();
+    const review = stripClaudeCompletionMarker(body).trim();
+    if (review === '') return { ok: false, reason: 'empty' };
 
-    return review === '' ? { ok: false, reason: 'empty' } : { ok: true };
+    // A second marker immediately before the terminal one is framing, not
+    // review content. Earlier marker text is allowed so a review can discuss
+    // this protocol without invalidating itself.
+    if (hasTrailingClaudeCompletionMarkerLine(review)) {
+      return { ok: false, reason: 'incomplete_review' };
+    }
+
+    return { ok: true };
   },
 };
 
