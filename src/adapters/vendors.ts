@@ -151,6 +151,24 @@ function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void 
   }
 }
 
+export const CLAUDE_COMPLETION_MARKER = '<!-- crbuddy:review-complete -->';
+
+const CLAUDE_COMPLETION_INSTRUCTION =
+  'crbuddy completion protocol: Do not end your top-level response while any ' +
+  'background agents, subagents, or delegated tasks are still running. Once all ' +
+  'delegated work is complete and you have produced your final answer, end your ' +
+  `response with exactly ${CLAUDE_COMPLETION_MARKER} on its own line. Emit this ` +
+  'marker exactly once, only as the final non-whitespace content, including when ' +
+  'the completed review has no findings.';
+
+function stripClaudeCompletionMarker(output: string): string {
+  const trimmed = output.trimEnd();
+
+  if (!trimmed.endsWith(CLAUDE_COMPLETION_MARKER)) return output;
+
+  return trimmed.slice(0, -CLAUDE_COMPLETION_MARKER.length).trimEnd();
+}
+
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
 export const claudeAdapter: Adapter = {
   name: 'claude',
@@ -198,6 +216,15 @@ export const claudeAdapter: Adapter = {
     );
 
     args.push(permission, 'plan');
+
+    const completionPrompt = requireSafetyFlag(
+      request,
+      ['--append-system-prompt'],
+      'the Claude completion protocol',
+      this.command,
+    );
+
+    args.push(completionPrompt, CLAUDE_COMPLETION_INSTRUCTION);
 
     const noSession = firstSupported(request, [
       '--no-session-persistence',
@@ -286,25 +313,23 @@ export const claudeAdapter: Adapter = {
   },
 
   finalOutput(result) {
-    return result.stdout;
+    return stripClaudeCompletionMarker(result.stdout);
   },
 
   checkCompletion(result): CompletionCheck {
-    const body = result.stdout.trim();
+    const base = defaultCompletion({ ...result, body: result.stdout });
+    if (!base.ok) return base;
 
-    // This exact class of status-only response was observed during the initial
-    // build. It violates Claude Code's current documented non-interactive
-    // contract (local /code-review should wait and return findings), so never
-    // let a zero exit turn it into a successful review artifact.
-    if (
-      result.code === 0 &&
-      body.length < 500 &&
-      /still waiting for .*code-review.*verification\/synthesis stage to complete/i.test(body)
-    ) {
+    const body = result.stdout.trimEnd();
+    if (!body.endsWith(CLAUDE_COMPLETION_MARKER)) {
       return { ok: false, reason: 'incomplete_review' };
     }
 
-    return defaultCompletion({ ...result, body: result.stdout });
+    const review = body
+      .slice(0, -CLAUDE_COMPLETION_MARKER.length)
+      .trim();
+
+    return review === '' ? { ok: false, reason: 'empty' } : { ok: true };
   },
 };
 
