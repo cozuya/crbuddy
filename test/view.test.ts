@@ -155,7 +155,7 @@ test('view reports when no review config exists', async () => {
 
     assert.equal(
       notes[0]?.message,
-      'Config: None\n\nNo repository or global config found.\nNotifications (global): Off',
+      'Config: None\nNotifications (global): Off',
     );
   } finally {
     await rm(root, { recursive: true, force: true });
