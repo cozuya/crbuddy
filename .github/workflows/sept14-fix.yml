@@ -1,0 +1,620 @@
+name: Apply sept-14 review fixes
+
+on:
+  push:
+    branches:
+      - sept-14
+    paths:
+      - .github/workflows/sept14-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out sept-14
+        uses: actions/checkout@v6
+        with:
+          ref: sept-14
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Apply fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          def read(path):
+              return Path(path).read_text()
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, got {count}')
+              return text.replace(old, new, 1)
+
+          # ---- init/config UI -------------------------------------------------
+          path = 'src/commands/init.ts'
+          text = read(path)
+
+          text = replace_once(
+              text,
+              "  const detections = await ui.spinner(\n",
+              """  let initialSavedReviewInstructions = existing?.savedReviewInstructions;
+
+          if (ui.interactive && initialSavedReviewInstructions) {
+            ui.note(
+              formatSavedReviewInstructions(initialSavedReviewInstructions),
+              'Saved review instructions',
+            );
+
+            const keepSaved = await ui.confirm(
+              'Keep these saved review instructions for reuse?',
+              true,
+            );
+
+            if (!keepSaved) initialSavedReviewInstructions = undefined;
+          }
+
+          const detections = await ui.spinner(
+          """,
+              'insert saved-instruction management',
+          )
+
+          text = replace_once(
+              text,
+              "    existing?.savedReviewInstructions,\n  );",
+              "    initialSavedReviewInstructions,\n  );",
+              'thread managed saved instructions',
+          )
+
+          pattern = re.compile(
+              r"export function formatSavedReviewInstructions\(instructions: string\): string \{.*?\n\}\n\nexport function formatConfigSummary",
+              re.S,
+          )
+          replacement = r"""function stripTerminalControlSequences(value: string): string {
+            return value
+              .replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\|$)/g, '')
+              .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+              .replace(/\x1B./g, '')
+              .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+          }
+
+          export function formatSavedReviewInstructions(instructions: string): string {
+            const logicalLines = stripTerminalControlSequences(
+              instructions.replace(/\r\n?/g, '\n'),
+            ).split('\n');
+
+            while (logicalLines.length > 0 && logicalLines[0]?.trim() === '') {
+              logicalLines.shift();
+            }
+            while (logicalLines.length > 0 && logicalLines.at(-1)?.trim() === '') {
+              logicalLines.pop();
+            }
+
+            const first = logicalLines[0]?.trim().replace(/[\t ]+/g, ' ') ?? '';
+            const preview =
+              first.length > SAVED_REVIEW_PREVIEW_WIDTH
+                ? `${first.slice(0, SAVED_REVIEW_PREVIEW_WIDTH - 1).trimEnd()}…`
+                : first;
+
+            const approximateLines = logicalLines.reduce((sum, line) => {
+              const width = line.replace(/\t/g, '    ').trimEnd().length;
+              return sum + Math.max(1, Math.ceil(width / SAVED_REVIEW_PREVIEW_WIDTH));
+            }, 0);
+            const more = Math.max(0, approximateLines - 1);
+
+            return more > 0
+              ? `${preview} (and ~${more} more line${more === 1 ? '' : 's'})`
+              : preview;
+          }
+
+          export function formatConfigSummary"""
+          text, count = pattern.subn(lambda _: replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'sanitize saved preview: expected one match, got {count}')
+
+          old = """async function chooseReviewInstructions(
+            ui: WizardUI,
+            adapter: Adapter,
+            savedReviewInstructions: string | undefined,
+          ): Promise<{ instructions?: string; savedReviewInstructions?: string }> {
+            if (!adapter.nativeReview) {
+          """
+          new = """async function chooseReviewInstructions(
+            ui: WizardUI,
+            adapter: Adapter,
+            savedReviewInstructions: string | undefined,
+          ): Promise<{ instructions?: string; savedReviewInstructions?: string }> {
+            // Piped setup has a documented fixed answer order. Saved-instruction
+            // management is therefore interactive-only: scripted setup sees the
+            // same default-vs-custom questions it saw before this feature existed.
+            if (!ui.interactive) {
+              if (!adapter.nativeReview) {
+                ui.message(
+                  `${adapter.label} does not expose a supported headless native code-review ` +
+                    'operation, so this lane needs explicit review instructions.',
+                  'warn',
+                );
+                const instructions = await ui.multiline('Review instructions');
+                return {
+                  instructions,
+                  ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
+                };
+              }
+
+              const custom = await ui.confirm(
+                `Give this reviewer custom instructions? ` +
+                  `(default: ${adapter.nativeReviewCommand ?? 'the vendor’s own review'})`,
+                false,
+              );
+
+              if (!custom) {
+                return savedReviewInstructions ? { savedReviewInstructions } : {};
+              }
+
+              const instructions = await ui.multiline('Review instructions');
+              return {
+                instructions,
+                ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
+              };
+            }
+
+            if (!adapter.nativeReview) {
+          """
+          text = replace_once(text, old, new, 'preserve piped setup answer order')
+          write(path, text)
+
+          # ---- crb view -------------------------------------------------------
+          Path('src/commands/view.ts').write_text("""import { existsSync } from 'node:fs';
+
+          import {
+            ConfigError,
+            assertUsableOutput,
+            homeConfigPath,
+            loadConfig,
+            projectConfigPath,
+            readAndValidate,
+          } from '../config/load.js';
+          import { loadGlobalSettings } from '../config/settings.js';
+          import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
+          import { formatConfigSummary } from './init.js';
+
+          export interface ViewOptions {
+            repoRoot: string | null;
+          }
+
+          export interface ViewDependencies {
+            ui?: WizardUI;
+            /** Test seam; normal view always uses ~/.crbuddy/config.json. */
+            globalConfigFile?: string;
+            /** Test seam; normal view always uses ~/.crbuddy/settings.json. */
+            settingsFile?: string;
+          }
+
+          async function configSummary(
+            options: ViewOptions,
+            dependencies: ViewDependencies,
+          ): Promise<string> {
+            // Production inside a repository deliberately shares the exact loader
+            // with `crb go`, including project-over-global precedence and the
+            // repo-root-aware output-path checks.
+            if (options.repoRoot && dependencies.globalConfigFile === undefined) {
+              try {
+                const loaded = await loadConfig(options.repoRoot);
+                return formatConfigSummary(
+                  loaded.scope,
+                  loaded.source,
+                  loaded.config,
+                  null,
+                );
+              } catch (error) {
+                if (
+                  error instanceof ConfigError &&
+                  error.message.startsWith('No config found.')
+                ) {
+                  return 'Config: None';
+                }
+                throw error;
+              }
+            }
+
+            // Outside a repository there is no repo root against which relative
+            // output paths can be resolved. The injected global path is also kept
+            // as a test seam for precedence tests.
+            const projectFile = options.repoRoot
+              ? projectConfigPath(options.repoRoot)
+              : null;
+            const globalFile = dependencies.globalConfigFile ?? homeConfigPath();
+
+            if (projectFile && existsSync(projectFile)) {
+              const config = await readAndValidate(projectFile);
+              assertUsableOutput(config.output, `${projectFile}.output`, options.repoRoot!);
+              return formatConfigSummary('project', projectFile, config, null);
+            }
+
+            if (existsSync(globalFile)) {
+              const config = await readAndValidate(globalFile);
+              if (options.repoRoot) {
+                assertUsableOutput(config.output, `${globalFile}.output`, options.repoRoot);
+              }
+              return formatConfigSummary('global', globalFile, config, null);
+            }
+
+            return 'Config: None';
+          }
+
+          export async function runView(
+            options: ViewOptions,
+            dependencies: ViewDependencies = {},
+          ): Promise<number> {
+            const ui = dependencies.ui ?? (await createWizardUI());
+            const summary = await configSummary(options, dependencies);
+            const settings = await loadGlobalSettings(
+              (message) => ui.message(message, 'warn'),
+              dependencies.settingsFile,
+            );
+
+            ui.note(
+              `${summary}\nNotifications (global): ${settings.notifications ? 'ntfy' : 'Off'}`,
+              'Configuration',
+            );
+
+            return 0;
+          }
+          """)
+
+          # ---- config loader cleanup ----------------------------------------
+          path = 'src/config/load.ts'
+          text = read(path)
+          text = replace_once(
+              text,
+              """  if (!seen.has(base)) {
+            seen.add(base);
+            return base;
+          }
+
+          """,
+              '',
+              'remove redundant uniqueId fast path',
+          )
+          write(path, text)
+
+          # ---- Claude completion fallback -----------------------------------
+          path = 'src/adapters/vendors.ts'
+          text = read(path)
+          anchor = """function hasTrailingClaudeCompletionMarkerLine(output: string): boolean {
+            const lastLine = output
+              .trimEnd()
+              .split(/\\r\\n|\\r|\\n/)
+              .at(-1);
+
+            return lastLine?.trim() === CLAUDE_COMPLETION_MARKER;
+          }
+
+          /** Claude Code: invoke the native `/code-review` skill through print mode. */
+          """
+          replacement = """function hasTrailingClaudeCompletionMarkerLine(output: string): boolean {
+            const lastLine = output
+              .trimEnd()
+              .split(/\\r\\n|\\r|\\n/)
+              .at(-1);
+
+            return lastLine?.trim() === CLAUDE_COMPLETION_MARKER;
+          }
+
+          const CLAUDE_FINAL_REVIEW_SIGNAL =
+            /(?:^\\s*(?:[-*]\\s*)?\\[P[0-3]\\]|\\bno (?:actionable )?(?:findings|defects|regressions|issues)\\b|\\bfound (?:no|\\d+|one|two|three|four|five|six|seven|eight|nine|ten) (?:problems?|issues?|findings?|defects?|regressions?)\\b|^##\\s+(?:assessment|code review results|overall)\\b)/im;
+
+          const CLAUDE_PROGRESS_SIGNAL =
+            /(?:waiting for (?:the )?(?:background )?(?:agents?|tasks?)|(?:background|delegated) (?:agents?|tasks?) (?:are )?still running|(?:agents?|tasks?) still running|(?:i(?:'|’)ll|i will) wait)/i;
+
+          function looksLikeCompletedClaudeOutputWithoutMarker(output: string): boolean {
+            const text = output.trim();
+            if (text === '') return false;
+
+            try {
+              JSON.parse(text);
+              return true;
+            } catch {
+              // Most reviews are prose. JSON is only a strong completion signal
+              // for exact-format tasks such as consolidation.
+            }
+
+            const hasFinalSignal = CLAUDE_FINAL_REVIEW_SIGNAL.test(text);
+            const tail = text.slice(-1000);
+
+            if (CLAUDE_PROGRESS_SIGNAL.test(tail) && !hasFinalSignal) return false;
+            if (hasFinalSignal) return true;
+
+            // The marker remains the preferred contract, but Claude has now
+            // omitted it after multiple clearly finished long reviews. Accept a
+            // substantial zero-exit payload while still rejecting short ambiguous
+            // status/progress replies like the original background-agent failure.
+            return text.length >= 500;
+          }
+
+          /** Claude Code: invoke the native `/code-review` skill through print mode. */
+          """
+          text = replace_once(text, anchor, replacement, 'add Claude marker fallback')
+
+          old = """    const body = result.stdout.trimEnd();
+            if (!hasTrailingClaudeCompletionMarkerLine(body)) {
+              return { ok: false, reason: 'incomplete_review' };
+            }
+
+            const review = stripClaudeCompletionMarker(body).trim();
+          """
+          new = """    const body = result.stdout.trimEnd();
+            if (!hasTrailingClaudeCompletionMarkerLine(body)) {
+              return looksLikeCompletedClaudeOutputWithoutMarker(body)
+                ? { ok: true }
+                : { ok: false, reason: 'incomplete_review' };
+            }
+
+            const review = stripClaudeCompletionMarker(body).trim();
+          """
+          text = replace_once(text, old, new, 'relax missing Claude marker')
+          write(path, text)
+
+          # ---- Claude completion tests ---------------------------------------
+          path = 'test/claude-completion.test.ts'
+          text = read(path)
+          anchor = """test('Claude accepts a terse completed review when the completion marker is present', () => {
+          """
+          addition = """test('Claude accepts a substantive completed review when the marker is omitted', () => {
+            const stdout = `I found two problems in the changed code.\n\n` +
+              `- src/a.ts:10 — the first path can return stale data.\n` +
+              `- src/b.ts:20 — the second path can drop an error.\n\n` +
+              `The rest of the diff looked correct to me.`;
+
+            assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
+            assert.equal(claudeAdapter.finalOutput(result(stdout)), stdout);
+          });
+
+          test('Claude accepts a terse no-findings review without the marker', () => {
+            assert.deepEqual(
+              claudeAdapter.checkCompletion(result('No actionable regressions identified.')),
+              { ok: true },
+            );
+          });
+
+          test('Claude still rejects ambiguous short status text without the marker', () => {
+            assert.deepEqual(
+              claudeAdapter.checkCompletion(result('Reviewing the remaining files now.')),
+              { ok: false, reason: 'incomplete_review' },
+            );
+          });
+
+          test('Claude accepts an exact JSON payload without the marker', () => {
+            assert.deepEqual(
+              claudeAdapter.checkCompletion(result('{\"clusters\":[]}')),
+              { ok: true },
+            );
+          });
+
+          """
+          text = replace_once(text, anchor, addition + anchor, 'add Claude fallback tests')
+          write(path, text)
+
+          # ---- saved-review tests -------------------------------------------
+          path = 'test/saved-review-instructions.test.ts'
+          text = read(path)
+
+          text = replace_once(
+              text,
+              """class ReplacePanelUI extends TestUI {
+          """,
+              """class InteractiveTestUI extends TestUI {
+            override readonly interactive = true;
+          }
+
+          class ReplacePanelUI extends InteractiveTestUI {
+          """,
+              'make saved-review flows interactive',
+          )
+          text = replace_once(
+              text,
+              '  class SaveNewUI extends TestUI {\n',
+              '  class SaveNewUI extends InteractiveTestUI {\n',
+              'make save-new flow interactive',
+          )
+          text = replace_once(
+              text,
+              "    assert.doesNotMatch(ui.confirmations.join('\\n'), /saved review instructions/i);",
+              "    assert.ok(ui.confirmations.includes('Keep these saved review instructions for reuse?'));",
+              'update saved-choice confirmation assertion',
+          )
+
+          preview_anchor = """test('init offers saved custom instructions as a third native-review choice', async (t) => {
+          """
+          preview_tests = r"""test('saved instruction preview strips terminal control sequences', () => {
+            const preview = formatSavedReviewInstructions(
+              '\x1b]0;spoofed title\x07\x1b[31mReview carefully\x1b[0m\nSecond line',
+            );
+
+            assert.equal(preview, 'Review carefully (and ~1 more line)');
+            assert.doesNotMatch(preview, /\x1b|spoofed title/);
+          });
+
+          """
+          text = replace_once(text, preview_anchor, preview_tests + preview_anchor, 'add preview sanitization test')
+
+          end_anchor = """test('crb view includes the saved review preview without dumping the full prompt', async (t) => {
+          """
+          extra = """test('interactive config can forget saved review instructions without adding a reviewer', async (t) => {
+            const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-saved-review-forget-'));
+            t.after(() => rm(repo, { recursive: true, force: true }));
+            const configFile = await writeConfig(repo, existingConfig('Sensitive old prompt.'));
+
+            class ForgetSavedUI extends InteractiveTestUI {
+              override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+                this.confirmations.push(question);
+                if (question === 'Keep these saved review instructions for reuse?') return false;
+                return defaultYes;
+              }
+            }
+
+            const ui = new ForgetSavedUI();
+            assert.equal(
+              await runInit(
+                { repoRoot: repo, scope: 'project' },
+                { ui, detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
+              ),
+              0,
+            );
+
+            const written = JSON.parse(await readFile(configFile, 'utf8')) as Config;
+            assert.equal(written.savedReviewInstructions, undefined);
+          });
+
+          test('piped setup keeps the legacy answer sequence and does not ask to save custom instructions', async (t) => {
+            const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-saved-review-piped-'));
+            t.after(() => rm(repo, { recursive: true, force: true }));
+            const custom = 'One-off piped review instructions.';
+
+            class PipedCustomUI extends TestUI {
+              override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+                this.confirmations.push(question);
+                if (question.startsWith('Give this reviewer custom instructions?')) return true;
+                if (/saved review instructions|Save these review instructions|Replace the saved review/i.test(question)) {
+                  throw new Error(`piped setup consumed a new saved-instruction question: ${question}`);
+                }
+                return defaultYes;
+              }
+
+              override async multiline(question: string): Promise<string> {
+                assert.equal(question, 'Review instructions');
+                return custom;
+              }
+            }
+
+            const ui = new PipedCustomUI();
+            assert.equal(
+              await runInit(
+                { repoRoot: repo, scope: 'project' },
+                { ui, detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
+              ),
+              0,
+            );
+
+            const written = JSON.parse(
+              await readFile(projectConfigPath(repo), 'utf8'),
+            ) as Config;
+            assert.equal(written.panel[0]?.instructions, custom);
+            assert.equal(written.savedReviewInstructions, undefined);
+          });
+
+          """
+          text = replace_once(text, end_anchor, extra + end_anchor, 'add clear and piped compatibility tests')
+          write(path, text)
+
+          # ---- view validation test -----------------------------------------
+          path = 'test/view.test.ts'
+          text = read(path)
+          anchor = """test('view reports when no review config exists', async () => {
+          """
+          addition = """test('view applies the same repo-root output validation as go', async () => {
+            const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-output-validation-'));
+
+            try {
+              const repoRoot = path.join(root, 'repo');
+              await mkdir(repoRoot, { recursive: true });
+              await mkdir(path.join(repoRoot, 'reports'));
+              const broken = config('gpt-6-astra', 'uncommitted');
+              broken.output = {
+                destination: 'file',
+                merged: 'reports',
+                raw: 'review.raw.md',
+              };
+              await writeJson(projectConfigPath(repoRoot), broken);
+
+              const { ui } = recordingUi();
+              await assert.rejects(
+                () =>
+                  runView(
+                    { repoRoot },
+                    { ui, settingsFile: path.join(root, 'missing-settings.json') },
+                  ),
+                /must name a file, not a directory/,
+              );
+            } finally {
+              await rm(root, { recursive: true, force: true });
+            }
+          });
+
+          """
+          text = replace_once(text, anchor, addition + anchor, 'add view validation test')
+          write(path, text)
+
+          # ---- docs ----------------------------------------------------------
+          path = 'GUIDE.md'
+          text = read(path)
+          text = replace_once(
+              text,
+              '| `crbuddy config` | The same command; edits an existing config. |\n| `crbuddy go [instructions]` | Run the panel. |',
+              '| `crbuddy config` | The same command; edits an existing config. |\n| `crbuddy view` | Show the effective repository-or-global config. Read-only. |\n| `crbuddy go [instructions]` | Run the panel. |',
+              'document view command',
+          )
+          text = replace_once(
+              text,
+              '`maxConcurrent` (`0` = unlimited),\n`maxDiffBytes`.',
+              '`maxConcurrent` (`0` = unlimited),\n`maxDiffBytes`, and `savedReviewInstructions` (one reusable custom review prompt).',
+              'document saved config key',
+          )
+          panel_anchor = """Not every vendor exposes a usable headless native review surface. For those
+          vendors, `crbuddy init` requires explicit `instructions` rather than creating a
+          lane that would later be refused. Gemini is currently in this category.
+          """
+          panel_replacement = panel_anchor + """
+
+          In interactive `crb init` / `crb config`, a custom review prompt can be saved as
+          `savedReviewInstructions`. Later reviewers can use the vendor default, reuse the
+          saved prompt, or enter a new one. Reuse copies the text into that reviewer's own
+          `instructions`; review execution never dereferences the saved field. Existing saved
+          text can also be forgotten from interactive config. `crb view` and the final setup
+          summary show only a sanitized, truncated first-line preview plus an approximate
+          wrapped-line count, never the full prompt.
+
+          Piped setup deliberately keeps its pre-existing answer order. It does not add the
+          save/reuse/forget questions: native reviewers still ask only default-vs-custom and
+          reviewers without a native lane still read the required custom-instructions answer.
+          Manage `savedReviewInstructions` interactively (or edit the JSON) when reuse is wanted.
+          """
+          text = replace_once(text, panel_anchor, panel_replacement, 'document saved review behavior')
+          write(path, text)
+          PY
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Commit fixes and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/sept14-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Address sept-14 review findings"
+          git push origin HEAD:sept-14
