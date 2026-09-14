@@ -187,7 +187,12 @@ async function wizard(
     'Detection checks presence only; crbuddy does not check whether CLIs are logged in.',
   );
 
-  const panel = await buildPanel(ui, available, existing?.panel ?? []);
+  const { panel, savedReviewInstructions } = await buildPanel(
+    ui,
+    available,
+    existing?.panel ?? [],
+    existing?.savedReviewInstructions,
+  );
   const { merge, output } = await buildMerge(
     ui,
     available,
@@ -202,6 +207,7 @@ async function wizard(
     configVersion: CONFIG_VERSION,
     output,
     target: reviewTarget,
+    ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
     refuseIfOutputExists:
       existing?.refuseIfOutputExists ?? DEFAULTS.refuseIfOutputExists,
     timeoutMs: existing?.timeoutMs ?? DEFAULTS.timeoutMs,
@@ -454,6 +460,35 @@ function formatPanel(panel: PanelEntry[]): string {
   return panel.map(formatReviewer).join('\n');
 }
 
+const SAVED_REVIEW_PREVIEW_WIDTH = 80;
+
+export function formatSavedReviewInstructions(instructions: string): string {
+  const logicalLines = instructions.replace(/\r\n?/g, '\n').split('\n');
+
+  while (logicalLines.length > 0 && logicalLines[0]?.trim() === '') {
+    logicalLines.shift();
+  }
+  while (logicalLines.length > 0 && logicalLines.at(-1)?.trim() === '') {
+    logicalLines.pop();
+  }
+
+  const first = logicalLines[0]?.trim().replace(/[\t ]+/g, ' ') ?? '';
+  const preview =
+    first.length > SAVED_REVIEW_PREVIEW_WIDTH
+      ? `${first.slice(0, SAVED_REVIEW_PREVIEW_WIDTH - 1).trimEnd()}…`
+      : first;
+
+  const approximateLines = logicalLines.reduce((sum, line) => {
+    const width = line.replace(/\t/g, '    ').trimEnd().length;
+    return sum + Math.max(1, Math.ceil(width / SAVED_REVIEW_PREVIEW_WIDTH));
+  }, 0);
+  const more = Math.max(0, approximateLines - 1);
+
+  return more > 0
+    ? `${preview} (and ~${more} more line${more === 1 ? '' : 's'})`
+    : preview;
+}
+
 export function formatConfigSummary(
   scope: 'global' | 'project',
   targetFile: string,
@@ -468,6 +503,15 @@ export function formatConfigSummary(
     ...config.panel.map((entry) => `  ${formatReviewer(entry)}`),
     '',
   ];
+
+  if (config.savedReviewInstructions) {
+    lines.push(
+      `Saved review instructions: ${formatSavedReviewInstructions(
+        config.savedReviewInstructions,
+      )}`,
+      '',
+    );
+  }
 
   if (config.merge.enabled) {
     const merger: PanelEntry = {
@@ -587,12 +631,128 @@ async function pickEffort(
   return chosen === OTHER ? ui.text('Effort value', current ?? '') : chosen;
 }
 
+type ReviewInstructionMode = 'default' | 'saved' | 'custom';
+
+interface PanelBuildResult {
+  panel: PanelEntry[];
+  savedReviewInstructions?: string;
+}
+
+function sameReviewInstructions(left: string, right: string | undefined): boolean {
+  if (right === undefined) return false;
+  const normalize = (value: string): string => value.replace(/\r\n?/g, '\n');
+  return normalize(left) === normalize(right);
+}
+
+async function enterCustomReviewInstructions(
+  ui: WizardUI,
+  savedReviewInstructions: string | undefined,
+): Promise<{ instructions: string; savedReviewInstructions?: string }> {
+  const instructions = await ui.multiline('Review instructions');
+
+  if (instructions.trim() === '' || sameReviewInstructions(instructions, savedReviewInstructions)) {
+    return { instructions, ...(savedReviewInstructions ? { savedReviewInstructions } : {}) };
+  }
+
+  const save = await ui.confirm(
+    savedReviewInstructions
+      ? 'Replace the saved review instructions with these?'
+      : 'Save these review instructions for reuse?',
+    true,
+  );
+
+  return {
+    instructions,
+    ...((save ? instructions : savedReviewInstructions)
+      ? { savedReviewInstructions: save ? instructions : savedReviewInstructions }
+      : {}),
+  };
+}
+
+async function chooseReviewInstructions(
+  ui: WizardUI,
+  adapter: Adapter,
+  savedReviewInstructions: string | undefined,
+): Promise<{ instructions?: string; savedReviewInstructions?: string }> {
+  if (!adapter.nativeReview) {
+    ui.message(
+      `${adapter.label} does not expose a supported headless native code-review ` +
+        'operation, so this lane needs explicit review instructions.',
+      'warn',
+    );
+
+    if (!savedReviewInstructions) {
+      return enterCustomReviewInstructions(ui, undefined);
+    }
+
+    const mode = await ui.select<'saved' | 'custom'>(
+      `Review instructions for ${adapter.label}`,
+      [
+        {
+          label: 'Use saved custom instructions',
+          value: 'saved',
+          hint: formatSavedReviewInstructions(savedReviewInstructions),
+        },
+        { label: 'Enter custom instructions', value: 'custom' },
+      ],
+      0,
+    );
+
+    if (mode === 'saved') {
+      return { instructions: savedReviewInstructions, savedReviewInstructions };
+    }
+
+    return enterCustomReviewInstructions(ui, savedReviewInstructions);
+  }
+
+  if (!savedReviewInstructions) {
+    const custom = await ui.confirm(
+      `Give this reviewer custom instructions? ` +
+        `(default: ${adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'})`,
+      false,
+    );
+
+    return custom
+      ? enterCustomReviewInstructions(ui, undefined)
+      : {};
+  }
+
+  const mode = await ui.select<ReviewInstructionMode>(
+    `Review instructions for ${adapter.label}`,
+    [
+      {
+        label: 'Use default instructions',
+        value: 'default',
+        hint: adapter.nativeReviewCommand ?? 'the vendor\u2019s own review',
+      },
+      {
+        label: 'Use saved custom instructions',
+        value: 'saved',
+        hint: formatSavedReviewInstructions(savedReviewInstructions),
+      },
+      { label: 'Enter custom instructions', value: 'custom' },
+    ],
+    0,
+  );
+
+  if (mode === 'default') {
+    return { savedReviewInstructions };
+  }
+  if (mode === 'saved') {
+    return { instructions: savedReviewInstructions, savedReviewInstructions };
+  }
+
+  return enterCustomReviewInstructions(ui, savedReviewInstructions);
+}
+
 async function buildPanel(
   ui: WizardUI,
   available: Adapter[],
   existing: PanelEntry[],
-): Promise<PanelEntry[]> {
+  initialSavedReviewInstructions?: string,
+): Promise<PanelBuildResult> {
   const panel: PanelEntry[] = [];
+  let savedReviewInstructions = initialSavedReviewInstructions;
 
   if (existing.length > 0) {
     ui.note(formatPanel(existing), 'Current panel');
@@ -635,24 +795,13 @@ async function buildPanel(
 
     const model = await pickModel(ui, adapter);
     const effort = await pickEffort(ui, adapter, model);
-
-    let instructions: string | undefined;
-
-    if (!adapter.nativeReview) {
-      ui.message(
-        `${adapter.label} does not expose a supported headless native code-review ` +
-          'operation, so this lane needs explicit review instructions.',
-        'warn',
-      );
-      instructions = await ui.multiline('Review instructions');
-    } else {
-      const custom = await ui.confirm(
-        `Give this reviewer custom instructions? ` +
-          `(default: ${adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'})`,
-        false,
-      );
-      instructions = custom ? await ui.multiline('Review instructions') : undefined;
-    }
+    const instructionChoice = await chooseReviewInstructions(
+      ui,
+      adapter,
+      savedReviewInstructions,
+    );
+    const instructions = instructionChoice.instructions;
+    savedReviewInstructions = instructionChoice.savedReviewInstructions;
 
     const seen = new Set(panel.map((entry) => entry.id));
     const base = slug(`${adapter.name}-${model}`);
@@ -678,7 +827,10 @@ async function buildPanel(
     throw new Error('A panel needs at least one run.');
   }
 
-  return panel;
+  return {
+    panel,
+    ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
+  };
 }
 
 /**
