@@ -454,7 +454,7 @@ function formatPanel(panel: PanelEntry[]): string {
   return panel.map(formatReviewer).join('\n');
 }
 
-function formatConfigSummary(
+export function formatConfigSummary(
   scope: 'global' | 'project',
   targetFile: string,
   config: Config,
