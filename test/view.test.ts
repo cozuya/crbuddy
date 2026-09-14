@@ -136,6 +136,35 @@ test('view falls back to the global config', async () => {
   }
 });
 
+test('view applies the same repo-root output validation as go', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-output-validation-'));
+
+  try {
+    const repoRoot = path.join(root, 'repo');
+    await mkdir(repoRoot, { recursive: true });
+    await mkdir(path.join(repoRoot, 'reports'));
+    const broken = config('gpt-6-astra', 'uncommitted');
+    broken.output = {
+      destination: 'file',
+      merged: 'reports',
+      raw: 'review.raw.md',
+    };
+    await writeJson(projectConfigPath(repoRoot), broken);
+
+    const { ui } = recordingUi();
+    await assert.rejects(
+      () =>
+        runView(
+          { repoRoot },
+          { ui, settingsFile: path.join(root, 'missing-settings.json') },
+        ),
+      /must name a file, not a directory/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('view reports when no review config exists', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-none-'));
 

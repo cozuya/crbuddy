@@ -629,10 +629,6 @@ function uniqueId(candidate: string, seen: Set<string>, at?: string): string {
     throw new ConfigError(`${at}.id: duplicate id "${base}".`);
   }
 
-  if (!seen.has(base)) {
-    seen.add(base);
-    return base;
-  }
 
   let id = base;
   let n = 2;

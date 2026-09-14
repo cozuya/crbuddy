@@ -77,6 +77,7 @@ separately supported `deepseek` vendor.
 |---|---|
 | `crbuddy init` | Interactive setup. Writes a config. |
 | `crbuddy config` | The same command; edits an existing config. |
+| `crbuddy view` | Show the effective repository-or-global config. Read-only. |
 | `crbuddy go [instructions]` | Run the panel. |
 | `crbuddy doctor` | Report which vendor CLIs are usable, which flags they accept, and why not. Read-only; contacts no models. Also aliased as `check`. |
 
@@ -176,7 +177,7 @@ A copyable configuration is shipped in
 Other keys, all optional: `refuseIfOutputExists` (default `false`),
 `timeoutMs` and `mergeTimeoutMs` (both default to one hour),
 `maxConcurrent` (`0` = unlimited),
-`maxDiffBytes`.
+`maxDiffBytes`, and `savedReviewInstructions` (one reusable custom review prompt).
 
 Unknown keys are a hard error. A typo that silently does nothing is worse
 than a failed startup.
@@ -232,6 +233,20 @@ With it, the adapter runs a generic read-only agent given those instructions.
 Not every vendor exposes a usable headless native review surface. For those
 vendors, `crbuddy init` requires explicit `instructions` rather than creating a
 lane that would later be refused. Gemini is currently in this category.
+
+
+In interactive `crb init` / `crb config`, a custom review prompt can be saved as
+`savedReviewInstructions`. Later reviewers can use the vendor default, reuse the
+saved prompt, or enter a new one. Reuse copies the text into that reviewer's own
+`instructions`; review execution never dereferences the saved field. Existing saved
+text can also be forgotten from interactive config. `crb view` and the final setup
+summary show only a sanitized, truncated first-line preview plus an approximate
+wrapped-line count, never the full prompt.
+
+Piped setup deliberately keeps its pre-existing answer order. It does not add the
+save/reuse/forget questions: native reviewers still ask only default-vs-custom and
+reviewers without a native lane still read the required custom-instructions answer.
+Manage `savedReviewInstructions` interactively (or edit the JSON) when reuse is wanted.
 
 For Claude Code, native review uses `/code-review` through print mode and gives
 the command crbuddy's captured git range. For Codex, native review uses

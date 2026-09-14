@@ -35,6 +35,37 @@ test('Claude rejects the observed background-agent progress response', () => {
   );
 });
 
+test('Claude accepts a substantive completed review when the marker is omitted', () => {
+  const stdout = `I found two problems in the changed code.\n\n` +
+    `- src/a.ts:10 — the first path can return stale data.\n` +
+    `- src/b.ts:20 — the second path can drop an error.\n\n` +
+    `The rest of the diff looked correct to me.`;
+
+  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
+  assert.equal(claudeAdapter.finalOutput(result(stdout)), stdout);
+});
+
+test('Claude accepts a terse no-findings review without the marker', () => {
+  assert.deepEqual(
+    claudeAdapter.checkCompletion(result('No actionable regressions identified.')),
+    { ok: true },
+  );
+});
+
+test('Claude still rejects ambiguous short status text without the marker', () => {
+  assert.deepEqual(
+    claudeAdapter.checkCompletion(result('Reviewing the remaining files now.')),
+    { ok: false, reason: 'incomplete_review' },
+  );
+});
+
+test('Claude accepts an exact JSON payload without the marker', () => {
+  assert.deepEqual(
+    claudeAdapter.checkCompletion(result('{"clusters":[]}')),
+    { ok: true },
+  );
+});
+
 test('Claude accepts a terse completed review when the completion marker is present', () => {
   const stdout =
     `No actionable regressions identified.\n${CLAUDE_COMPLETION_MARKER}\n`;

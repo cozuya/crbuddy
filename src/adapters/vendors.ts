@@ -185,6 +185,37 @@ function hasTrailingClaudeCompletionMarkerLine(output: string): boolean {
   return lastLine?.trim() === CLAUDE_COMPLETION_MARKER;
 }
 
+const CLAUDE_FINAL_REVIEW_SIGNAL =
+  /(?:^\s*(?:[-*]\s*)?\[P[0-3]\]|\bno (?:actionable )?(?:findings|defects|regressions|issues)\b|\bfound (?:no|\d+|one|two|three|four|five|six|seven|eight|nine|ten) (?:problems?|issues?|findings?|defects?|regressions?)\b|^##\s+(?:assessment|code review results|overall)\b)/im;
+
+const CLAUDE_PROGRESS_SIGNAL =
+  /(?:waiting for (?:the )?(?:background )?(?:agents?|tasks?)|(?:background|delegated) (?:agents?|tasks?) (?:are )?still running|(?:agents?|tasks?) still running|(?:i(?:'|’)ll|i will) wait)/i;
+
+function looksLikeCompletedClaudeOutputWithoutMarker(output: string): boolean {
+  const text = output.trim();
+  if (text === '') return false;
+
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    // Most reviews are prose. JSON is only a strong completion signal
+    // for exact-format tasks such as consolidation.
+  }
+
+  const hasFinalSignal = CLAUDE_FINAL_REVIEW_SIGNAL.test(text);
+  const tail = text.slice(-1000);
+
+  if (CLAUDE_PROGRESS_SIGNAL.test(tail) && !hasFinalSignal) return false;
+  if (hasFinalSignal) return true;
+
+  // The marker remains the preferred contract, but Claude has now omitted it
+  // after multiple clearly finished long reviews. Accept a substantial
+  // zero-exit payload while still rejecting short ambiguous status/progress
+  // replies like the original background-agent failure.
+  return text.length >= 500;
+}
+
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
 export const claudeAdapter: Adapter = {
   name: 'claude',
@@ -338,7 +369,9 @@ export const claudeAdapter: Adapter = {
 
     const body = result.stdout.trimEnd();
     if (!hasTrailingClaudeCompletionMarkerLine(body)) {
-      return { ok: false, reason: 'incomplete_review' };
+      return looksLikeCompletedClaudeOutputWithoutMarker(body)
+        ? { ok: true }
+        : { ok: false, reason: 'incomplete_review' };
     }
 
     const review = stripClaudeCompletionMarker(body).trim();

@@ -165,6 +165,22 @@ async function wizard(
     }
   }
 
+  let initialSavedReviewInstructions = existing?.savedReviewInstructions;
+
+  if (ui.interactive && initialSavedReviewInstructions) {
+    ui.note(
+      formatSavedReviewInstructions(initialSavedReviewInstructions),
+      'Saved review instructions',
+    );
+
+    const keepSaved = await ui.confirm(
+      'Keep these saved review instructions for reuse?',
+      true,
+    );
+
+    if (!keepSaved) initialSavedReviewInstructions = undefined;
+  }
+
   const detections = await ui.spinner(
     'Checking vendor CLIs',
     detect,
@@ -191,7 +207,7 @@ async function wizard(
     ui,
     available,
     existing?.panel ?? [],
-    existing?.savedReviewInstructions,
+    initialSavedReviewInstructions,
   );
   const { merge, output } = await buildMerge(
     ui,
@@ -462,8 +478,18 @@ function formatPanel(panel: PanelEntry[]): string {
 
 const SAVED_REVIEW_PREVIEW_WIDTH = 80;
 
+function stripTerminalControlSequences(value: string): string {
+  return value
+    .replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\|$)/g, '')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1B./g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+}
+
 export function formatSavedReviewInstructions(instructions: string): string {
-  const logicalLines = instructions.replace(/\r\n?/g, '\n').split('\n');
+  const logicalLines = stripTerminalControlSequences(
+    instructions.replace(/\r\n?/g, '\n'),
+  ).split('\n');
 
   while (logicalLines.length > 0 && logicalLines[0]?.trim() === '') {
     logicalLines.shift();
@@ -674,6 +700,40 @@ async function chooseReviewInstructions(
   adapter: Adapter,
   savedReviewInstructions: string | undefined,
 ): Promise<{ instructions?: string; savedReviewInstructions?: string }> {
+  // Piped setup has a documented fixed answer order. Saved-instruction
+  // management is therefore interactive-only: scripted setup sees the
+  // same default-vs-custom questions it saw before this feature existed.
+  if (!ui.interactive) {
+    if (!adapter.nativeReview) {
+      ui.message(
+        `${adapter.label} does not expose a supported headless native code-review ` +
+          'operation, so this lane needs explicit review instructions.',
+        'warn',
+      );
+      const instructions = await ui.multiline('Review instructions');
+      return {
+        instructions,
+        ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
+      };
+    }
+
+    const custom = await ui.confirm(
+      `Give this reviewer custom instructions? ` +
+        `(default: ${adapter.nativeReviewCommand ?? 'the vendor’s own review'})`,
+      false,
+    );
+
+    if (!custom) {
+      return savedReviewInstructions ? { savedReviewInstructions } : {};
+    }
+
+    const instructions = await ui.multiline('Review instructions');
+    return {
+      instructions,
+      ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
+    };
+  }
+
   if (!adapter.nativeReview) {
     ui.message(
       `${adapter.label} does not expose a supported headless native code-review ` +

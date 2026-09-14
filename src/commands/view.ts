@@ -1,7 +1,10 @@
 import { existsSync } from 'node:fs';
 
 import {
+  ConfigError,
+  assertUsableOutput,
   homeConfigPath,
+  loadConfig,
   projectConfigPath,
   readAndValidate,
 } from '../config/load.js';
@@ -21,35 +24,72 @@ export interface ViewDependencies {
   settingsFile?: string;
 }
 
-export async function runView(
+async function configSummary(
   options: ViewOptions,
-  dependencies: ViewDependencies = {},
-): Promise<number> {
-  const ui = dependencies.ui ?? (await createWizardUI());
+  dependencies: ViewDependencies,
+): Promise<string> {
+  // Production inside a repository deliberately shares the exact loader
+  // with `crb go`, including project-over-global precedence and the
+  // repo-root-aware output-path checks.
+  if (options.repoRoot && dependencies.globalConfigFile === undefined) {
+    try {
+      const loaded = await loadConfig(options.repoRoot);
+      return formatConfigSummary(
+        loaded.scope,
+        loaded.source,
+        loaded.config,
+        null,
+      );
+    } catch (error) {
+      if (
+        error instanceof ConfigError &&
+        error.message.startsWith('No config found.')
+      ) {
+        return 'Config: None';
+      }
+      throw error;
+    }
+  }
+
+  // Outside a repository there is no repo root against which relative
+  // output paths can be resolved. The injected global path is also kept
+  // as a test seam for precedence tests.
   const projectFile = options.repoRoot
     ? projectConfigPath(options.repoRoot)
     : null;
   const globalFile = dependencies.globalConfigFile ?? homeConfigPath();
 
-  let summary: string;
-
   if (projectFile && existsSync(projectFile)) {
     const config = await readAndValidate(projectFile);
-    summary = formatConfigSummary('project', projectFile, config, null);
-  } else if (existsSync(globalFile)) {
-    const config = await readAndValidate(globalFile);
-    summary = formatConfigSummary('global', globalFile, config, null);
-  } else {
-    summary = 'Config: None';
+    assertUsableOutput(config.output, `${projectFile}.output`, options.repoRoot!);
+    return formatConfigSummary('project', projectFile, config, null);
   }
 
+  if (existsSync(globalFile)) {
+    const config = await readAndValidate(globalFile);
+    if (options.repoRoot) {
+      assertUsableOutput(config.output, `${globalFile}.output`, options.repoRoot);
+    }
+    return formatConfigSummary('global', globalFile, config, null);
+  }
+
+  return 'Config: None';
+}
+
+export async function runView(
+  options: ViewOptions,
+  dependencies: ViewDependencies = {},
+): Promise<number> {
+  const ui = dependencies.ui ?? (await createWizardUI());
+  const summary = await configSummary(options, dependencies);
   const settings = await loadGlobalSettings(
     (message) => ui.message(message, 'warn'),
     dependencies.settingsFile,
   );
 
   ui.note(
-    `${summary}\nNotifications (global): ${settings.notifications ? 'ntfy' : 'Off'}`,
+    `${summary}
+Notifications (global): ${settings.notifications ? 'ntfy' : 'Off'}`,
     'Configuration',
   );
 

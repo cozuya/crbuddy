@@ -58,7 +58,7 @@ async function writeConfig(repo: string, config: Config): Promise<string> {
 }
 
 class TestUI implements WizardUI {
-  readonly interactive = false;
+  readonly interactive: boolean = false;
   readonly notes: Array<{ title?: string; message: string }> = [];
   readonly messages: Array<{ kind?: MessageKind; message: string }> = [];
   readonly confirmations: string[] = [];
@@ -109,7 +109,11 @@ class TestUI implements WizardUI {
   }
 }
 
-class ReplacePanelUI extends TestUI {
+class InteractiveTestUI extends TestUI {
+  override readonly interactive = true;
+}
+
+class ReplacePanelUI extends InteractiveTestUI {
   override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
     this.confirmations.push(question);
     if (question === 'Keep these reviewers?') return false;
@@ -145,6 +149,15 @@ test('saved instruction preview shows one compact line plus approximate remainin
   const preview = formatSavedReviewInstructions(instructions);
 
   assert.equal(preview, `${'A'.repeat(79)}… (and ~3 more lines)`);
+});
+
+test('saved instruction preview strips terminal control sequences', () => {
+  const preview = formatSavedReviewInstructions(
+    '\x1b]0;spoofed title\x07\x1b[31mReview carefully\x1b[0m\nSecond line',
+  );
+
+  assert.equal(preview, 'Review carefully (and ~1 more line)');
+  assert.doesNotMatch(preview, /\x1b|spoofed title/);
 });
 
 test('init offers saved custom instructions as a third native-review choice', async (t) => {
@@ -187,7 +200,7 @@ test('init offers saved custom instructions as a third native-review choice', as
   const written = JSON.parse(await readFile(configFile, 'utf8')) as Config;
   assert.equal(written.savedReviewInstructions, saved);
   assert.equal(written.panel[0]?.instructions, saved);
-  assert.doesNotMatch(ui.confirmations.join('\n'), /saved review instructions/i);
+  assert.ok(ui.confirmations.includes('Keep these saved review instructions for reuse?'));
 });
 
 test('new custom instructions can be saved for reuse and appear in the config summary', async (t) => {
@@ -195,7 +208,7 @@ test('new custom instructions can be saved for reuse and appear in the config su
   t.after(() => rm(repo, { recursive: true, force: true }));
   const custom = `Review the supplied branch carefully. ${'x'.repeat(100)}\nCheck recovery paths too.`;
 
-  class SaveNewUI extends TestUI {
+  class SaveNewUI extends InteractiveTestUI {
     override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
       this.confirmations.push(question);
       if (question.startsWith('Give this reviewer custom instructions?')) return true;
@@ -320,6 +333,69 @@ test('re-entering the saved instructions does not ask to save them again', async
   assert.equal(written.savedReviewInstructions, saved);
   assert.equal(written.panel[0]?.instructions, saved.replace(/\n/g, '\r\n'));
   assert.doesNotMatch(ui.confirmations.join('\n'), /Replace the saved review instructions/);
+});
+
+test('interactive config can forget saved review instructions without adding a reviewer', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-saved-review-forget-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const configFile = await writeConfig(repo, existingConfig('Sensitive old prompt.'));
+
+  class ForgetSavedUI extends InteractiveTestUI {
+    override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+      this.confirmations.push(question);
+      if (question === 'Keep these saved review instructions for reuse?') return false;
+      return defaultYes;
+    }
+  }
+
+  const ui = new ForgetSavedUI();
+  assert.equal(
+    await runInit(
+      { repoRoot: repo, scope: 'project' },
+      { ui, detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
+    ),
+    0,
+  );
+
+  const written = JSON.parse(await readFile(configFile, 'utf8')) as Config;
+  assert.equal(written.savedReviewInstructions, undefined);
+});
+
+test('piped setup keeps the legacy answer sequence and does not ask to save custom instructions', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-saved-review-piped-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const custom = 'One-off piped review instructions.';
+
+  class PipedCustomUI extends TestUI {
+    override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+      this.confirmations.push(question);
+      if (question.startsWith('Give this reviewer custom instructions?')) return true;
+      if (/saved review instructions|Save these review instructions|Replace the saved review/i.test(question)) {
+        throw new Error(`piped setup consumed a new saved-instruction question: ${question}`);
+      }
+      return defaultYes;
+    }
+
+    override async multiline(question: string): Promise<string> {
+      assert.equal(question, 'Review instructions');
+      return custom;
+    }
+  }
+
+  const ui = new PipedCustomUI();
+  assert.equal(
+    await runInit(
+      { repoRoot: repo, scope: 'project' },
+      { ui, detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
+    ),
+    0,
+  );
+
+  const written = JSON.parse(
+    await readFile(projectConfigPath(repo), 'utf8'),
+  ) as Config;
+  assert.equal(written.panel[0]?.instructions, custom);
+  assert.equal(written.savedReviewInstructions, undefined);
 });
 
 test('crb view includes the saved review preview without dumping the full prompt', async (t) => {
