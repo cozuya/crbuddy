@@ -63,6 +63,12 @@ export interface Config {
   output: OutputConfig;
   target: Target;
   /**
+   * Reusable custom review instructions offered while configuring reviewers.
+   * A reviewer still receives its own copied `instructions`; this is only a
+   * setup convenience and is never consulted while a review is running.
+   */
+  savedReviewInstructions?: string;
+  /**
    * When true, `go` refuses to start if an output file already exists and
    * prompts before touching it. This is NOT the self-contamination
    * mechanism — see DESIGN.md §6.
