@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 
 import {
   CLAUDE_COMPLETION_MARKER,
   claudeAdapter,
 } from '../src/adapters/vendors.js';
-import { UnsafeInvocationError } from '../src/adapters/types.js';
+import { UnsafeInvocationError, type Invocation } from '../src/adapters/types.js';
 import { ResolvedTarget } from '../src/git/target.js';
 
 const target: ResolvedTarget = {
@@ -20,220 +23,148 @@ const target: ResolvedTarget = {
   bytes: 4,
 };
 
-const result = (stdout: string, code = 0, stderr = '') => ({
-  code,
-  stdout,
-  stderr,
+const result = (stdout: string, code = 0, stderr = '') => ({ code, stdout, stderr });
+
+function invocationWithEvidence(
+  t: import('node:test').TestContext,
+  evidence: { registryAvailable: boolean; backgroundTasks: number | null; sessionCrons: number | null },
+): Invocation {
+  const dir = mkdtempSync(path.join(tmpdir(), 'crbuddy-claude-completion-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const completionEvidencePath = path.join(dir, 'completion.json');
+  writeFileSync(completionEvidencePath, JSON.stringify(evidence));
+  return {
+    command: 'claude',
+    args: [],
+    appliedEffort: 'high',
+    completionEvidencePath,
+  };
+}
+
+function completeEvidence(t: import('node:test').TestContext): Invocation {
+  return invocationWithEvidence(t, {
+    registryAvailable: true,
+    backgroundTasks: 0,
+    sessionCrons: 0,
+  });
+}
+
+test('Claude accepts any nonempty final review when Stop-hook evidence proves no work is pending', (t) => {
+  for (const stdout of [
+    'I found three issues in the changed code.',
+    'No actionable regressions identified.',
+    'The subagents are still running — quoted here only as part of the final review discussion.',
+    '{"clusters":[]}',
+  ]) {
+    assert.deepEqual(
+      claudeAdapter.checkCompletion(result(stdout), completeEvidence(t)),
+      { ok: true },
+    );
+  }
 });
 
-test('Claude rejects the observed background-agent progress response', () => {
+test('Claude rejects output when authoritative Stop evidence says background work remains', (t) => {
+  const invocation = invocationWithEvidence(t, {
+    registryAvailable: true,
+    backgroundTasks: 2,
+    sessionCrons: 0,
+  });
   assert.deepEqual(
     claudeAdapter.checkCompletion(
-      result('Waiting for the background agents to finish.\n'),
+      result('No issues found. I will report back once agents finish.'),
+      invocation,
     ),
     { ok: false, reason: 'incomplete_review' },
   );
 });
 
-test('Claude accepts a substantive completed review when the marker is omitted', () => {
-  const stdout = `I found two problems in the changed code.\n\n` +
-    `- src/a.ts:10 — the first path can return stale data.\n` +
-    `- src/b.ts:20 — the second path can drop an error.\n\n` +
-    `The rest of the diff looked correct to me.`;
-
-  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
-  assert.equal(claudeAdapter.finalOutput(result(stdout)), stdout);
-});
-
-test('Claude accepts a terse no-findings review without the marker', () => {
+test('Claude rejects output when the task registry was unavailable', (t) => {
+  const invocation = invocationWithEvidence(t, {
+    registryAvailable: false,
+    backgroundTasks: null,
+    sessionCrons: null,
+  });
   assert.deepEqual(
-    claudeAdapter.checkCompletion(result('No actionable regressions identified.')),
-    { ok: true },
-  );
-});
-
-test('Claude still rejects ambiguous short status text without the marker', () => {
-  assert.deepEqual(
-    claudeAdapter.checkCompletion(result('Reviewing the remaining files now.')),
+    claudeAdapter.checkCompletion(result('Finished review.'), invocation),
     { ok: false, reason: 'incomplete_review' },
   );
 });
 
-test('Claude rejects markerless JSON because completion is shared with merge tasks', () => {
+test('Claude rejects output when completion evidence is missing', () => {
   assert.deepEqual(
-    claudeAdapter.checkCompletion(result('{"clusters":[]}')),
+    claudeAdapter.checkCompletion(result('Finished review.'), {
+      command: 'claude', args: [], appliedEffort: 'high',
+      completionEvidencePath: '/definitely/missing/crbuddy-completion.json',
+    }),
     { ok: false, reason: 'incomplete_review' },
   );
 });
 
-test('Claude rejects final-looking prose when the tail says work is still running', () => {
-  for (const stdout of [
-    'I found two issues so far; the delegated agents are still running, I will wait for them.',
-    'No actionable issues so far. Waiting for the background agents to finish.',
-  ]) {
-    assert.deepEqual(
-      claudeAdapter.checkCompletion(result(stdout)),
-      { ok: false, reason: 'incomplete_review' },
-    );
-  }
-});
-
-test('Claude rejects long markerless progress text even when it is substantial', () => {
-  const stdout = (
-    'I have dispatched four review agents and am continuing the review. ' +
-    'They will report back when done. '
-  ).repeat(8);
-
-  assert.ok(stdout.length > 500);
+test('Claude rejects scheduled wakeups as unfinished session work', (t) => {
+  const invocation = invocationWithEvidence(t, {
+    registryAvailable: true,
+    backgroundTasks: 0,
+    sessionCrons: 1,
+  });
   assert.deepEqual(
-    claudeAdapter.checkCompletion(result(stdout)),
+    claudeAdapter.checkCompletion(result('Finished review.'), invocation),
     { ok: false, reason: 'incomplete_review' },
   );
 });
 
-test('Claude rejects the latest ordinary subagent progress wordings', () => {
-  for (const stdout of [
-    'So far I found 2 issues. The 3 review agents are still running; I’ll be notified when they finish.',
-    'No issues in the first file. Waiting for the subagents to finish.',
-    'I found one issue so far. Waiting for the subagents to finish.',
-    'I found two problems so far; the agents are still running.',
-  ]) {
-    assert.deepEqual(
-      claudeAdapter.checkCompletion(result(stdout)),
-      { ok: false, reason: 'incomplete_review' },
-    );
-  }
-});
-
-test('Claude accepts a finished review that quotes progress phrases as examples', () => {
-  const stdout =
-    'I found one real bug in the completion fallback.\n\n' +
-    '- It misses "agents are still running" and "Waiting for the subagents to finish."\n' +
-    '- Those quoted examples should not themselves make this final review look live.\n\n' +
-    'Nothing else in the diff turned up a concrete bug.';
-
-  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
-});
-
-test('Claude rejects wrapped merge-style JSON without the marker', () => {
-  const stdout = '## Overall\n```json\n{"clusters":[]}\n```';
+test('Claude still rejects empty output even with complete lifecycle evidence', (t) => {
   assert.deepEqual(
-    claudeAdapter.checkCompletion(result(stdout)),
-    { ok: false, reason: 'incomplete_review' },
-  );
-});
-
-test('Claude does not treat a severity line or finding count alone as completion', () => {
-  for (const stdout of [
-    '[P1] src/a.ts:10 — possible bug',
-    'I found two issues in the first pass.',
-    '## Overall\nStill checking the remaining files.',
-  ]) {
-    assert.deepEqual(
-      claudeAdapter.checkCompletion(result(stdout)),
-      { ok: false, reason: 'incomplete_review' },
-    );
-  }
-});
-
-test('Claude accepts a terse completed review when the completion marker is present', () => {
-  const stdout =
-    `No actionable regressions identified.\n${CLAUDE_COMPLETION_MARKER}\n`;
-
-  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
-  assert.equal(
-    claudeAdapter.finalOutput(result(stdout)),
-    'No actionable regressions identified.',
-  );
-});
-
-test('Claude strips protocol framing from an exact JSON task payload', () => {
-  const payload = '{"clusters":[{"findingIds":["f1"]}]}';
-  const stdout = `${payload}\n${CLAUDE_COMPLETION_MARKER}\n`;
-
-  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
-  assert.equal(claudeAdapter.finalOutput(result(stdout)), payload);
-});
-
-test('Claude requires review content before the completion marker', () => {
-  assert.deepEqual(
-    claudeAdapter.checkCompletion(result(`${CLAUDE_COMPLETION_MARKER}\n`)),
+    claudeAdapter.checkCompletion(result('   '), completeEvidence(t)),
     { ok: false, reason: 'empty' },
   );
 });
 
-test('Claude rejects repeated trailing completion markers as malformed framing', () => {
-  assert.deepEqual(
-    claudeAdapter.checkCompletion(
-      result(`${CLAUDE_COMPLETION_MARKER}\n${CLAUDE_COMPLETION_MARKER}\n`),
-    ),
-    { ok: false, reason: 'incomplete_review' },
-  );
+test('legacy completion marker is stripped but is not itself review content', (t) => {
+  const invocation = completeEvidence(t);
+  const stdout = `Actual review\n${CLAUDE_COMPLETION_MARKER}\n`;
+  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout), invocation), { ok: true });
+  assert.equal(claudeAdapter.finalOutput(result(stdout)), 'Actual review');
 
   assert.deepEqual(
-    claudeAdapter.checkCompletion(
-      result(`Actual review\n${CLAUDE_COMPLETION_MARKER}\n${CLAUDE_COMPLETION_MARKER}\n`),
-    ),
-    { ok: false, reason: 'incomplete_review' },
+    claudeAdapter.checkCompletion(result(`${CLAUDE_COMPLETION_MARKER}\n`), invocation),
+    { ok: false, reason: 'empty' },
   );
 });
 
-test('Claude may discuss the completion marker inside a completed review', () => {
-  const stdout =
-    `The protocol requires \`${CLAUDE_COMPLETION_MARKER}\` at the end.\n` +
-    `${CLAUDE_COMPLETION_MARKER}\n`;
-
-  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
-  assert.equal(
-    claudeAdapter.finalOutput(result(stdout)),
-    `The protocol requires \`${CLAUDE_COMPLETION_MARKER}\` at the end.`,
-  );
-});
-
-test('Claude preserves nonzero exit classification even if a marker is present', () => {
+test('Claude preserves nonzero exit classification even with complete evidence', (t) => {
   assert.deepEqual(
-    claudeAdapter.checkCompletion(
-      result(`Partial review\n${CLAUDE_COMPLETION_MARKER}\n`, 2),
-    ),
+    claudeAdapter.checkCompletion(result('Partial review', 2), completeEvidence(t)),
     { ok: false, reason: 'exit_2' },
   );
 });
 
-test('Claude invocation appends the completion protocol to the system prompt', () => {
+test('Claude invocation installs a Stop hook lifecycle guard instead of prompting for a marker', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'crbuddy-claude-build-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const completionEvidencePath = path.join(dir, 'completion.json');
   const invocation = claudeAdapter.build({
     operation: { kind: 'review', target },
     model: 'opus',
     effort: 'high',
     repoRoot: '/repo',
+    completionEvidencePath,
     supports: () => true,
   });
 
-  const flag = invocation.args.indexOf('--append-system-prompt');
-  assert.ok(flag >= 0);
-  assert.match(invocation.args[flag + 1] ?? '', /background agents/);
-  assert.match(invocation.args[flag + 1] ?? '', /crbuddy:review-complete/);
-  assert.match(invocation.args[flag + 1] ?? '', /protocol framing/);
-  assert.match(invocation.args[flag + 1] ?? '', /JSON-only/);
+  assert.equal(invocation.completionEvidencePath, completionEvidencePath);
+  assert.equal(invocation.args.includes('--append-system-prompt'), false);
+  const settingsIndex = invocation.args.indexOf('--settings');
+  assert.ok(settingsIndex >= 0);
+  const settings = JSON.parse(invocation.args[settingsIndex + 1] ?? '{}');
+  const hook = settings.hooks?.Stop?.[0]?.hooks?.[0];
+  assert.equal(hook?.type, 'command');
+  assert.equal(hook?.command, process.execPath);
+  assert.match(hook?.args?.[1] ?? '', /background_tasks/);
+  assert.equal(hook?.args?.[2], completionEvidencePath);
   assert.equal(invocation.args.at(-1), `/code-review high ${target.range}`);
 });
 
-test('Claude fails closed when the completion-protocol flag is unavailable', () => {
-  assert.throws(
-    () =>
-      claudeAdapter.build({
-        operation: { kind: 'review', target },
-        model: 'opus',
-        effort: 'high',
-        repoRoot: '/repo',
-        supports: (flag) => flag !== '--append-system-prompt',
-      }),
-    (error: unknown) =>
-      error instanceof UnsafeInvocationError &&
-      /completion protocol/.test(error.message),
-  );
-});
-
-test('Claude rejects structured output modes that bypass the text completion contract', () => {
+test('Claude rejects structured output modes because crbuddy captures plain-text payloads', () => {
   for (const vendorArgs of [
     ['--output-format', 'json'],
     ['--output-format=stream-json'],
@@ -241,15 +172,14 @@ test('Claude rejects structured output modes that bypass the text completion con
     ['--json-schema={"type":"object"}'],
   ]) {
     assert.throws(
-      () =>
-        claudeAdapter.build({
-          operation: { kind: 'review', target },
-          model: 'opus',
-          effort: 'high',
-          vendorArgs,
-          repoRoot: '/repo',
-          supports: () => true,
-        }),
+      () => claudeAdapter.build({
+        operation: { kind: 'review', target },
+        model: 'opus',
+        effort: 'high',
+        vendorArgs,
+        repoRoot: '/repo',
+        supports: () => true,
+      }),
       UnsafeInvocationError,
     );
   }

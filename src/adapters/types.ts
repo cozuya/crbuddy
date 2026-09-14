@@ -15,6 +15,8 @@ export interface InvocationRequest {
   effort?: Effort;
   vendorArgs?: string[];
   repoRoot: string;
+  /** Optional adapter-owned evidence file used to prove lifecycle completion. */
+  completionEvidencePath?: string;
   /** Does the probed help surface advertise this flag? */
   supports: (flag: string) => boolean;
 }
@@ -28,6 +30,8 @@ export interface Invocation {
   /** Written to the child's stdin, then stdin is closed. */
   stdin?: string;
   env?: Record<string, string>;
+  /** Adapter-owned evidence file written by the child lifecycle guard. */
+  completionEvidencePath?: string;
   /** Effort value actually passed, for provenance. Null means none. */
   appliedEffort: string | null;
 }
@@ -99,11 +103,14 @@ export interface Adapter {
   finalOutput(result: { stdout: string; stderr: string }): string;
 
   /** Exit code is primary, but zero + blank output is not success. */
-  checkCompletion(result: {
-    code: number | null;
-    stdout: string;
-    stderr: string;
-  }): CompletionCheck;
+  checkCompletion(
+    result: {
+      code: number | null;
+      stdout: string;
+      stderr: string;
+    },
+    invocation?: Invocation,
+  ): CompletionCheck;
 }
 
 const RATE_LIMIT = /rate.?limit|429|quota exceeded|too many requests|usage limit/i;

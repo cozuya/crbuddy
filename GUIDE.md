@@ -240,8 +240,8 @@ In interactive `crb init` / `crb config`, a custom review prompt can be saved as
 saved prompt, or enter a new one. Reuse copies the text into that reviewer's own
 `instructions`; review execution never dereferences the saved field. Existing saved
 text can also be forgotten from interactive config. `crb view` and the final setup
-summary show only a sanitized, truncated first-line preview plus an approximate
-wrapped-line count, never the full prompt.
+summary show only a sanitized first-line preview (truncated when long) plus an
+approximate wrapped-line count; subsequent lines are never printed verbatim.
 
 Piped setup deliberately keeps its pre-existing answer order. It does not add the
 save/reuse/forget questions: native reviewers still ask only default-vs-custom and

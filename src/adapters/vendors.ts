@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import {
   Adapter,
   CompletionCheck,
@@ -157,95 +159,82 @@ function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void 
 
 export const CLAUDE_COMPLETION_MARKER = '<!-- crbuddy:review-complete -->';
 
-const CLAUDE_COMPLETION_INSTRUCTION =
-  'crbuddy completion protocol: Do not end your top-level response while any ' +
-  'background agents, subagents, or delegated tasks are still running. Once all ' +
-  'delegated work is complete and you have produced the final payload for the ' +
-  `current task, append exactly ${CLAUDE_COMPLETION_MARKER} on its own line. ` +
-  'This marker is protocol framing, not part of the task payload: if the task ' +
-  'requires an exact format such as JSON-only output, produce that payload first ' +
-  'and then the marker. Emit the marker exactly once, only as the final ' +
-  'non-whitespace content.';
+/**
+ * Claude Code's Stop hook receives its own authoritative background-task
+ * registry. Use that lifecycle signal instead of trying to infer "done" from
+ * prose. The hook records every Stop attempt and blocks the turn while work is
+ * still in flight; crbuddy later requires evidence from the final Stop event.
+ */
+const CLAUDE_STOP_EVIDENCE_SCRIPT = [
+  "const fs=require('node:fs');",
+  "let input='';",
+  "process.stdin.setEncoding('utf8');",
+  "process.stdin.on('data',c=>input+=c);",
+  "process.stdin.on('end',()=>{",
+  "let data={registryAvailable:false,backgroundTasks:null,sessionCrons:null};",
+  "try{const event=JSON.parse(input);const bg=event.background_tasks;const crons=event.session_crons;data={registryAvailable:Array.isArray(bg)&&Array.isArray(crons),backgroundTasks:Array.isArray(bg)?bg.length:null,sessionCrons:Array.isArray(crons)?crons.length:null};}catch{}",
+  "try{fs.writeFileSync(process.argv[1],JSON.stringify(data));}catch{}",
+  "if(data.registryAvailable&&(data.backgroundTasks>0||data.sessionCrons>0)){process.stdout.write(JSON.stringify({decision:'block',reason:'crbuddy: background work is still running. Wait for all background/subagent tasks to finish and incorporate their results before stopping.'}));}",
+  "});",
+].join('');
+
+interface ClaudeCompletionEvidence {
+  registryAvailable: boolean;
+  backgroundTasks: number | null;
+  sessionCrons: number | null;
+}
+
+function claudeCompletionSettings(evidencePath: string): string {
+  return JSON.stringify({
+    hooks: {
+      Stop: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command: process.execPath,
+              args: ['-e', CLAUDE_STOP_EVIDENCE_SCRIPT, evidencePath],
+            },
+          ],
+        },
+      ],
+    },
+  });
+}
+
+function readClaudeCompletionEvidence(
+  evidencePath: string | undefined,
+): ClaudeCompletionEvidence | null {
+  if (!evidencePath) return null;
+
+  try {
+    const raw = JSON.parse(readFileSync(evidencePath, 'utf8')) as Partial<ClaudeCompletionEvidence>;
+    if (
+      typeof raw.registryAvailable !== 'boolean' ||
+      (raw.backgroundTasks !== null && typeof raw.backgroundTasks !== 'number') ||
+      (raw.sessionCrons !== null && typeof raw.sessionCrons !== 'number')
+    ) {
+      return null;
+    }
+
+    return {
+      registryAvailable: raw.registryAvailable,
+      backgroundTasks: raw.backgroundTasks ?? null,
+      sessionCrons: raw.sessionCrons ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function stripClaudeCompletionMarker(output: string): string {
   const trimmed = output.trimEnd();
+  const lines = trimmed.split(/\r\n|\r|\n/);
 
-  if (!hasTrailingClaudeCompletionMarkerLine(trimmed)) return output;
+  if (lines.at(-1)?.trim() !== CLAUDE_COMPLETION_MARKER) return output;
 
-  const markerStart = trimmed.lastIndexOf(CLAUDE_COMPLETION_MARKER);
-  return trimmed.slice(0, markerStart).trimEnd();
-}
-
-function hasTrailingClaudeCompletionMarkerLine(output: string): boolean {
-  const lastLine = output
-    .trimEnd()
-    .split(/\r\n|\r|\n/)
-    .at(-1);
-
-  return lastLine?.trim() === CLAUDE_COMPLETION_MARKER;
-}
-
-const CLAUDE_FINAL_REVIEW_SIGNAL =
-  /(?:\bnothing else\b[^\n]{0,180}\b(?:turned up|found)\b[^\n]{0,120}\b(?:bugs?|issues?|findings?|defects?|regressions?)\b|\bthe rest of (?:the )?(?:diff|changes|code)\b[^\n]{0,180}\b(?:look(?:ed|s)?|appear(?:ed|s)?|seem(?:ed|s)?)\b[^\n]{0,120}\b(?:correct|fine|good|sound)\b|\bno (?:other|additional|further|actionable|concrete) (?:bugs?|issues?|findings?|defects?|regressions)(?:\s+(?:were )?(?:identified|found))?\b|\b(?:i )?found no (?:actionable )?(?:bugs?|issues?|findings?|defects?|regressions)\b)/gi;
-
-const CLAUDE_PROGRESS_SIGNAL =
-  /(?:\b(?:waiting|awaiting)\b[^\n]{0,120}\b(?:agents?|subagents?|tasks?|results?|responses?)\b|\b(?:agents?|subagents?|tasks?)\b[^\n]{0,120}\b(?:still\s+(?:running|working|reviewing)|pending|not\s+(?:all\s+)?(?:done|finished|complete))\b|\bstill\s+(?:working|reviewing|waiting)\b|\b(?:i(?:'|’)ll|i will|we(?:'|’)ll|we will|they(?:'|’)ll|they will)\b[^\n]{0,100}\b(?:wait|be notified|report back|continue(?: reviewing)?|keep reviewing)\b|\breviewing the remaining\b|\bcontinuing (?:the )?review\b|\bso far\b)/gi;
-
-function blankQuotedClaudeExamples(text: string): string {
-  const blank = (value: string): string => ' '.repeat(value.length);
-
-  return text
-    .replace(/```[\s\S]*?```/g, blank)
-    .replace(/`[^`\r\n]*`/g, blank)
-    .replace(/"[^"\r\n]*"/g, blank)
-    .replace(/“[^”\r\n]*”/g, blank);
-}
-
-function lastClaudeSignalIndex(pattern: RegExp, text: string): number {
-  pattern.lastIndex = 0;
-  let last = -1;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(text)) !== null) {
-    last = match.index;
-    if (match[0].length === 0) pattern.lastIndex += 1;
-  }
-
-  pattern.lastIndex = 0;
-  return last;
-}
-
-function looksLikeCompletedClaudeOutputWithoutMarker(output: string): boolean {
-  const text = output.trim();
-  if (text === '') return false;
-
-  // Consolidation is structured. Markerless JSON — including fenced/wrapped
-  // cluster payloads — remains fail-closed rather than borrowing a prose
-  // review heuristic.
-  try {
-    JSON.parse(text);
-    return false;
-  } catch {
-    // Prose review; continue below.
-  }
-
-  if (/```(?:json)?\s*[\[{]/i.test(text) || /["']clusters["']\s*:/.test(text)) {
-    return false;
-  }
-
-  const signals = blankQuotedClaudeExamples(text);
-  const finalIndex = lastClaudeSignalIndex(CLAUDE_FINAL_REVIEW_SIGNAL, signals);
-  if (finalIndex < 0) return false;
-
-  // A markerless acceptance needs a terminal-looking closure, not an early
-  // "found two issues" or severity heading. Keep the closure near the end.
-  if (finalIndex < Math.max(0, signals.length - 1600)) return false;
-
-  const progressIndex = lastClaudeSignalIndex(CLAUDE_PROGRESS_SIGNAL, signals);
-
-  // If Claude explicitly says work is still underway after its last closure,
-  // the response is incomplete. Quoted examples do not count as live status.
-  return progressIndex < finalIndex;
+  lines.pop();
+  return lines.join('\n').trimEnd();
 }
 
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
@@ -296,15 +285,6 @@ export const claudeAdapter: Adapter = {
 
     args.push(permission, 'plan');
 
-    const completionPrompt = requireSafetyFlag(
-      request,
-      ['--append-system-prompt'],
-      'the Claude completion protocol',
-      this.command,
-    );
-
-    args.push(completionPrompt, CLAUDE_COMPLETION_INSTRUCTION);
-
     const noSession = firstSupported(request, [
       '--no-session-persistence',
       '--no-save-session',
@@ -317,6 +297,12 @@ export const claudeAdapter: Adapter = {
         `${this.label} has no session-persistence flag; review sessions will ` +
           `appear in its history.`,
       );
+    }
+
+    if (request.completionEvidencePath) {
+      // `--settings` accepts inline JSON. Hook entries merge with user/project
+      // hooks, so crbuddy adds this lifecycle guard without replacing them.
+      args.push('--settings', claudeCompletionSettings(request.completionEvidencePath));
     }
 
     if (request.vendorArgs) {
@@ -357,6 +343,9 @@ export const claudeAdapter: Adapter = {
         command: this.command,
         args,
         appliedEffort: reviewEffort,
+        ...(request.completionEvidencePath
+          ? { completionEvidencePath: request.completionEvidencePath }
+          : {}),
         ...(warnings.length > 0 ? { warnings } : {}),
       };
     }
@@ -387,6 +376,9 @@ export const claudeAdapter: Adapter = {
       args,
       stdin: prompt,
       appliedEffort,
+      ...(request.completionEvidencePath
+        ? { completionEvidencePath: request.completionEvidencePath }
+        : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
   },
@@ -395,24 +387,17 @@ export const claudeAdapter: Adapter = {
     return stripClaudeCompletionMarker(result.stdout);
   },
 
-  checkCompletion(result): CompletionCheck {
-    const base = defaultCompletion({ ...result, body: result.stdout });
+  checkCompletion(result, invocation): CompletionCheck {
+    const review = stripClaudeCompletionMarker(result.stdout).trim();
+    const base = defaultCompletion({ ...result, body: review });
     if (!base.ok) return base;
 
-    const body = result.stdout.trimEnd();
-    if (!hasTrailingClaudeCompletionMarkerLine(body)) {
-      return looksLikeCompletedClaudeOutputWithoutMarker(body)
-        ? { ok: true }
-        : { ok: false, reason: 'incomplete_review' };
-    }
-
-    const review = stripClaudeCompletionMarker(body).trim();
-    if (review === '') return { ok: false, reason: 'empty' };
-
-    // A second marker immediately before the terminal one is framing, not
-    // review content. Earlier marker text is allowed so a review can discuss
-    // this protocol without invalidating itself.
-    if (hasTrailingClaudeCompletionMarkerLine(review)) {
+    const evidence = readClaudeCompletionEvidence(invocation?.completionEvidencePath);
+    if (
+      !evidence?.registryAvailable ||
+      evidence.backgroundTasks !== 0 ||
+      evidence.sessionCrons !== 0
+    ) {
       return { ok: false, reason: 'incomplete_review' };
     }
 

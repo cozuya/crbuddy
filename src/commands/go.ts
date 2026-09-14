@@ -820,6 +820,10 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       ...(entry.effort ? { effort: entry.effort } : {}),
       ...(entry.vendorArgs ? { vendorArgs: entry.vendorArgs } : {}),
       repoRoot: args.repoRoot,
+      completionEvidencePath: path.join(
+        args.scratch,
+        `${entry.id}.claude-completion.json`,
+      ),
       supports: args.supports,
     });
   } catch (error) {
@@ -910,7 +914,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
   }
 
   const body = adapter.finalOutput(result);
-  const completion = adapter.checkCompletion(result);
+  const completion = adapter.checkCompletion(result, invocation);
 
   if (!completion.ok) {
     return report({
@@ -953,6 +957,7 @@ async function runMerge(args: MergeArgs) {
     model: args.model,
     ...(args.effort ? { effort: args.effort } : {}),
     repoRoot: args.repoRoot,
+    completionEvidencePath: path.join(args.scratch, 'merge.claude-completion.json'),
     supports: args.supports,
   });
 
@@ -974,7 +979,7 @@ async function runMerge(args: MergeArgs) {
   if (result.timedOut) throw new MergeValidationError('merge timed out');
   if (result.spawnError) throw new MergeValidationError(result.spawnError);
 
-  const completion = args.adapter.checkCompletion(result);
+  const completion = args.adapter.checkCompletion(result, invocation);
 
   if (!completion.ok) {
     throw new MergeValidationError(completion.reason ?? 'merge run failed');
