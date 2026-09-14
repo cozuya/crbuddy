@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -162,6 +163,62 @@ test('Claude invocation installs a Stop hook lifecycle guard instead of promptin
   assert.match(hook?.args?.[1] ?? '', /background_tasks/);
   assert.equal(hook?.args?.[2], completionEvidencePath);
   assert.equal(invocation.args.at(-1), `/code-review high ${target.range}`);
+});
+
+test('Claude Stop hook records pending work without blocking or emitting output', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'crbuddy-claude-hook-run-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const completionEvidencePath = path.join(dir, 'completion.json');
+  const invocation = claudeAdapter.build({
+    operation: { kind: 'review', target },
+    model: 'opus',
+    effort: 'high',
+    repoRoot: '/repo',
+    completionEvidencePath,
+    supports: () => true,
+  });
+  const settingsIndex = invocation.args.indexOf('--settings');
+  const settings = JSON.parse(invocation.args[settingsIndex + 1] ?? '{}');
+  const hook = settings.hooks?.Stop?.[0]?.hooks?.[0];
+
+  assert.equal(settings.disableAllHooks, false);
+  const run = spawnSync(
+    hook.command,
+    hook.args,
+    {
+      input: JSON.stringify({
+        hook_event_name: 'Stop',
+        stop_hook_active: false,
+        background_tasks: [{ id: 'task-1' }],
+        session_crons: [],
+      }),
+      encoding: 'utf8',
+    },
+  );
+
+  assert.equal(run.status, 0);
+  assert.equal(run.stdout, '');
+  assert.deepEqual(JSON.parse(readFileSync(completionEvidencePath, 'utf8')), {
+    registryAvailable: true,
+    backgroundTasks: 1,
+    sessionCrons: 0,
+  });
+});
+
+test('Claude fails before launch when --settings cannot install the completion hook', () => {
+  assert.throws(
+    () => claudeAdapter.build({
+      operation: { kind: 'review', target },
+      model: 'opus',
+      effort: 'high',
+      repoRoot: '/repo',
+      completionEvidencePath: '/tmp/crbuddy-completion.json',
+      supports: (flag) => flag !== '--settings',
+    }),
+    (error: unknown) =>
+      error instanceof UnsafeInvocationError &&
+      /Stop-hook completion guard/.test(error.message),
+  );
 });
 
 test('Claude rejects structured output modes because crbuddy captures plain-text payloads', () => {

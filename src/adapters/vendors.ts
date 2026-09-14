@@ -162,8 +162,9 @@ export const CLAUDE_COMPLETION_MARKER = '<!-- crbuddy:review-complete -->';
 /**
  * Claude Code's Stop hook receives its own authoritative background-task
  * registry. Use that lifecycle signal instead of trying to infer "done" from
- * prose. The hook records every Stop attempt and blocks the turn while work is
- * still in flight; crbuddy later requires evidence from the final Stop event.
+ * prose. The hook only records each Stop event: print mode already pauses for
+ * background work, and crbuddy removes that wait ceiling at launch. Blocking
+ * Stop here would force extra model turns and can loop while tasks are running.
  */
 const CLAUDE_STOP_EVIDENCE_SCRIPT = [
   "const fs=require('node:fs');",
@@ -174,7 +175,6 @@ const CLAUDE_STOP_EVIDENCE_SCRIPT = [
   "let data={registryAvailable:false,backgroundTasks:null,sessionCrons:null};",
   "try{const event=JSON.parse(input);const bg=event.background_tasks;const crons=event.session_crons;data={registryAvailable:Array.isArray(bg)&&Array.isArray(crons),backgroundTasks:Array.isArray(bg)?bg.length:null,sessionCrons:Array.isArray(crons)?crons.length:null};}catch{}",
   "try{fs.writeFileSync(process.argv[1],JSON.stringify(data));}catch{}",
-  "if(data.registryAvailable&&(data.backgroundTasks>0||data.sessionCrons>0)){process.stdout.write(JSON.stringify({decision:'block',reason:'crbuddy: background work is still running. Wait for all background/subagent tasks to finish and incorporate their results before stopping.'}));}",
   "});",
 ].join('');
 
@@ -186,6 +186,11 @@ interface ClaudeCompletionEvidence {
 
 function claudeCompletionSettings(evidencePath: string): string {
   return JSON.stringify({
+    // Command-line settings outrank user/project/local settings, so a local
+    // `disableAllHooks: true` cannot silently suppress crbuddy's evidence hook.
+    // Managed policy can still prohibit non-managed hooks; in that case the
+    // missing evidence remains a fail-closed completion error.
+    disableAllHooks: false,
     hooks: {
       Stop: [
         {
@@ -244,6 +249,8 @@ export const claudeAdapter: Adapter = {
   command: 'claude',
   nativeReview: true,
   nativeReviewCommand: '/code-review',
+  // Stop-hook `background_tasks` / `session_crons` arrived in Claude Code
+  // 2.1.145, so the existing native-review floor already covers them.
   minVersion: '2.1.223',
 
   models: [
@@ -300,9 +307,16 @@ export const claudeAdapter: Adapter = {
     }
 
     if (request.completionEvidencePath) {
+      const settingsFlag = requireSafetyFlag(
+        request,
+        ['--settings'],
+        'the Claude Stop-hook completion guard',
+        this.command,
+      );
+
       // `--settings` accepts inline JSON. Hook entries merge with user/project
-      // hooks, so crbuddy adds this lifecycle guard without replacing them.
-      args.push('--settings', claudeCompletionSettings(request.completionEvidencePath));
+      // hooks, so crbuddy adds this lifecycle observer without replacing them.
+      args.push(settingsFlag, claudeCompletionSettings(request.completionEvidencePath));
     }
 
     if (request.vendorArgs) {
