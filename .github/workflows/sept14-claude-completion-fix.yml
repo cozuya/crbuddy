@@ -1,0 +1,45 @@
+name: Apply Claude completion fallback fix
+
+on:
+  push:
+    branches:
+      - sept-14
+    paths:
+      - .github/workflows/sept14-claude-completion-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out sept-14
+        uses: actions/checkout@v6
+        with:
+          ref: sept-14
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Apply patch
+        run: python3 scripts/sept14-claude-completion-fix.py
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run tests
+        run: pnpm test
+      - name: Typecheck
+        run: pnpm exec tsc -p tsconfig.json --noEmit
+      - name: Commit fix and remove temporary patch files
+        shell: bash
+        run: |
+          rm scripts/sept14-claude-completion-fix.py
+          rm .github/workflows/sept14-claude-completion-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Tighten Claude markerless completion fallback'
+          git push origin HEAD:sept-14
