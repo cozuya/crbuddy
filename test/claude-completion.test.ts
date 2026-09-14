@@ -79,7 +79,7 @@ test('Claude rejects output when authoritative Stop evidence says background wor
   );
 });
 
-test('Claude rejects output when the task registry was unavailable', (t) => {
+test('Claude reports when the task registry was unavailable', (t) => {
   const invocation = invocationWithEvidence(t, {
     registryAvailable: false,
     backgroundTasks: null,
@@ -87,7 +87,7 @@ test('Claude rejects output when the task registry was unavailable', (t) => {
   });
   assert.deepEqual(
     claudeAdapter.checkCompletion(result('Finished review.'), invocation),
-    { ok: false, reason: 'incomplete_review' },
+    { ok: false, reason: 'completion_registry_unavailable' },
   );
 });
 
@@ -97,7 +97,7 @@ test('Claude rejects output when completion evidence is missing', () => {
       command: 'claude', args: [], appliedEffort: 'high',
       completionEvidencePath: '/definitely/missing/crbuddy-completion.json',
     }),
-    { ok: false, reason: 'incomplete_review' },
+    { ok: false, reason: 'completion_evidence_missing' },
   );
 });
 
@@ -219,6 +219,23 @@ test('Claude fails before launch when --settings cannot install the completion h
       error instanceof UnsafeInvocationError &&
       /Stop-hook completion guard/.test(error.message),
   );
+});
+
+test('Claude rejects vendor modes that disable hooks before launch', () => {
+  for (const vendorArgs of [['--bare'], ['--safe-mode']]) {
+    assert.throws(
+      () => claudeAdapter.build({
+        operation: { kind: 'review', target },
+        model: 'opus',
+        effort: 'high',
+        vendorArgs,
+        repoRoot: '/repo',
+        completionEvidencePath: '/tmp/crbuddy-completion.json',
+        supports: () => true,
+      }),
+      UnsafeInvocationError,
+    );
+  }
 });
 
 test('Claude rejects structured output modes because crbuddy captures plain-text payloads', () => {

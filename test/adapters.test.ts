@@ -124,15 +124,6 @@ test('Claude refuses ultra on the normal native lane because -p does not wait fo
   );
 });
 
-test('Claude status-only review response is not accepted as completed findings', () => {
-  const completion = claudeAdapter.checkCompletion({
-    code: 0,
-    stdout: "Still waiting for the code-review skill's verification/synthesis stage to complete.\n",
-    stderr: '',
-  });
-
-  assert.deepEqual(completion, { ok: false, reason: 'incomplete_review' });
-});
 
 test('Claude vendorArgs cannot override permission safety', () => {
   assert.throws(

@@ -17,7 +17,7 @@ interface FlagCheck {
 const FLAG_CHECKS: Record<string, FlagCheck[]> = {
   claude: [
     { candidates: ['--permission-mode'], required: true },
-    { candidates: ['--append-system-prompt'], required: true },
+    { candidates: ['--settings'], required: true },
     { candidates: ['--no-session-persistence', '--no-save-session'] },
     { candidates: ['--effort', '--reasoning-effort'] },
   ],

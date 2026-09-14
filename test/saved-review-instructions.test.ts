@@ -151,6 +151,11 @@ test('saved instruction preview shows one compact line plus approximate remainin
   assert.equal(preview, `${'A'.repeat(79)}… (and ~3 more lines)`);
 });
 
+test('saved instruction preview does not split Unicode surrogate pairs', () => {
+  const preview = formatSavedReviewInstructions(`${'A'.repeat(78)}😀BC`);
+  assert.equal(preview, `${'A'.repeat(78)}😀… (and ~1 more line)`);
+});
+
 test('saved instruction preview strips terminal control sequences', () => {
   const preview = formatSavedReviewInstructions(
     '\x1b]0;spoofed title\x07\x1b[31mReview carefully\x1b[0m\nSecond line',

@@ -76,6 +76,10 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
     // envelope format or requested through a JSON schema.
     '--output-format',
     '--json-schema',
+    // These modes disable hook execution, which would make every Claude lane
+    // consume usage and then fail completion-evidence validation.
+    '--bare',
+    '--safe-mode',
   ]),
   codex: blockedVendorArgs([
     '--config',
@@ -139,6 +143,26 @@ function vendorArgFlag(arg: string): string {
  * exact per-vendor matching, not proof that an unknown flag is inert;
  * repository and vendor configuration remain trusted inputs.
  */
+function environmentFlagEnabled(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  return !/^(?:0|false|no|off)$/i.test(value.trim());
+}
+
+function assertClaudeHooksEnabledByEnvironment(): void {
+  const disabledBy = [
+    'CLAUDE_CODE_SIMPLE',
+    'CLAUDE_CODE_SAFE_MODE',
+  ].find((name) => environmentFlagEnabled(process.env[name]));
+
+  if (disabledBy) {
+    throw new UnsafeInvocationError(
+      `${disabledBy} disables Claude hooks, but crbuddy requires its per-run ` +
+        `Stop hook to verify completion. Unset ${disabledBy} before running Claude ` +
+        `through crbuddy.`,
+    );
+  }
+}
+
 function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void {
   if (!args || args.length === 0) return;
 
@@ -307,6 +331,8 @@ export const claudeAdapter: Adapter = {
     }
 
     if (request.completionEvidencePath) {
+      assertClaudeHooksEnabledByEnvironment();
+
       const settingsFlag = requireSafetyFlag(
         request,
         ['--settings'],
@@ -406,12 +432,19 @@ export const claudeAdapter: Adapter = {
     const base = defaultCompletion({ ...result, body: review });
     if (!base.ok) return base;
 
-    const evidence = readClaudeCompletionEvidence(invocation?.completionEvidencePath);
-    if (
-      !evidence?.registryAvailable ||
-      evidence.backgroundTasks !== 0 ||
-      evidence.sessionCrons !== 0
-    ) {
+    const evidencePath = invocation?.completionEvidencePath;
+    if (!evidencePath) {
+      return { ok: false, reason: 'completion_evidence_missing' };
+    }
+
+    const evidence = readClaudeCompletionEvidence(evidencePath);
+    if (!evidence) {
+      return { ok: false, reason: 'completion_evidence_missing' };
+    }
+    if (!evidence.registryAvailable) {
+      return { ok: false, reason: 'completion_registry_unavailable' };
+    }
+    if (evidence.backgroundTasks !== 0 || evidence.sessionCrons !== 0) {
       return { ok: false, reason: 'incomplete_review' };
     }
 

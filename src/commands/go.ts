@@ -820,10 +820,14 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       ...(entry.effort ? { effort: entry.effort } : {}),
       ...(entry.vendorArgs ? { vendorArgs: entry.vendorArgs } : {}),
       repoRoot: args.repoRoot,
-      completionEvidencePath: path.join(
-        args.scratch,
-        `${entry.id}.claude-completion.json`,
-      ),
+      ...(adapter.name === 'claude'
+        ? {
+            completionEvidencePath: path.join(
+              args.scratch,
+              `${entry.id}.claude-completion.json`,
+            ),
+          }
+        : {}),
       supports: args.supports,
     });
   } catch (error) {
@@ -957,7 +961,9 @@ async function runMerge(args: MergeArgs) {
     model: args.model,
     ...(args.effort ? { effort: args.effort } : {}),
     repoRoot: args.repoRoot,
-    completionEvidencePath: path.join(args.scratch, 'merge.claude-completion.json'),
+    ...(args.adapter.name === 'claude'
+      ? { completionEvidencePath: path.join(args.scratch, 'merge.claude-completion.json') }
+      : {}),
     supports: args.supports,
   });
 

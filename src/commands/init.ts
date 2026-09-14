@@ -28,6 +28,7 @@ import { probe } from '../run/spawn.js';
 import { Adapter } from '../adapters/types.js';
 import { PromptAborted } from '../util/prompt.js';
 import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
+import { sanitizeTerminalInline, stripTerminalControls } from '../util/ansi.js';
 import {
   GlobalSettings,
   isNtfyEndpoint,
@@ -463,9 +464,9 @@ function formatReviewer(entry: PanelEntry): string {
   }
 
   return [
-    vendorLabel,
-    modelLabel,
-    entry.effort,
+    sanitizeTerminalInline(vendorLabel),
+    sanitizeTerminalInline(modelLabel),
+    entry.effort ? sanitizeTerminalInline(entry.effort) : undefined,
     entry.instructions ? 'custom instructions' : undefined,
   ]
     .filter((part): part is string => Boolean(part))
@@ -478,16 +479,8 @@ function formatPanel(panel: PanelEntry[]): string {
 
 const SAVED_REVIEW_PREVIEW_WIDTH = 80;
 
-function stripTerminalControlSequences(value: string): string {
-  return value
-    .replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\|$)/g, '')
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/\x1B./g, '')
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
-}
-
 export function formatSavedReviewInstructions(instructions: string): string {
-  const logicalLines = stripTerminalControlSequences(
+  const logicalLines = stripTerminalControls(
     instructions.replace(/\r\n?/g, '\n'),
   ).split('\n');
 
@@ -499,13 +492,17 @@ export function formatSavedReviewInstructions(instructions: string): string {
   }
 
   const first = logicalLines[0]?.trim().replace(/[\t ]+/g, ' ') ?? '';
+  const firstCharacters = Array.from(first);
   const preview =
-    first.length > SAVED_REVIEW_PREVIEW_WIDTH
-      ? `${first.slice(0, SAVED_REVIEW_PREVIEW_WIDTH - 1).trimEnd()}…`
+    firstCharacters.length > SAVED_REVIEW_PREVIEW_WIDTH
+      ? `${firstCharacters
+          .slice(0, SAVED_REVIEW_PREVIEW_WIDTH - 1)
+          .join('')
+          .trimEnd()}…`
       : first;
 
   const approximateLines = logicalLines.reduce((sum, line) => {
-    const width = line.replace(/\t/g, '    ').trimEnd().length;
+    const width = Array.from(line.replace(/\t/g, '    ').trimEnd()).length;
     return sum + Math.max(1, Math.ceil(width / SAVED_REVIEW_PREVIEW_WIDTH));
   }, 0);
   const more = Math.max(0, approximateLines - 1);
@@ -523,7 +520,7 @@ export function formatConfigSummary(
 ): string {
   const lines = [
     `Config: ${scope === 'project' ? 'This repository' : 'Global'}`,
-    `Path: ${targetFile}`,
+    `Path: ${sanitizeTerminalInline(targetFile)}`,
     '',
     'Reviewers:',
     ...config.panel.map((entry) => `  ${formatReviewer(entry)}`),
@@ -555,19 +552,25 @@ export function formatConfigSummary(
     `Target: ${
       config.target === 'uncommitted'
         ? 'Uncommitted changes'
-        : `Current branch vs ${config.target.base}`
+        : `Current branch vs ${sanitizeTerminalInline(config.target.base)}`
     }`,
   );
 
   if (config.output.destination === 'terminal') {
     lines.push('Output: Terminal');
   } else {
-    lines.push(`Output: ${config.output.merged}`);
-    if (config.merge.enabled) lines.push(`Raw audit: ${config.output.raw}`);
+    lines.push(`Output: ${sanitizeTerminalInline(config.output.merged)}`);
+    if (config.merge.enabled) {
+      lines.push(`Raw audit: ${sanitizeTerminalInline(config.output.raw)}`);
+    }
   }
 
   if (gitignorePlan) {
-    lines.push(`.gitignore: Add ${gitignorePlan.missing.join(', ')}`);
+    lines.push(
+      `.gitignore: Add ${gitignorePlan.missing
+        .map(sanitizeTerminalInline)
+        .join(', ')}`,
+    );
   }
 
   return lines.join('\n');

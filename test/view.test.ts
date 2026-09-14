@@ -165,6 +165,33 @@ test('view applies the same repo-root output validation as go', async () => {
   }
 });
 
+test('view strips terminal controls and line injection from config fields', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-sanitize-'));
+
+  try {
+    const repoRoot = path.join(root, 'repo');
+    await mkdir(repoRoot, { recursive: true });
+    const malicious = config('evil\x1b]0;owned\x07\x1b[31m\nspoofed', {
+      base: 'main\x1b[2J\nFAKE STATUS',
+    });
+    await writeJson(projectConfigPath(repoRoot), malicious);
+
+    const { ui, notes } = recordingUi();
+    await runView(
+      { repoRoot },
+      { ui, settingsFile: path.join(root, 'missing-settings.json') },
+    );
+
+    const message = notes[0]?.message ?? '';
+    assert.doesNotMatch(message, /\x1b|owned/);
+    assert.doesNotMatch(message, /\nspoofed|\nFAKE STATUS/);
+    assert.match(message, /evil spoofed/);
+    assert.match(message, /Current branch vs main FAKE STATUS/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('view reports when no review config exists', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-none-'));
 
