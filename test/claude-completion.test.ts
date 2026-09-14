@@ -91,6 +91,51 @@ test('Claude rejects long markerless progress text even when it is substantial',
   );
 });
 
+test('Claude rejects the latest ordinary subagent progress wordings', () => {
+  for (const stdout of [
+    'So far I found 2 issues. The 3 review agents are still running; I’ll be notified when they finish.',
+    'No issues in the first file. Waiting for the subagents to finish.',
+    'I found one issue so far. Waiting for the subagents to finish.',
+    'I found two problems so far; the agents are still running.',
+  ]) {
+    assert.deepEqual(
+      claudeAdapter.checkCompletion(result(stdout)),
+      { ok: false, reason: 'incomplete_review' },
+    );
+  }
+});
+
+test('Claude accepts a finished review that quotes progress phrases as examples', () => {
+  const stdout =
+    'I found one real bug in the completion fallback.\n\n' +
+    '- It misses "agents are still running" and "Waiting for the subagents to finish."\n' +
+    '- Those quoted examples should not themselves make this final review look live.\n\n' +
+    'Nothing else in the diff turned up a concrete bug.';
+
+  assert.deepEqual(claudeAdapter.checkCompletion(result(stdout)), { ok: true });
+});
+
+test('Claude rejects wrapped merge-style JSON without the marker', () => {
+  const stdout = '## Overall\n```json\n{"clusters":[]}\n```';
+  assert.deepEqual(
+    claudeAdapter.checkCompletion(result(stdout)),
+    { ok: false, reason: 'incomplete_review' },
+  );
+});
+
+test('Claude does not treat a severity line or finding count alone as completion', () => {
+  for (const stdout of [
+    '[P1] src/a.ts:10 — possible bug',
+    'I found two issues in the first pass.',
+    '## Overall\nStill checking the remaining files.',
+  ]) {
+    assert.deepEqual(
+      claudeAdapter.checkCompletion(result(stdout)),
+      { ok: false, reason: 'incomplete_review' },
+    );
+  }
+});
+
 test('Claude accepts a terse completed review when the completion marker is present', () => {
   const stdout =
     `No actionable regressions identified.\n${CLAUDE_COMPLETION_MARKER}\n`;

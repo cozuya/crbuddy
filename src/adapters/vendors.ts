@@ -186,37 +186,66 @@ function hasTrailingClaudeCompletionMarkerLine(output: string): boolean {
 }
 
 const CLAUDE_FINAL_REVIEW_SIGNAL =
-  /(?:^\s*(?:[-*]\s*)?\[P[0-3]\]|\bno (?:actionable )?(?:findings|defects|regressions|issues)\b|\bfound (?:no|\d+|one|two|three|four|five|six|seven|eight|nine|ten) (?:problems?|issues?|findings?|defects?|regressions?)\b|^##\s+(?:assessment|code review results|overall)\b|\bthe rest of (?:the )?(?:diff|changes) looked correct\b)/im;
+  /(?:\bnothing else\b[^\n]{0,180}\b(?:turned up|found)\b[^\n]{0,120}\b(?:bugs?|issues?|findings?|defects?|regressions?)\b|\bthe rest of (?:the )?(?:diff|changes|code)\b[^\n]{0,180}\b(?:look(?:ed|s)?|appear(?:ed|s)?|seem(?:ed|s)?)\b[^\n]{0,120}\b(?:correct|fine|good|sound)\b|\bno (?:other|additional|further|actionable|concrete) (?:bugs?|issues?|findings?|defects?|regressions)(?:\s+(?:were )?(?:identified|found))?\b|\b(?:i )?found no (?:actionable )?(?:bugs?|issues?|findings?|defects?|regressions)\b)/gi;
 
 const CLAUDE_PROGRESS_SIGNAL =
-  /(?:waiting (?:for|on) (?:the )?(?:background )?(?:agents?|tasks?)|(?:background|delegated) (?:agents?|tasks?) (?:are )?still running|(?:agents?|tasks?) still running|(?:i(?:'|’)ll|i will) wait|(?:agents?|tasks?) (?:will|should) (?:report|return)|report back when|reviewing the remaining|continuing (?:the )?review)/i;
+  /(?:\b(?:waiting|awaiting)\b[^\n]{0,120}\b(?:agents?|subagents?|tasks?|results?|responses?)\b|\b(?:agents?|subagents?|tasks?)\b[^\n]{0,120}\b(?:still\s+(?:running|working|reviewing)|pending|not\s+(?:all\s+)?(?:done|finished|complete))\b|\bstill\s+(?:working|reviewing|waiting)\b|\b(?:i(?:'|’)ll|i will|we(?:'|’)ll|we will|they(?:'|’)ll|they will)\b[^\n]{0,100}\b(?:wait|be notified|report back|continue(?: reviewing)?|keep reviewing)\b|\breviewing the remaining\b|\bcontinuing (?:the )?review\b|\bso far\b)/gi;
+
+function blankQuotedClaudeExamples(text: string): string {
+  const blank = (value: string): string => ' '.repeat(value.length);
+
+  return text
+    .replace(/```[\s\S]*?```/g, blank)
+    .replace(/`[^`\r\n]*`/g, blank)
+    .replace(/"[^"\r\n]*"/g, blank)
+    .replace(/“[^”\r\n]*”/g, blank);
+}
+
+function lastClaudeSignalIndex(pattern: RegExp, text: string): number {
+  pattern.lastIndex = 0;
+  let last = -1;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    last = match.index;
+    if (match[0].length === 0) pattern.lastIndex += 1;
+  }
+
+  pattern.lastIndex = 0;
+  return last;
+}
 
 function looksLikeCompletedClaudeOutputWithoutMarker(output: string): boolean {
   const text = output.trim();
   if (text === '') return false;
 
-  // Structured payloads are used by consolidation as well as review lanes.
-  // checkCompletion has no operation context, so markerless JSON must remain
-  // fail-closed rather than letting a valid-looking merge payload bypass the
-  // completion protocol.
+  // Consolidation is structured. Markerless JSON — including fenced/wrapped
+  // cluster payloads — remains fail-closed rather than borrowing a prose
+  // review heuristic.
   try {
     JSON.parse(text);
     return false;
   } catch {
-    // Prose review; continue with conservative review-shape checks below.
+    // Prose review; continue below.
   }
 
-  // Explicit evidence that Claude is still working always wins over a phrase
-  // that happens to look final earlier in the same response. This preserves
-  // the original protection against background-agent progress replies.
-  const tail = text.slice(-1500);
-  if (CLAUDE_PROGRESS_SIGNAL.test(tail)) return false;
+  if (/```(?:json)?\s*[\[{]/i.test(text) || /["']clusters["']\s*:/.test(text)) {
+    return false;
+  }
 
-  // The marker remains the preferred contract. This fallback exists only for
-  // the observed case where Claude exits 0 after a clearly final prose review
-  // but omits the requested marker. Do not use output length as completion
-  // evidence: a long progress report is still just a progress report.
-  return CLAUDE_FINAL_REVIEW_SIGNAL.test(text);
+  const signals = blankQuotedClaudeExamples(text);
+  const finalIndex = lastClaudeSignalIndex(CLAUDE_FINAL_REVIEW_SIGNAL, signals);
+  if (finalIndex < 0) return false;
+
+  // A markerless acceptance needs a terminal-looking closure, not an early
+  // "found two issues" or severity heading. Keep the closure near the end.
+  if (finalIndex < Math.max(0, signals.length - 1600)) return false;
+
+  const progressIndex = lastClaudeSignalIndex(CLAUDE_PROGRESS_SIGNAL, signals);
+
+  // If Claude explicitly says work is still underway after its last closure,
+  // the response is incomplete. Quoted examples do not count as live status.
+  return progressIndex < finalIndex;
 }
 
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
