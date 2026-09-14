@@ -9,6 +9,7 @@ import { PreflightError, runGo } from './commands/go.js';
 import { parseGoArguments } from './commands/go-options.js';
 import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
+import { runView } from './commands/view.js';
 import { configureClaudeBackgroundWait } from './run/claude-background-wait.js';
 
 const HELP = `crbuddy - fan one code review across several agent CLIs, then consolidate.
@@ -19,6 +20,7 @@ to run it.
 Usage:
   crbuddy init                 Interactive setup. Writes a config.
   crbuddy config               Same as init; edits an existing config.
+  crbuddy view                 Show the effective config. Read-only.
   crbuddy go [instructions]    Run the panel. Blocking.
   crbuddy doctor               Report which vendor CLIs are usable, and why not.
 
@@ -73,6 +75,15 @@ async function main(argv: string[]): Promise<number> {
   // toolchains (brew, flutter, npm); `check` stays as an alias.
   if (command === 'doctor' || command === 'check') {
     return runDoctor();
+  }
+
+  if (command === 'view') {
+    if (rest.length > 0) {
+      console.error('crbuddy view takes no arguments.');
+      return 1;
+    }
+
+    return runView({ repoRoot });
   }
 
   if (command === 'init' || command === 'config') {
