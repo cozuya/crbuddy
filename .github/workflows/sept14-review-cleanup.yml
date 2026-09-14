@@ -25,6 +25,17 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
+      - name: Repair patch script source-escape match
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('scripts/sept14-review-cleanup.py')
+          s = p.read_text()
+          s = s.replace(".join(' · ');", ".join(' \\\\u00b7 ');")
+          p.write_text(s)
+          PY
+
       - name: Apply patch
         run: python3 scripts/sept14-review-cleanup.py
 
