@@ -1,14 +1,13 @@
 import { existsSync } from 'node:fs';
 
-import { getAdapter } from '../adapters/vendors.js';
 import {
   homeConfigPath,
   projectConfigPath,
   readAndValidate,
 } from '../config/load.js';
-import { Config, PanelEntry } from '../config/schema.js';
 import { loadGlobalSettings } from '../config/settings.js';
 import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
+import { formatConfigSummary } from './init.js';
 
 export interface ViewOptions {
   repoRoot: string | null;
@@ -36,10 +35,10 @@ export async function runView(
 
   if (projectFile && existsSync(projectFile)) {
     const config = await readAndValidate(projectFile);
-    summary = formatConfigSummary('project', projectFile, config);
+    summary = formatConfigSummary('project', projectFile, config, null);
   } else if (existsSync(globalFile)) {
     const config = await readAndValidate(globalFile);
-    summary = formatConfigSummary('global', globalFile, config);
+    summary = formatConfigSummary('global', globalFile, config, null);
   } else {
     summary = 'Config: None';
   }
@@ -55,71 +54,4 @@ export async function runView(
   );
 
   return 0;
-}
-
-function formatReviewer(entry: PanelEntry): string {
-  let vendorLabel = entry.vendor;
-  let modelLabel = entry.model;
-
-  try {
-    const adapter = getAdapter(entry.vendor);
-    vendorLabel = adapter.label;
-    modelLabel =
-      adapter.models.find((model) => model.id === entry.model)?.label ?? entry.model;
-  } catch {
-    // Existing hand-edited configs may name an adapter unknown to this build.
-  }
-
-  return [
-    vendorLabel,
-    modelLabel,
-    entry.effort,
-    entry.instructions ? 'custom instructions' : undefined,
-  ]
-    .filter((part): part is string => Boolean(part))
-    .join(' · ');
-}
-
-function formatConfigSummary(
-  scope: 'global' | 'project',
-  targetFile: string,
-  config: Config,
-): string {
-  const lines = [
-    `Config: ${scope === 'project' ? 'This repository' : 'Global'}`,
-    `Path: ${targetFile}`,
-    '',
-    'Reviewers:',
-    ...config.panel.map((entry) => `  ${formatReviewer(entry)}`),
-    '',
-  ];
-
-  if (config.merge.enabled) {
-    const merger: PanelEntry = {
-      id: 'summary',
-      vendor: config.merge.vendor,
-      model: config.merge.model,
-      ...(config.merge.effort ? { effort: config.merge.effort } : {}),
-    };
-    lines.push(`Consolidation: Enabled · ${formatReviewer(merger)}`);
-  } else {
-    lines.push('Consolidation: Disabled');
-  }
-
-  lines.push(
-    `Target: ${
-      config.target === 'uncommitted'
-        ? 'Uncommitted changes'
-        : `Current branch vs ${config.target.base}`
-    }`,
-  );
-
-  if (config.output.destination === 'terminal') {
-    lines.push('Output: Terminal');
-  } else {
-    lines.push(`Output: ${config.output.merged}`);
-    if (config.merge.enabled) lines.push(`Raw audit: ${config.output.raw}`);
-  }
-
-  return lines.join('\n');
 }
