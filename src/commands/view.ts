@@ -41,7 +41,7 @@ export async function runView(
     const config = await readAndValidate(globalFile);
     summary = formatConfigSummary('global', globalFile, config);
   } else {
-    summary = 'Config: None\n\nNo repository or global config found.';
+    summary = 'Config: None';
   }
 
   const settings = await loadGlobalSettings(
