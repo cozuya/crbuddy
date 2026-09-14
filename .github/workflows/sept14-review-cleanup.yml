@@ -25,14 +25,24 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
-      - name: Repair patch script source-escape match
+      - name: Repair patch script brittle reviewer match
         shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
           p = Path('scripts/sept14-review-cleanup.py')
           s = p.read_text()
-          s = s.replace(".join(' · ');", ".join(' \\\\u00b7 ');")
+          needle = "text = replace_once(text, old, new, 'sanitize reviewer summary fields')"
+          replacement = """reviewer_pattern = re.compile(
+              r\"function formatReviewer\\(entry: PanelEntry\\): string \\{.*?\\n\\}\\n\\n(?=function formatPanel)\",
+              re.S,
+          )
+          text, count = reviewer_pattern.subn(lambda _: new + '\\n', text, count=1)
+          if count != 1:
+              raise SystemExit(f'sanitize reviewer summary fields: expected 1 match, got {count}')"""
+          if needle not in s:
+              raise SystemExit('could not find reviewer replacement line in patch script')
+          s = s.replace(needle, replacement, 1)
           p.write_text(s)
           PY
 
