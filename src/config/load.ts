@@ -163,6 +163,7 @@ const TOP_LEVEL_KEYS = new Set([
   'configVersion',
   'output',
   'target',
+  'savedReviewInstructions',
   'refuseIfOutputExists',
   'timeoutMs',
   'mergeTimeoutMs',
@@ -218,11 +219,20 @@ export function validate(input: unknown, where = 'config'): Config {
   const target = validateTarget(raw.target, where);
   const merge = validateMerge(raw.merge, where);
   const panel = validatePanel(raw.panel, where);
+  const savedReviewInstructions =
+    raw.savedReviewInstructions === undefined
+      ? undefined
+      : str(
+          raw.savedReviewInstructions,
+          undefined,
+          `${where}.savedReviewInstructions`,
+        );
 
   const config: Config = {
     configVersion,
     output,
     target,
+    ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
     refuseIfOutputExists: bool(
       raw.refuseIfOutputExists,
       DEFAULTS.refuseIfOutputExists,
@@ -617,6 +627,11 @@ function uniqueId(candidate: string, seen: Set<string>, at?: string): string {
 
   if (at && seen.has(base)) {
     throw new ConfigError(`${at}.id: duplicate id "${base}".`);
+  }
+
+  if (!seen.has(base)) {
+    seen.add(base);
+    return base;
   }
 
   let id = base;
