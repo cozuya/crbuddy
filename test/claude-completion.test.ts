@@ -59,10 +59,35 @@ test('Claude still rejects ambiguous short status text without the marker', () =
   );
 });
 
-test('Claude accepts an exact JSON payload without the marker', () => {
+test('Claude rejects markerless JSON because completion is shared with merge tasks', () => {
   assert.deepEqual(
     claudeAdapter.checkCompletion(result('{"clusters":[]}')),
-    { ok: true },
+    { ok: false, reason: 'incomplete_review' },
+  );
+});
+
+test('Claude rejects final-looking prose when the tail says work is still running', () => {
+  for (const stdout of [
+    'I found two issues so far; the delegated agents are still running, I will wait for them.',
+    'No actionable issues so far. Waiting for the background agents to finish.',
+  ]) {
+    assert.deepEqual(
+      claudeAdapter.checkCompletion(result(stdout)),
+      { ok: false, reason: 'incomplete_review' },
+    );
+  }
+});
+
+test('Claude rejects long markerless progress text even when it is substantial', () => {
+  const stdout = (
+    'I have dispatched four review agents and am continuing the review. ' +
+    'They will report back when done. '
+  ).repeat(8);
+
+  assert.ok(stdout.length > 500);
+  assert.deepEqual(
+    claudeAdapter.checkCompletion(result(stdout)),
+    { ok: false, reason: 'incomplete_review' },
   );
 });
 
