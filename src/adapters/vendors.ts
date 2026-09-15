@@ -71,9 +71,9 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
     '--system-prompt-file',
     '--append-system-prompt',
     '--append-system-prompt-file',
-    // crbuddy validates Claude's terminal marker in plain-text stdout.
-    // Structured output changes that contract, whether selected as an
-    // envelope format or requested through a JSON schema.
+    // crbuddy captures Claude's final payload as plain text. Structured
+    // output changes that contract, whether selected as an envelope format
+    // or requested through a JSON schema.
     '--output-format',
     '--json-schema',
     // These modes disable hook execution, which would make every Claude lane
@@ -144,15 +144,21 @@ function vendorArgFlag(arg: string): string {
  * repository and vendor configuration remain trusted inputs.
  */
 function environmentFlagEnabled(value: string | undefined): boolean {
-  if (value === undefined) return false;
-  return !/^(?:0|false|no|off)$/i.test(value.trim());
+  return /^(?:1|true|yes|on)$/i.test(value?.trim() ?? '');
+}
+
+export function claudeHookDisablingEnvironmentVariable(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  return (
+    ['CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_SAFE_MODE'].find((name) =>
+      environmentFlagEnabled(env[name]),
+    ) ?? null
+  );
 }
 
 function assertClaudeHooksEnabledByEnvironment(): void {
-  const disabledBy = [
-    'CLAUDE_CODE_SIMPLE',
-    'CLAUDE_CODE_SAFE_MODE',
-  ].find((name) => environmentFlagEnabled(process.env[name]));
+  const disabledBy = claudeHookDisablingEnvironmentVariable();
 
   if (disabledBy) {
     throw new UnsafeInvocationError(

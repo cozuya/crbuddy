@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import {
   CLAUDE_COMPLETION_MARKER,
   claudeAdapter,
+  claudeHookDisablingEnvironmentVariable,
 } from '../src/adapters/vendors.js';
 import { UnsafeInvocationError, type Invocation } from '../src/adapters/types.js';
 import { ResolvedTarget } from '../src/git/target.js';
@@ -25,6 +26,28 @@ const target: ResolvedTarget = {
 };
 
 const result = (stdout: string, code = 0, stderr = '') => ({ code, stdout, stderr });
+
+
+test('Claude hook-disabling environment values match Claude boolean semantics', () => {
+  for (const value of ['1', 'true', 'TRUE', 'yes', 'on', ' On ']) {
+    assert.equal(
+      claudeHookDisablingEnvironmentVariable({ CLAUDE_CODE_SIMPLE: value }),
+      'CLAUDE_CODE_SIMPLE',
+    );
+  }
+
+  for (const value of ['', ' ', '0', 'false', 'no', 'off', '2', 'anything']) {
+    assert.equal(
+      claudeHookDisablingEnvironmentVariable({ CLAUDE_CODE_SIMPLE: value }),
+      null,
+    );
+  }
+
+  assert.equal(
+    claudeHookDisablingEnvironmentVariable({ CLAUDE_CODE_SAFE_MODE: 'yes' }),
+    'CLAUDE_CODE_SAFE_MODE',
+  );
+});
 
 function invocationWithEvidence(
   t: import('node:test').TestContext,

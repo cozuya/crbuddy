@@ -51,6 +51,7 @@ import { copyToClipboard } from '../util/clipboard.js';
 import { PromptAborted, dim, select } from '../util/prompt.js';
 import { formatClock, formatElapsed, formatSize } from '../util/format.js';
 import { notifyFinished, ReviewOutcome } from '../run/notify.js';
+import { sanitizeTerminalInline } from '../util/ansi.js';
 
 /** What every whole-checkout run has to establish before anything else. */
 const WHOLE_CHECKOUT_SUBJECT =
@@ -746,8 +747,11 @@ function displayNames(
   const counts = new Map<string, number>();
 
   for (const entry of panel) {
-    const label = adapters.get(entry.vendor)?.label ?? entry.vendor;
-    const name = `${label} (${entry.model})`;
+    const label = sanitizeTerminalInline(
+      adapters.get(entry.vendor)?.label ?? entry.vendor,
+    );
+    const model = sanitizeTerminalInline(entry.model);
+    const name = `${label} (${model})`;
 
     base.set(entry.id, name);
     counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -757,7 +761,8 @@ function displayNames(
 
   for (const entry of panel) {
     const name = base.get(entry.id)!;
-    names.set(entry.id, (counts.get(name) ?? 0) > 1 ? `${name} [${entry.id}]` : name);
+    const id = sanitizeTerminalInline(entry.id);
+    names.set(entry.id, (counts.get(name) ?? 0) > 1 ? `${name} [${id}]` : name);
   }
 
   return names;

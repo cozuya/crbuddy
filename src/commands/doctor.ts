@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { ADAPTERS } from '../adapters/vendors.js';
+import { ADAPTERS, claudeHookDisablingEnvironmentVariable } from '../adapters/vendors.js';
 import { isNewerThanStamp } from '../adapters/effort.js';
 import { isVersionAtLeast } from '../adapters/version.js';
 import { probe, runProcess } from '../run/spawn.js';
@@ -103,12 +103,15 @@ export async function runDoctor(): Promise<number> {
       // cannot prove a required flag is absent, so it reports the uncertainty
       // and lets go perform the authoritative build-time check.
       const requiredFlagsOk = help === null || missingRequired.length === 0;
-      const adapterUsable = result.present && versionOk && requiredFlagsOk;
+      const hookDisabledBy =
+        adapter.name === 'claude' ? claudeHookDisablingEnvironmentVariable() : null;
+      const adapterUsable =
+        result.present && versionOk && requiredFlagsOk && hookDisabledBy === null;
       const mark = !result.present
         ? 'MISS'
         : !versionOk
           ? 'OLD '
-          : requiredFlagsOk
+          : requiredFlagsOk && hookDisabledBy === null
             ? 'OK  '
             : 'BAD ';
 
@@ -174,6 +177,12 @@ export async function runDoctor(): Promise<number> {
               `       problem:  required flag(s) missing; crbuddy go will refuse this adapter`,
             );
           }
+        }
+
+        if (hookDisabledBy) {
+          console.log(
+            `       problem:  ${hookDisabledBy} disables Claude hooks; crbuddy go will refuse Claude`,
+          );
         }
       }
 
