@@ -1,6 +1,6 @@
 {
   "name": "crbuddy",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Run independent multi-model code reviews with Claude Code, OpenAI Codex, and Gemini CLI in parallel, then write one handoff.",
   "repository": {
     "type": "git",
