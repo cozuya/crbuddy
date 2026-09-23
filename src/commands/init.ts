@@ -840,11 +840,18 @@ async function buildPanel(
   );
 
   for (;;) {
+    // A panel is the point of crbuddy, so Enter keeps adding reviewers until
+    // every installed CLI has one, then stops. Defaulting to an unused CLI
+    // means accepting every default yields one reviewer per vendor.
+    const unused = available.findIndex(
+      (candidate) => !panel.some((entry) => entry.vendor === candidate.name),
+    );
+
     if (panel.length > 0) {
       const more = await ui.confirm(
         `${panel.length} reviewer${panel.length === 1 ? '' : 's'} configured. ` +
           `Add another?`,
-        false,
+        unused >= 0,
       );
 
       if (!more) break;
@@ -853,7 +860,7 @@ async function buildPanel(
     const adapter = await ui.select(
       'Add a reviewer',
       available.map((candidate) => ({ label: candidate.label, value: candidate })),
-      0,
+      unused >= 0 ? unused : 0,
     );
 
     const model = await pickModel(ui, adapter);

@@ -18,6 +18,7 @@ import {
   DEFAULTS,
   DEFAULT_OUTPUT,
   type Config,
+  type PanelEntry,
 } from '../src/config/schema.js';
 import { PromptAborted, type Choice } from '../src/util/prompt.js';
 import type { MessageKind, WizardUI } from '../src/util/wizard-prompt.js';
@@ -276,6 +277,35 @@ test('the Codex model wizard offers Other and retains existing arbitrary model I
   assert.deepEqual(JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8')), config);
 });
 
+test('accepting every default adds one reviewer per installed CLI, then stops', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-defaults-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const addAnotherDefaults: boolean[] = [];
+  class RecordingUI extends DefaultingUI {
+    override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+      if (question.endsWith('Add another?')) addAnotherDefaults.push(defaultYes);
+      return super.confirm(question, defaultYes);
+    }
+  }
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    {
+      ui: new RecordingUI(),
+      detect: async () => [claudeAdapter, codexAdapter].map((adapter) => (
+        { adapter, present: true, version: adapter.minVersion }
+      )),
+      settingsFile: path.join(repo, 'settings.json'),
+    },
+  );
+  assert.equal(code, 0);
+  assert.deepEqual(addAnotherDefaults, [true, false]);
+  const saved = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
+  assert.deepEqual(
+    saved.panel.map((entry: PanelEntry) => [entry.vendor, entry.model]),
+    [['claude', claudeAdapter.defaultModel], ['codex', codexAdapter.defaultModel]],
+  );
+});
+
 test('changing consolidation vendors selects the new vendor defaults without a custom-model prompt', async (t) => {
   for (const [previous, selected] of [[codexAdapter, claudeAdapter], [claudeAdapter, codexAdapter]] as const) {
     for (const previousAvailable of [true, false]) {
@@ -292,6 +322,9 @@ test('changing consolidation vendors selects the new vendor defaults without a c
       await writeFile(configPath, JSON.stringify(config));
       let modelPrompts = 0;
       class ChangeVendorUI extends DefaultingUI {
+        override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+          return question.endsWith('Add another?') ? false : super.confirm(question, defaultYes);
+        }
         override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
           if (question === 'Which CLI should consolidate?') {
             const choice = choices.find((entry) => (entry.value as Adapter).name === selected.name);
