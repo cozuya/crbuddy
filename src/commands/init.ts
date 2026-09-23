@@ -8,7 +8,6 @@ import {
   Config,
   DEFAULTS,
   DEFAULT_OUTPUT,
-  MergeConfig,
   OutputConfig,
   OutputDestination,
   PanelEntry,
@@ -210,14 +209,7 @@ async function wizard(
     existing?.panel ?? [],
     initialSavedReviewInstructions,
   );
-  const { merge, output } = await buildMerge(
-    ui,
-    available,
-    existing?.merge,
-    existing?.output,
-    options.repoRoot,
-    scope,
-  );
+  const output = await buildOutput(ui, existing?.output, options.repoRoot, scope);
   const reviewTarget = await buildTarget(ui, existing?.target);
 
   const config: Config = {
@@ -228,10 +220,8 @@ async function wizard(
     refuseIfOutputExists:
       existing?.refuseIfOutputExists ?? DEFAULTS.refuseIfOutputExists,
     timeoutMs: existing?.timeoutMs ?? DEFAULTS.timeoutMs,
-    mergeTimeoutMs: existing?.mergeTimeoutMs ?? DEFAULTS.mergeTimeoutMs,
     maxConcurrent: existing?.maxConcurrent ?? DEFAULTS.maxConcurrent,
     maxDiffBytes: existing?.maxDiffBytes ?? DEFAULTS.maxDiffBytes,
-    merge,
     panel,
   };
 
@@ -353,7 +343,7 @@ async function planGitignore(
   // created, so it is always worth ignoring.
   const reports =
     config.output.destination === 'file'
-      ? [config.output.merged, config.output.raw]
+      ? [config.output.merged]
       : [];
 
   // Mapped, not filtered: an absolute path can still resolve inside the
@@ -536,18 +526,6 @@ export function formatConfigSummary(
     );
   }
 
-  if (config.merge.enabled) {
-    const merger: PanelEntry = {
-      id: 'summary',
-      vendor: config.merge.vendor,
-      model: config.merge.model,
-      ...(config.merge.effort ? { effort: config.merge.effort } : {}),
-    };
-    lines.push(`Consolidation: Enabled \u00b7 ${formatReviewer(merger)}`);
-  } else {
-    lines.push('Consolidation: Disabled');
-  }
-
   lines.push(
     `Target: ${
       config.target === 'uncommitted'
@@ -560,9 +538,6 @@ export function formatConfigSummary(
     lines.push('Output: Terminal');
   } else {
     lines.push(`Output: ${sanitizeTerminalInline(config.output.merged)}`);
-    if (config.merge.enabled) {
-      lines.push(`Raw audit: ${sanitizeTerminalInline(config.output.raw)}`);
-    }
   }
 
   if (gitignorePlan) {
@@ -578,12 +553,7 @@ export function formatConfigSummary(
 
 const OTHER = '\u0000other';
 
-async function pickModel(
-  ui: WizardUI,
-  adapter: Adapter,
-  current?: string,
-): Promise<string> {
-  const savedModel = current?.trim() ? current : undefined;
+async function pickModel(ui: WizardUI, adapter: Adapter): Promise<string> {
   const choices = adapter.models.map((model) => ({
     label: model.label,
     value: model.id,
@@ -596,15 +566,7 @@ async function pickModel(
     hint: `any id \`${adapter.command}\` accepts, passed through unchecked`,
   });
 
-  const preferred = savedModel ?? adapter.defaultModel;
-  let index = adapter.models.findIndex((model) => model.id === preferred);
-
-  if (index < 0 && savedModel) {
-    // Enter keeps a custom ID without another prompt. Append it so existing
-    // numbered choices, including Other, keep their positions in piped setup.
-    index = choices.length;
-    choices.push({ label: savedModel, value: savedModel, hint: 'current model' });
-  }
+  const index = adapter.models.findIndex((model) => model.id === adapter.defaultModel);
 
   const chosen = await ui.select(
     `Model for ${adapter.label}`,
@@ -619,7 +581,7 @@ async function pickModel(
         ` or check the vendor's docs for current ids.`,
     );
 
-    return ui.text('Model id', savedModel ?? '');
+    return ui.text('Model id', '');
   }
 
   return chosen;
@@ -629,7 +591,6 @@ async function pickEffort(
   ui: WizardUI,
   adapter: Adapter,
   model: string,
-  current?: string,
 ): Promise<string | undefined> {
   const efforts =
     adapter.models.find((entry) => entry.id === model)?.efforts ?? adapter.efforts;
@@ -648,7 +609,7 @@ async function pickEffort(
     hint: `any value \`${adapter.command}\` accepts, passed through unchecked`,
   });
 
-  const preferred = current ?? adapter.defaultEffort ?? efforts[efforts.length - 1]!;
+  const preferred = adapter.defaultEffort ?? efforts[efforts.length - 1]!;
   const index = efforts.indexOf(preferred);
 
   const chosen = await ui.select(
@@ -657,7 +618,7 @@ async function pickEffort(
     index >= 0 ? index : 0,
   );
 
-  return chosen === OTHER ? ui.text('Effort value', current ?? '') : chosen;
+  return chosen === OTHER ? ui.text('Effort value', '') : chosen;
 }
 
 type ReviewInstructionMode = 'default' | 'saved' | 'custom';
@@ -904,20 +865,16 @@ async function buildPanel(
 }
 
 /**
- * The consolidation answer and the destination are asked together because
- * they describe the same artifact, but the destination is asked either way:
- * `output.merged` is written whatever the answer is — holding the unmerged
- * reviews when consolidation is off — so skipping the question there would
+ * The destination is asked on every run of the wizard: `output.merged` is
+ * where each file-mode review is written, so skipping the question would
  * silently pin those runs to the repository root.
  */
-async function buildMerge(
+async function buildOutput(
   ui: WizardUI,
-  available: Adapter[],
-  existing: MergeConfig | undefined,
   existingOutput: OutputConfig | undefined,
   repoRoot: string | null,
   scope: 'global' | 'project',
-): Promise<{ merge: MergeConfig; output: OutputConfig }> {
+): Promise<OutputConfig> {
   const destination = await ui.select<OutputDestination>(
     'Where should the output go?',
     [
@@ -935,15 +892,7 @@ async function buildMerge(
     (existingOutput ?? DEFAULT_OUTPUT).destination === 'terminal' ? 1 : 0,
   );
 
-  const enabled = await ui.confirm(
-    'When done, run a consolidation pass to group duplicate findings? ' +
-      (destination === 'terminal'
-        ? '(the report is printed either way)'
-        : '(the report is written either way)'),
-    existing?.enabled ?? true,
-  );
-
-  // Only "file" has anywhere to put it. The paths are still carried in the
+  // Only "file" has anywhere to put it. The path is still carried in the
   // config so switching back to "file" later restores the last choice.
   const output =
     destination === 'terminal'
@@ -952,47 +901,23 @@ async function buildMerge(
           { ...(existingOutput ?? DEFAULT_OUTPUT), destination: 'terminal' as const },
           repoRoot,
         )
-      : await pickOutputLocation(ui, existingOutput, repoRoot, enabled);
+      : await pickOutputLocation(ui, existingOutput, repoRoot);
 
   if (
     scope === 'project' &&
     repoRoot &&
-    [output.merged, output.raw].some(
-      (candidate) => repoRelative(candidate, repoRoot) === null,
-    )
+    repoRelative(output.merged, repoRoot) === null
   ) {
     ui.message(
-      'Because this repository config names output paths outside the repository, ' +
-        '`crbuddy go` will ask you to approve those paths on every interactive run ' +
-        'and will refuse them when unattended. Use a global config if you want ' +
+      'Because this repository config names an output path outside the repository, ' +
+        '`crbuddy go` will ask you to approve that path on every interactive run ' +
+        'and will refuse it when unattended. Use a global config if you want ' +
         'external output without that per-run confirmation.',
       'warn',
     );
   }
 
-  if (!enabled) {
-    return { merge: { enabled: false, vendor: '', model: '' }, output };
-  }
-
-  const currentIndex = available.findIndex(
-    (candidate) => candidate.name === existing?.vendor,
-  );
-
-  const adapter = await ui.select(
-    'Which CLI should consolidate?',
-    available.map((candidate) => ({ label: candidate.label, value: candidate })),
-    currentIndex >= 0 ? currentIndex : 0,
-  );
-
-  // Model and effort IDs belong to the vendor that saved them.
-  const current = existing?.vendor === adapter.name ? existing : undefined;
-  const model = await pickModel(ui, adapter, current?.model);
-  const effort = await pickEffort(ui, adapter, model, current?.effort);
-
-  const merge: MergeConfig = { enabled: true, vendor: adapter.name, model };
-  if (effort) merge.effort = effort;
-
-  return { merge, output };
+  return output;
 }
 
 /**
@@ -1005,7 +930,6 @@ async function pickOutputLocation(
   ui: WizardUI,
   existing: OutputConfig | undefined,
   repoRoot: string | null,
-  consolidating: boolean,
 ): Promise<OutputConfig> {
   const current = existing ?? DEFAULT_OUTPUT;
   const currentDir = path.dirname(current.merged).replace(/\\/g, '/');
@@ -1076,8 +1000,6 @@ async function pickOutputLocation(
       );
     }
 
-    if (consolidating) ui.message(`Raw reviews will be written to ${candidate.raw}`);
-
     return candidate;
   }
 }
@@ -1105,31 +1027,16 @@ function usableOrDefault(
 
 /**
  * Only the directory is chosen here, so a config that already names its
- * files keeps those names. Rebuilding both paths from the defaults would
- * silently rename a hand-edited `output.merged` the moment someone re-ran
+ * file keeps that name. Rebuilding the path from the default would silently
+ * rename a hand-edited `output.merged` the moment someone re-ran
  * `crbuddy config` and accepted the location it was already using.
  */
 export function inDirectory(directory: string, existing?: OutputConfig): OutputConfig {
   const merged = path.basename(existing?.merged ?? DEFAULT_OUTPUT.merged);
-  let raw = path.basename(existing?.raw ?? DEFAULT_OUTPUT.raw);
 
-  // Two directories can hold two files of the same name; collapsing them
-  // into one directory would make them one file, and the wizard would
-  // write a config that `crbuddy go` then refuses to load.
-  if (raw === merged) {
-    const extension = path.extname(merged);
-    raw = `${merged.slice(0, merged.length - extension.length)}.raw${extension}`;
-  }
+  if (directory === '.') return { destination: 'file', merged };
 
-  if (directory === '.') return { destination: 'file', merged, raw };
-
-  const clean = directory.replace(/\/+$/, '');
-
-  return {
-    destination: 'file',
-    merged: `${clean}/${merged}`,
-    raw: `${clean}/${raw}`,
-  };
+  return { destination: 'file', merged: `${directory.replace(/\/+$/, '')}/${merged}` };
 }
 
 /**

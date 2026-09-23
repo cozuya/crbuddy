@@ -6,7 +6,6 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { claudeAdapter, codexAdapter } from '../src/adapters/vendors.js';
-import type { Adapter } from '../src/adapters/types.js';
 import {
   effectiveInitScope,
   runInit,
@@ -69,15 +68,8 @@ test('equivalent wizard answers produce the unchanged config schema', async (t) 
     target: 'uncommitted',
     refuseIfOutputExists: DEFAULTS.refuseIfOutputExists,
     timeoutMs: DEFAULTS.timeoutMs,
-    mergeTimeoutMs: DEFAULTS.mergeTimeoutMs,
     maxConcurrent: DEFAULTS.maxConcurrent,
     maxDiffBytes: DEFAULTS.maxDiffBytes,
-    merge: {
-      enabled: true,
-      vendor: 'codex',
-      model: 'gpt-6-sol',
-      effort: 'high',
-    },
     panel: [
       {
         id: 'codex-gpt-6-sol',
@@ -106,11 +98,11 @@ test('project config warns that external output needs consent on every run', asy
   assert.equal(code, 0);
   assert.match(
     ui.messages.map((entry) => entry.message).join('\n'),
-    /approve those paths on every interactive run.*refuse them when unattended/s,
+    /approve that path on every interactive run.*refuse it when unattended/s,
   );
 });
 
-test('editing an existing config preserves accepted values', async (t) => {
+test('editing an existing config preserves accepted values and drops consolidation keys', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
   const configPath = path.join(repo, '.crbuddy', 'config.json');
@@ -119,20 +111,12 @@ test('editing an existing config preserves accepted values', async (t) => {
     output: {
       destination: 'terminal',
       merged: 'REVIEW.md',
-      raw: 'REVIEW.raw.md',
     },
     target: { base: 'develop' },
     refuseIfOutputExists: true,
     timeoutMs: 123_000,
-    mergeTimeoutMs: 45_000,
     maxConcurrent: 2,
     maxDiffBytes: 987_654,
-    merge: {
-      enabled: true,
-      vendor: 'codex',
-      model: 'gpt-6-luna',
-      effort: 'max',
-    },
     panel: [
       {
         id: 'careful-review',
@@ -144,8 +128,16 @@ test('editing an existing config preserves accepted values', async (t) => {
     ],
   };
 
+  // As an earlier version wrote it: the wizard saves it back without them.
+  const legacy = {
+    ...existing,
+    output: { ...existing.output, raw: 'REVIEW.raw.md' },
+    mergeTimeoutMs: 45_000,
+    merge: { enabled: true, vendor: 'codex', model: 'gpt-6-luna', effort: 'max' },
+  };
+
   await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
+  await writeFile(configPath, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8');
 
   const code = await runInit(
     { repoRoot: repo, scope: 'project' },
@@ -167,15 +159,12 @@ test('editing replaces an output filename that is an existing directory', async 
     output: {
       destination: 'terminal',
       merged: 'reports',
-      raw: 'REVIEW.raw.md',
     },
     target: 'uncommitted',
     refuseIfOutputExists: false,
     timeoutMs: DEFAULTS.timeoutMs,
-    mergeTimeoutMs: DEFAULTS.mergeTimeoutMs,
     maxConcurrent: DEFAULTS.maxConcurrent,
     maxDiffBytes: DEFAULTS.maxDiffBytes,
-    merge: { enabled: false, vendor: '', model: '' },
     panel: [
       {
         id: 'codex-gpt-6-sol',
@@ -221,7 +210,7 @@ test('late cancellation writes neither config nor planned .gitignore changes', a
   assert.match(ui.cancelled.at(-1) ?? '', /No config was written/);
 });
 
-test('the Codex model wizard offers Other and retains existing arbitrary model IDs', async (t) => {
+test('the Codex model wizard offers Other for arbitrary model IDs', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-model-other-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
   class CustomModelUI extends DefaultingUI {
@@ -250,31 +239,6 @@ test('the Codex model wizard offers Other and retains existing arbitrary model I
   assert.equal(code, 0);
   const config = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
   assert.equal(config.panel[0].model, 'future-custom-model');
-  assert.equal(config.merge.model, 'future-custom-model');
-  let modelPrompts = 0;
-  class KeepCustomModelUI extends DefaultingUI {
-    override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
-      if (question === 'Model for Codex CLI') {
-        modelPrompts++;
-        assert.equal(choices[initialIndex]?.value, 'future-custom-model');
-      }
-      return super.select(question, choices, initialIndex);
-    }
-    override async text(question: string, fallback = ''): Promise<string> {
-      assert.notEqual(question, 'Model id', 'retaining a custom model must not consume another answer');
-      return super.text(question, fallback);
-    }
-  }
-  assert.equal(await runInit(
-    { repoRoot: repo, scope: 'project' },
-    {
-      ui: new KeepCustomModelUI(),
-      detect: async () => [detection],
-      settingsFile: path.join(repo, 'settings.json'),
-    },
-  ), 0);
-  assert.equal(modelPrompts, 1);
-  assert.deepEqual(JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8')), config);
 });
 
 test('accepting every default adds one reviewer per installed CLI, then stops', async (t) => {
@@ -304,108 +268,6 @@ test('accepting every default adds one reviewer per installed CLI, then stops', 
     saved.panel.map((entry: PanelEntry) => [entry.vendor, entry.model]),
     [['claude', claudeAdapter.defaultModel], ['codex', codexAdapter.defaultModel]],
   );
-});
-
-test('changing consolidation vendors selects the new vendor defaults without a custom-model prompt', async (t) => {
-  for (const [previous, selected] of [[codexAdapter, claudeAdapter], [claudeAdapter, codexAdapter]] as const) {
-    for (const previousAvailable of [true, false]) {
-      const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-merge-vendor-'));
-      t.after(() => rm(repo, { recursive: true, force: true }));
-      const configPath = path.join(repo, '.crbuddy', 'config.json');
-      const config: Config = {
-        ...DEFAULTS,
-        output: { ...DEFAULT_OUTPUT },
-        merge: { enabled: true, vendor: previous.name, model: previous.defaultModel, effort: 'max' },
-        panel: [{ id: 'reviewer', vendor: selected.name, model: selected.defaultModel }],
-      };
-      await mkdir(path.dirname(configPath));
-      await writeFile(configPath, JSON.stringify(config));
-      let modelPrompts = 0;
-      class ChangeVendorUI extends DefaultingUI {
-        override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
-          return question.endsWith('Add another?') ? false : super.confirm(question, defaultYes);
-        }
-        override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
-          if (question === 'Which CLI should consolidate?') {
-            const choice = choices.find((entry) => (entry.value as Adapter).name === selected.name);
-            assert.ok(choice);
-            return choice.value;
-          }
-          if (question === `Model for ${selected.label}`) {
-            modelPrompts++;
-            assert.equal(choices[initialIndex]?.value, selected.defaultModel);
-          }
-          return super.select(question, choices, initialIndex);
-        }
-        override async text(question: string, fallback = ''): Promise<string> {
-          assert.notEqual(question, 'Model id', 'switching vendors must not add a custom-model answer');
-          return super.text(question, fallback);
-        }
-      }
-      const adapters = previousAvailable ? [previous, selected] : [selected];
-      const code = await runInit(
-        { repoRoot: repo, scope: 'project' },
-        {
-          ui: new ChangeVendorUI(),
-          detect: async () => adapters.map((adapter) => ({ adapter, present: true, version: adapter.minVersion })),
-          settingsFile: path.join(repo, 'settings.json'),
-        },
-      );
-      assert.equal(code, 0);
-      assert.equal(modelPrompts, 1);
-      assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), {
-        ...config,
-        merge: { enabled: true, vendor: selected.name, model: selected.defaultModel, effort: selected.defaultEffort },
-      });
-    }
-  }
-});
-
-test('re-enabling consolidation with an empty or whitespace-only model defaults to Sol', async (t) => {
-  // Both the wizard's disabled shape and a retained vendor with no model are valid.
-  for (const [vendor, model] of [
-    ['', ''], ['codex', ''], ['codex', '   '], ['codex', '\t \r\n'],
-  ] as const) {
-    const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-merge-enable-'));
-    t.after(() => rm(repo, { recursive: true, force: true }));
-    const configPath = path.join(repo, '.crbuddy', 'config.json');
-    const config: Config = {
-      ...DEFAULTS,
-      output: { ...DEFAULT_OUTPUT },
-      merge: { enabled: false, vendor, model },
-      panel: [{ id: 'reviewer', vendor: 'codex', model: 'gpt-6-sol' }],
-    };
-    await mkdir(path.dirname(configPath));
-    await writeFile(configPath, JSON.stringify(config));
-    assert.equal((await readAndValidate(configPath)).merge.model, model);
-    let modelPrompts = 0;
-    class EnableMergeUI extends DefaultingUI {
-      override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
-        return question.startsWith('When done, run a consolidation pass')
-          ? true : super.confirm(question, defaultYes);
-      }
-      override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
-        if (question === 'Model for Codex CLI') {
-          modelPrompts++;
-          assert.equal(choices[0]?.value, 'gpt-6-astra');
-          assert.equal(choices[initialIndex]?.value, 'gpt-6-sol');
-        }
-        return super.select(question, choices, initialIndex);
-      }
-      override async text(question: string, fallback = ''): Promise<string> {
-        assert.notEqual(question, 'Model id', 'a blank saved model must use the vendor default');
-        return super.text(question, fallback);
-      }
-    }
-    assert.equal(await runInit(
-      { repoRoot: repo, scope: 'project' },
-      { ui: new EnableMergeUI(), detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
-    ), 0);
-    assert.equal(modelPrompts, 1);
-    assert.deepEqual((await readAndValidate(configPath)).merge, {
-      enabled: true, vendor: 'codex', model: 'gpt-6-sol', effort: 'high',
-    });
-  }
 });
 
 class DefaultingUI implements WizardUI {

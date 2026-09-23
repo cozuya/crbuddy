@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import {
   assertUsableOutput,
   ConfigError,
+  obsoleteKeys,
   stripJsonComments,
   validate,
 } from '../src/config/load.js';
@@ -21,9 +22,7 @@ test('accepts a minimal config and fills defaults', () => {
   assert.equal(config.target, 'uncommitted');
   assert.equal(config.refuseIfOutputExists, false);
   assert.equal(config.timeoutMs, 60 * 60 * 1000);
-  assert.equal(config.mergeTimeoutMs, 60 * 60 * 1000);
   assert.equal(config.output.merged, 'CODE-REVIEW-HANDOFF.md');
-  assert.equal(config.merge.enabled, false);
   assert.equal(config.panel.length, 1);
 });
 
@@ -93,7 +92,7 @@ test('extends is reserved and refuses to load', () => {
 test('rejects the old positional output tuple with a useful message', () => {
   assert.throws(
     () => validate({ ...minimal, output: ['a.md', 'b.md'] }),
-    /merged.*raw|array/i,
+    /destination.*merged|array/i,
   );
 });
 
@@ -102,14 +101,14 @@ test('output paths may leave the repository', () => {
   // than relying on the diff exclusion to keep it out.
   const up = validate({
     ...minimal,
-    output: { merged: '../CODE-REVIEW-HANDOFF.md', raw: '../CODE-REVIEW-HANDOFF.raw.md' },
+    output: { merged: '../CODE-REVIEW-HANDOFF.md' },
   });
 
   assert.equal(up.output.merged, '../CODE-REVIEW-HANDOFF.md');
 
   const absolute = validate({
     ...minimal,
-    output: { merged: '/srv/reviews/x.md', raw: '/srv/reviews/x.raw.md' },
+    output: { merged: '/srv/reviews/x.md' },
   });
 
   assert.equal(absolute.output.merged, '/srv/reviews/x.md');
@@ -127,7 +126,7 @@ test('output destination defaults to a file and accepts the terminal', () => {
 test('terminal mode keeps the paths so switching back restores them', () => {
   const config = validate({
     ...minimal,
-    output: { destination: 'terminal', merged: '../report.md', raw: '../report.raw.md' },
+    output: { destination: 'terminal', merged: '../report.md' },
   });
 
   assert.equal(config.output.merged, '../report.md');
@@ -152,26 +151,26 @@ test('bad paths are still caught in terminal mode', () => {
   );
 });
 
-test('merged and raw must differ', () => {
-  assert.throws(
-    () => validate({ ...minimal, output: { merged: 'x.md', raw: 'x.md' } }),
-    /same file/,
-  );
+test('keys from the removed consolidation pass are ignored and reported', () => {
+  const legacy = {
+    ...minimal,
+    // Identical paths were an error while `raw` named a second file.
+    output: { merged: 'x.md', raw: 'x.md' },
+    merge: { enabled: true, vendor: 'claude', model: 'opus' },
+    mergeTimeoutMs: 5,
+  };
+
+  const config = validate(legacy);
+
+  assert.deepEqual(config.output, { destination: 'file', merged: 'x.md' });
+  assert.ok(!('merge' in config));
+  assert.ok(!('mergeTimeoutMs' in config));
+  assert.deepEqual(obsoleteKeys(legacy), ['merge', 'mergeTimeoutMs', 'output.raw']);
+  assert.deepEqual(obsoleteKeys(minimal), []);
 });
 
 test('an empty panel is rejected', () => {
   assert.throws(() => validate({ panel: [] }), ConfigError);
-});
-
-test('enabled merge requires a vendor and model', () => {
-  assert.throws(() => validate({ ...minimal, merge: { enabled: true } }), /required/);
-
-  const ok = validate({
-    ...minimal,
-    merge: { enabled: true, vendor: 'claude', model: 'opus' },
-  });
-
-  assert.equal(ok.merge.effort, 'high');
 });
 
 test('a future configVersion is refused rather than guessed at', () => {
@@ -225,18 +224,11 @@ test('output paths cannot point into .git or .crbuddy', () => {
   // git's own state would destroy the repository.
   for (const bad of ['.git/config', '.crbuddy/config.json', '.git', 'x/../.git/HEAD']) {
     assert.throws(
-      () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
+      () => validate({ ...minimal, output: { merged: bad } }),
       /must not write inside|must name a file/,
       `expected ${bad} to be rejected`,
     );
   }
-});
-
-test('output paths that normalize to the same file are rejected', () => {
-  assert.throws(
-    () => validate({ ...minimal, output: { merged: 'a.md', raw: './x/../a.md' } }),
-    /same file/,
-  );
 });
 
 test('reserved directories are rejected from outside the repo too', () => {
@@ -244,7 +236,7 @@ test('reserved directories are rejected from outside the repo too', () => {
   // root would miss these.
   for (const bad of ['../.git/HEAD', '/srv/repo/.git/config', '../x/.crbuddy/config.json']) {
     assert.throws(
-      () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
+      () => validate({ ...minimal, output: { merged: bad } }),
       /must not write inside/,
       `expected ${bad} to be rejected`,
     );
@@ -256,7 +248,7 @@ test('a reserved ancestor above the repository does not reject its outputs', () 
 
   assert.doesNotThrow(() =>
     assertUsableOutput(
-      { merged: 'review.md', raw: 'review.raw.md' },
+      { merged: 'review.md' },
       'output',
       nestedRepo,
     ),
@@ -266,7 +258,7 @@ test('a reserved ancestor above the repository does not reject its outputs', () 
 test('an output path that names no file is rejected', () => {
   for (const bad of ['..', '.', '../']) {
     assert.throws(
-      () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
+      () => validate({ ...minimal, output: { merged: bad } }),
       /must name a file/,
       `expected ${bad} to be rejected`,
     );

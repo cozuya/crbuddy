@@ -10,7 +10,6 @@ import {
   DEFAULTS,
   DEFAULT_OUTPUT,
   HOME_CONFIG_DIR,
-  MergeConfig,
   OutputConfig,
   OutputDestination,
   PROJECT_CONFIG_DIR,
@@ -25,6 +24,8 @@ export interface LoadedConfig {
   /** Absolute path the config came from. */
   source: string;
   scope: 'project' | 'global';
+  /** Keys from removed features that were present and ignored. */
+  obsoleteKeys: string[];
 }
 
 export function homeConfigPath(): string {
@@ -43,26 +44,28 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
   const projectPath = projectConfigPath(repoRoot);
 
   if (existsSync(projectPath)) {
-    const config = await readAndValidate(projectPath);
+    const { config, obsoleteKeys } = await readConfigFile(projectPath);
     assertUsableOutput(config.output, `${projectPath}.output`, repoRoot);
 
     return {
       config,
       source: projectPath,
       scope: 'project',
+      obsoleteKeys,
     };
   }
 
   const globalPath = homeConfigPath();
 
   if (existsSync(globalPath)) {
-    const config = await readAndValidate(globalPath);
+    const { config, obsoleteKeys } = await readConfigFile(globalPath);
     assertUsableOutput(config.output, `${globalPath}.output`, repoRoot);
 
     return {
       config,
       source: globalPath,
       scope: 'global',
+      obsoleteKeys,
     };
   }
 
@@ -75,6 +78,12 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
 }
 
 export async function readAndValidate(file: string): Promise<Config> {
+  return (await readConfigFile(file)).config;
+}
+
+async function readConfigFile(
+  file: string,
+): Promise<{ config: Config; obsoleteKeys: string[] }> {
   let text: string;
 
   try {
@@ -91,7 +100,7 @@ export async function readAndValidate(file: string): Promise<Config> {
     throw new ConfigError(`Config at ${file} is not valid JSON: ${String(error)}`);
   }
 
-  return validate(parsed, file);
+  return { config: validate(parsed, file), obsoleteKeys: obsoleteKeys(parsed) };
 }
 
 /** Tolerate // and /* *\/ comments so the shipped example stays annotated. */
@@ -159,6 +168,27 @@ export function stripJsonComments(input: string): string {
   return out;
 }
 
+/**
+ * Keys left behind by the consolidation pass, removed in 0.4.0. Accepted and
+ * ignored rather than rejected, so configs written by earlier versions keep
+ * loading; `crb config` drops them on its next save.
+ */
+const OBSOLETE_TOP_LEVEL_KEYS = ['merge', 'mergeTimeoutMs'];
+
+export function obsoleteKeys(input: unknown): string[] {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return [];
+
+  const raw = input as Record<string, unknown>;
+  const found = OBSOLETE_TOP_LEVEL_KEYS.filter((key) => key in raw);
+  const output = raw.output;
+
+  if (typeof output === 'object' && output !== null && 'raw' in output) {
+    found.push('output.raw');
+  }
+
+  return found;
+}
+
 const TOP_LEVEL_KEYS = new Set([
   'configVersion',
   'output',
@@ -166,12 +196,11 @@ const TOP_LEVEL_KEYS = new Set([
   'savedReviewInstructions',
   'refuseIfOutputExists',
   'timeoutMs',
-  'mergeTimeoutMs',
   'maxConcurrent',
   'maxDiffBytes',
-  'merge',
   'panel',
   'extends',
+  ...OBSOLETE_TOP_LEVEL_KEYS,
 ]);
 
 const ENTRY_KEYS = new Set([
@@ -182,8 +211,6 @@ const ENTRY_KEYS = new Set([
   'instructions',
   'vendorArgs',
 ]);
-
-const MERGE_KEYS = new Set(['enabled', 'vendor', 'model', 'effort']);
 
 /** Unknown keys are fatal — a typo silently doing nothing is worse. */
 export function validate(input: unknown, where = 'config'): Config {
@@ -217,7 +244,6 @@ export function validate(input: unknown, where = 'config'): Config {
 
   const output = validateOutput(raw.output, where);
   const target = validateTarget(raw.target, where);
-  const merge = validateMerge(raw.merge, where);
   const panel = validatePanel(raw.panel, where);
   const savedReviewInstructions =
     raw.savedReviewInstructions === undefined
@@ -239,11 +265,6 @@ export function validate(input: unknown, where = 'config'): Config {
       `${where}.refuseIfOutputExists`,
     ),
     timeoutMs: positiveInt(raw.timeoutMs, DEFAULTS.timeoutMs, `${where}.timeoutMs`),
-    mergeTimeoutMs: positiveInt(
-      raw.mergeTimeoutMs,
-      DEFAULTS.mergeTimeoutMs,
-      `${where}.mergeTimeoutMs`,
-    ),
     maxConcurrent: nonNegativeInt(
       raw.maxConcurrent,
       DEFAULTS.maxConcurrent,
@@ -254,7 +275,6 @@ export function validate(input: unknown, where = 'config'): Config {
       DEFAULTS.maxDiffBytes,
       `${where}.maxDiffBytes`,
     ),
-    merge,
     panel,
   };
 
@@ -283,24 +303,24 @@ function validateOutput(value: unknown, where: string): OutputConfig {
 
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new ConfigError(
-      `${where}.output: expected an object with "merged" and "raw". ` +
+      `${where}.output: expected an object with "destination" and "merged". ` +
         `(A two-element array was an earlier design and is no longer accepted.)`,
     );
   }
 
   const raw = value as Record<string, unknown>;
 
+  // `raw` named the consolidation pass's second file; see obsoleteKeys().
   rejectUnknown(raw, new Set(['destination', 'merged', 'raw']), `${where}.output`);
 
   const merged = str(raw.merged, DEFAULT_OUTPUT.merged, `${where}.output.merged`);
-  const rawPath = str(raw.raw, DEFAULT_OUTPUT.raw, `${where}.output.raw`);
   const destination = validateDestination(raw.destination, `${where}.output.destination`);
 
   // Validated even for "terminal", so switching a config back to "file"
   // cannot surface a path problem that was sitting there unnoticed.
-  assertUsableOutput({ merged, raw: rawPath }, `${where}.output`);
+  assertUsableOutput({ merged }, `${where}.output`);
 
-  return { destination, merged, raw: rawPath };
+  return { destination, merged };
 }
 
 function validateDestination(value: unknown, where: string): OutputDestination {
@@ -365,73 +385,61 @@ export function repoRelative(entry: string, repoRoot: string): string | null {
 }
 
 export function assertUsableOutput(
-  output: { merged: string; raw: string },
+  output: { merged: string },
   where: string,
   repoRoot?: string,
 ): void {
-  const normalizedPaths: string[] = [];
+  const key = 'merged';
+  const candidate = output.merged;
 
-  for (const [key, candidate] of [
-    ['merged', output.merged],
-    ['raw', output.raw],
-  ] as const) {
-    // Normalize before every check: `a/../../b` and `./.git/config` both
-    // slip past naive prefix tests.
-    const concrete = repoRoot
-      ? canonicalOutputPath(repoRoot, candidate)
-      : candidate;
-    const normalized = path.normalize(concrete).replace(/\\/g, '/');
+  // Normalize before every check: `a/../../b` and `./.git/config` both
+  // slip past naive prefix tests.
+  const concrete = repoRoot
+    ? canonicalOutputPath(repoRoot, candidate)
+    : candidate;
+  const normalized = path.normalize(concrete).replace(/\\/g, '/');
 
-    // For a path inside the repository, inspect only the part below the Git
-    // root: a checkout may itself live beneath an unrelated ancestor named
-    // `.crbuddy`. For an external path retain the full absolute check, since
-    // `../other/.git/HEAD` is still a destructive destination.
-    const relativeToRepo = repoRoot ? repoRelative(concrete, repoRoot) : null;
-    const reservedPath = relativeToRepo ?? normalized;
-    const segments = reservedPath.split('/').filter((part) => part !== '');
+  // For a path inside the repository, inspect only the part below the Git
+  // root: a checkout may itself live beneath an unrelated ancestor named
+  // `.crbuddy`. For an external path retain the full absolute check, since
+  // `../other/.git/HEAD` is still a destructive destination.
+  const relativeToRepo = repoRoot ? repoRelative(concrete, repoRoot) : null;
+  const reservedPath = relativeToRepo ?? normalized;
+  const segments = reservedPath.split('/').filter((part) => part !== '');
 
-    for (const reserved of ['.git', PROJECT_CONFIG_DIR]) {
-      if (segments.includes(reserved)) {
-        throw new ConfigError(
-          `${where}.${key}: must not write inside a "${reserved}" directory. ` +
-            `crbuddy moves its output paths aside and overwrites them, and ` +
-            `"${reserved}" holds git's or crbuddy's own state - including ` +
-            `crbuddy's stash of your previous report. This applies anywhere ` +
-            `in the path, not just at the repository root, because an ` +
-            `output path may now point outside the repository. Choose a ` +
-            `directory that is not named "${reserved}".`,
-        );
-      }
+  for (const reserved of ['.git', PROJECT_CONFIG_DIR]) {
+    if (segments.includes(reserved)) {
+      throw new ConfigError(
+        `${where}.${key}: must not write inside a "${reserved}" directory. ` +
+          `crbuddy moves its output paths aside and overwrites them, and ` +
+          `"${reserved}" holds git's or crbuddy's own state - including ` +
+          `crbuddy's stash of your previous report. This applies anywhere ` +
+          `in the path, not just at the repository root, because an ` +
+          `output path may now point outside the repository. Choose a ` +
+          `directory that is not named "${reserved}".`,
+      );
     }
-
-    const absolute = path.resolve(repoRoot ?? process.cwd(), concrete);
-
-    if (absolute === path.parse(absolute).root) {
-      throw new ConfigError(`${where}.${key}: must not be a filesystem root.`);
-    }
-
-    const named = segments.at(-1);
-
-    if (named === undefined || named === '.' || named === '..') {
-      throw new ConfigError(`${where}.${key}: must name a file.`);
-    }
-
-    // Stashing is a move followed by recursive disposal after a successful
-    // run. Accepting a directory here would therefore move the whole tree
-    // into crbuddy's holding area and delete it as if it were an old report.
-    // Inspect the directory entry itself: a final symlink is intentionally
-    // moved as a link rather than followed (see canonicalOutputPath).
-    if (repoRoot && existsSync(concrete) && lstatSync(concrete).isDirectory()) {
-      throw new ConfigError(`${where}.${key}: must name a file, not a directory.`);
-    }
-
-    normalizedPaths.push(normalized);
   }
 
-  if (normalizedPaths[0] === normalizedPaths[1]) {
-    throw new ConfigError(
-      `${where}.merged and ${where}.raw resolve to the same file.`,
-    );
+  const absolute = path.resolve(repoRoot ?? process.cwd(), concrete);
+
+  if (absolute === path.parse(absolute).root) {
+    throw new ConfigError(`${where}.${key}: must not be a filesystem root.`);
+  }
+
+  const named = segments.at(-1);
+
+  if (named === undefined || named === '.' || named === '..') {
+    throw new ConfigError(`${where}.${key}: must name a file.`);
+  }
+
+  // Stashing is a move followed by recursive disposal after a successful
+  // run. Accepting a directory here would therefore move the whole tree
+  // into crbuddy's holding area and delete it as if it were an old report.
+  // Inspect the directory entry itself: a final symlink is intentionally
+  // moved as a link rather than followed (see canonicalOutputPath).
+  if (repoRoot && existsSync(concrete) && lstatSync(concrete).isDirectory()) {
+    throw new ConfigError(`${where}.${key}: must name a file, not a directory.`);
   }
 }
 
@@ -452,12 +460,9 @@ export function canonicalOutputPath(repoRoot: string, entry: string): string {
 
 export function resolveOutputPaths(
   repoRoot: string,
-  output: { merged: string; raw: string },
-): { merged: string; raw: string } {
-  return {
-    merged: canonicalOutputPath(repoRoot, output.merged),
-    raw: canonicalOutputPath(repoRoot, output.raw),
-  };
+  output: { merged: string },
+): { merged: string } {
+  return { merged: canonicalOutputPath(repoRoot, output.merged) };
 }
 
 /** Resolve the longest existing prefix and preserve any missing suffix. */
@@ -533,40 +538,6 @@ function validateTarget(value: unknown, where: string): Target {
   throw new ConfigError(
     `${where}.target: expected "uncommitted" or { "base": "<ref>" }.`,
   );
-}
-
-function validateMerge(value: unknown, where: string): MergeConfig {
-  if (value === undefined) {
-    return { enabled: false, vendor: '', model: '' };
-  }
-
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ConfigError(`${where}.merge: expected an object.`);
-  }
-
-  const raw = value as Record<string, unknown>;
-
-  rejectUnknown(raw, MERGE_KEYS, `${where}.merge`);
-
-  const enabled = bool(raw.enabled, false, `${where}.merge.enabled`);
-
-  if (!enabled) {
-    return {
-      enabled: false,
-      vendor: typeof raw.vendor === 'string' ? raw.vendor : '',
-      model: typeof raw.model === 'string' ? raw.model : '',
-    };
-  }
-
-  const vendor = str(raw.vendor, undefined, `${where}.merge.vendor`);
-  const model = str(raw.model, undefined, `${where}.merge.model`);
-
-  return {
-    enabled: true,
-    vendor,
-    model,
-    effort: raw.effort === undefined ? 'high' : effort(raw.effort, `${where}.merge.effort`),
-  };
 }
 
 function validatePanel(value: unknown, where: string): PanelEntry[] {

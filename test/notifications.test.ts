@@ -55,11 +55,9 @@ async function fixture(t: TestContext) {
 
   const config = {
     configVersion: 1,
-    output: { destination: 'file', merged: 'review.md', raw: 'review.raw.md' },
+    output: { destination: 'file', merged: 'review.md' },
     target: 'uncommitted',
     timeoutMs: 5_000,
-    mergeTimeoutMs: 5_000,
-    merge: { enabled: false, vendor: 'codex', model: 'merge-fail' },
     panel: [{ id: 'one', vendor: 'codex', model: 'ok' }],
   };
   const saveConfig = () => writeFile(configFile, JSON.stringify(config));
@@ -279,20 +277,32 @@ test('a missing reviewer executable does not suppress another launched reviewer 
   assert.equal(result.posts[0]!.body, 'sample-repo: review complete (partial)');
 });
 
-test('partial reviewers and failed consolidation keep default and strict exits', async (t) => {
-  for (const mergeFailure of [false, true]) {
-    const f = await fixture(t);
-    if (mergeFailure) f.config.merge.enabled = true;
-    else f.config.panel.push({ id: 'two', vendor: 'codex', model: 'fail' });
-    await f.saveConfig();
-    for (const strict of [false, true]) {
-      const result = await f.run(strict ? ['go', '--strict'] : ['go']);
-      assert.equal(result.code, strict ? 2 : 0, result.stderr);
-      assert.equal(result.posts.length, 1);
-      assert.equal(result.posts[0]!.body, 'sample-repo: review complete (partial)');
-      if (mergeFailure) assert.match(result.stderr, /Consolidation failed/);
-    }
+test('partial reviewers keep default and strict exits', async (t) => {
+  const f = await fixture(t);
+  f.config.panel.push({ id: 'two', vendor: 'codex', model: 'fail' });
+  await f.saveConfig();
+  for (const strict of [false, true]) {
+    const result = await f.run(strict ? ['go', '--strict'] : ['go']);
+    assert.equal(result.code, strict ? 2 : 0, result.stderr);
+    assert.equal(result.posts.length, 1);
+    assert.equal(result.posts[0]!.body, 'sample-repo: review complete (partial)');
   }
+});
+
+test('a config with consolidation keys still reviews and says they are ignored', async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.configFile, JSON.stringify({
+    ...f.config,
+    output: { ...f.config.output, raw: 'review.raw.md' },
+    mergeTimeoutMs: 5_000,
+    merge: { enabled: true, vendor: 'codex', model: 'ok' },
+  }));
+  const result = await f.run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /Ignoring merge, mergeTimeoutMs, output\.raw in /);
+  assert.equal(result.posts.length, 1);
+  assert.ok(existsSync(path.join(f.repo, 'review.md')));
+  assert.ok(!existsSync(path.join(f.repo, 'review.raw.md')));
 });
 
 test('missing, disabled and malformed global settings do not prevent a review or send a POST', async (t) => {
@@ -354,32 +364,25 @@ test('setup, help, version, diagnostics and argument/config errors never notify'
   assert.equal(existsSync(f.launchedFile), false);
 });
 
-test('graceful first SIGINT during reviewers or consolidation suppresses the push', async (t) => {
-  for (const merge of [false, true]) {
-    const f = await fixture(t);
-    const model = merge ? 'merge-slow' : 'slow';
-    if (merge) {
-      f.config.merge.enabled = true;
-      f.config.merge.model = model;
-    } else f.config.panel[0]!.model = model;
-    await f.saveConfig();
-    await writeFile(path.join(f.repo, 'review.md'), 'previous report');
-    const result = await f.run(['go'], { CRB_TEST_INTERRUPT: model });
-    assert.equal(result.code, 130, result.stderr);
-    assert.match(result.stderr, /Interrupted/);
-    assert.deepEqual(result.posts, []);
-    assert.equal(await readFile(path.join(f.repo, 'review.md'), 'utf8'), 'previous report');
-  }
+test('graceful first SIGINT during reviewers suppresses the push', async (t) => {
+  const f = await fixture(t);
+  f.config.panel[0]!.model = 'slow';
+  await f.saveConfig();
+  await writeFile(path.join(f.repo, 'review.md'), 'previous report');
+  const result = await f.run(['go'], { CRB_TEST_INTERRUPT: 'slow' });
+  assert.equal(result.code, 130, result.stderr);
+  assert.match(result.stderr, /Interrupted/);
+  assert.deepEqual(result.posts, []);
+  assert.equal(await readFile(path.join(f.repo, 'review.md'), 'utf8'), 'previous report');
 });
 
 test('terminal success and partial outcomes notify after printing and before clipboard input', async (t) => {
-  for (const outcome of ['complete', 'reviewer-partial', 'merge-partial']) {
+  for (const outcome of ['complete', 'reviewer-partial']) {
     const f = await fixture(t);
     f.config.output.destination = 'terminal';
     if (outcome === 'reviewer-partial') {
       f.config.panel.push({ id: 'two', vendor: 'codex', model: 'fail' });
     }
-    if (outcome === 'merge-partial') f.config.merge.enabled = true;
     await f.saveConfig();
 
     for (const strict of [false, true]) {
@@ -537,8 +540,8 @@ test('piped init appends notification answers, config Enter retains them, and No
   await rm(f.configFile);
   await rm(f.settingsFile);
   // Existing review answers: vendor, model, effort, instructions, more,
-  // destination, consolidation, location, target. Notification answers follow.
-  const reviewAnswers = ['', '', '', 'n', 'n', '', 'n', '', ''];
+  // destination, location, target. Notification answers follow.
+  const reviewAnswers = ['', '', '', 'n', 'n', '', '', ''];
   const first = await f.run(['init', '--global'], {},
     [...reviewAnswers, 'y', '', 'https://example.invalid/crbuddy-invalid-secret-topic', endpoint, ''].join('\n'));
   assert.equal(first.code, 0, first.stdout + first.stderr);
@@ -549,9 +552,9 @@ test('piped init appends notification answers, config Enter retains them, and No
   assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, 'gpt-6-sol');
   assert.doesNotMatch(await readFile(globalConfig, 'utf8'), /notifications|ntfy/);
 
-  // Editing retains the panel, adds none, keeps file output and no merge,
-  // then accepts location and target. Three empty notification answers keep ntfy.
-  const editAnswers = ['', 'n', '', '', '', ''];
+  // Editing retains the panel, adds none, keeps file output, then accepts
+  // location and target. Three empty notification answers keep ntfy.
+  const editAnswers = ['', 'n', '', '', ''];
   const edit = await f.run(['config', '--global'], {}, [...editAnswers, '', '', '', ''].join('\n'));
   assert.equal(edit.code, 0, edit.stdout + edit.stderr);
   assert.match(edit.stdout, /Notify you.*\[Y\/n\]/);
@@ -583,7 +586,7 @@ test('piped setup EOF at the new questions cancels without partially saving eith
   const f = await fixture(t);
   await rm(f.configFile);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
-  const reviewAnswers = ['', '', '', 'n', 'n', '', 'n', '', '1'];
+  const reviewAnswers = ['', '', '', 'n', 'n', '', '', '1'];
   for (const notifications of [false, true]) {
     if (notifications) await writeFile(f.settingsFile, JSON.stringify(enabled));
     else await rm(f.settingsFile, { force: true });
@@ -599,59 +602,22 @@ test('piped setup EOF at the new questions cancels without partially saving eith
   }
 });
 
-test('piped Codex model numbers match the documented Astra and Sol choices', async (t) => {
+test('piped Codex model numbers match the documented choices, with Other last', async (t) => {
   const f = await fixture(t);
   await rm(f.configFile);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
-  for (const [answer, model] of [['1', 'gpt-6-astra'], ['2', 'gpt-6-sol'], ['3', 'gpt-6-luna']]) {
+  for (const [answers, model] of [
+    [['1'], 'gpt-6-astra'],
+    [['2'], 'gpt-6-sol'],
+    [['3'], 'gpt-6-luna'],
+    [['4', 'my-custom-model'], 'my-custom-model'],
+  ] as const) {
     await rm(globalConfig, { force: true });
     const result = await f.run(['init', '--global'], {},
-      ['', answer, '', 'n', 'n', '', 'n', '', '', 'n'].join('\n'));
+      ['', ...answers, '', 'n', 'n', '', '', '', 'n'].join('\n'));
     assert.equal(result.code, 0, result.stdout + result.stderr);
     assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, model);
     assert.deepEqual(result.posts, []);
   }
 });
 
-test('piped consolidation defaults work after a vendor change or re-enabling without an extra model answer', async (t) => {
-  const f = await fixture(t);
-  for (const previous of [
-    { enabled: true, vendor: 'claude', model: 'opus' },
-    { enabled: false, vendor: '', model: '' },
-  ]) {
-    f.config.merge = previous;
-    await f.saveConfig();
-    // Keep panel, add none, file output, enable consolidation, keep location;
-    // accept vendor/model/effort and target; decline gitignore and notifications.
-    const answers = ['', 'n', '', 'y', '', '', '', '', '', 'n', 'n'];
-    const result = await f.run(['config', '--project'], {}, answers.join('\n'));
-    assert.equal(result.code, 0, result.stdout + result.stderr);
-    assert.doesNotMatch(result.stdout, /Model id/);
-    assert.deepEqual(JSON.parse(await readFile(f.configFile, 'utf8')).merge, {
-      enabled: true, vendor: 'codex', model: 'gpt-6-sol', effort: 'high',
-    });
-    assert.deepEqual(result.posts, []);
-  }
-});
-
-test('piped custom consolidation models preserve answer order and keep Other at its existing number', async (t) => {
-  const f = await fixture(t);
-  for (const [previous, answer, typed, model] of [
-    ['my-custom-id', '', [], 'my-custom-id'],
-    ['my-custom-id', '4', ['replacement-model'], 'replacement-model'],
-    [' \t ', '4', ['', 'replacement-model'], 'replacement-model'],
-  ] as const) {
-    f.config.merge = { enabled: previous.trim() !== '', vendor: 'codex', model: previous };
-    await f.saveConfig();
-    // Keep panel, add none, file output, enable consolidation, keep location/vendor.
-    // After the model answer(s), choose medium effort and a named branch target.
-    const answers = ['', 'n', '', 'y', '', '', answer, ...typed, '2', '2', 'review-base', 'n', 'n'];
-    const result = await f.run(['config', '--project'], {}, answers.join('\n'));
-    assert.equal(result.code, 0, result.stdout + result.stderr);
-    const written = JSON.parse(await readFile(f.configFile, 'utf8'));
-    assert.deepEqual(written.merge, { enabled: true, vendor: 'codex', model, effort: 'medium' });
-    assert.deepEqual(written.target, { base: 'review-base' });
-    if (answer === '') assert.doesNotMatch(result.stdout, /Model id/);
-    assert.deepEqual(result.posts, []);
-  }
-});

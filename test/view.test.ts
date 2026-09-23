@@ -21,10 +21,8 @@ function config(model: string, scopeTarget: 'uncommitted' | { base: string }): C
     target: scopeTarget,
     refuseIfOutputExists: DEFAULTS.refuseIfOutputExists,
     timeoutMs: DEFAULTS.timeoutMs,
-    mergeTimeoutMs: DEFAULTS.mergeTimeoutMs,
     maxConcurrent: DEFAULTS.maxConcurrent,
     maxDiffBytes: DEFAULTS.maxDiffBytes,
-    merge: { enabled: false, vendor: '', model: '' },
     panel: [
       {
         id: `codex-${model}`,
@@ -147,7 +145,6 @@ test('view applies the same repo-root output validation as go', async () => {
     broken.output = {
       destination: 'file',
       merged: 'reports',
-      raw: 'review.raw.md',
     };
     await writeJson(projectConfigPath(repoRoot), broken);
 

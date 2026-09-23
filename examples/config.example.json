@@ -1,21 +1,13 @@
 {
   "configVersion": 1,
   "output": {
-    "merged": "CODE-REVIEW-HANDOFF.md",
-    "raw": "CODE-REVIEW-HANDOFF.raw.md"
+    "merged": "CODE-REVIEW-HANDOFF.md"
   },
   "target": "uncommitted",
   "refuseIfOutputExists": false,
   "timeoutMs": 3600000,
-  "mergeTimeoutMs": 3600000,
   "maxConcurrent": 0,
   "maxDiffBytes": 2000000,
-  "merge": {
-    "enabled": true,
-    "vendor": "claude",
-    "model": "opus",
-    "effort": "high"
-  },
   "panel": [
     { "vendor": "claude", "model": "opus", "effort": "max" },
     { "vendor": "codex", "model": "gpt-6-sol", "effort": "xhigh" },

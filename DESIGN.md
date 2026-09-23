@@ -75,21 +75,13 @@ Named fields only. Model and effort identifiers are vendor-native strings.
 {
   "configVersion": 1,
   "output": {
-    "merged": "CODE-REVIEW-HANDOFF.md",
-    "raw": "CODE-REVIEW-HANDOFF.raw.md"
+    "merged": "CODE-REVIEW-HANDOFF.md"
   },
   "target": "uncommitted",
   "refuseIfOutputExists": false,
   "timeoutMs": 3600000,
-  "mergeTimeoutMs": 3600000,
   "maxConcurrent": 0,
   "maxDiffBytes": 2000000,
-  "merge": {
-    "enabled": true,
-    "vendor": "claude",
-    "model": "opus",
-    "effort": "high"
-  },
   "panel": [
     {
       "id": "claude-opus",
@@ -107,11 +99,11 @@ Named fields only. Model and effort identifiers are vendor-native strings.
 }
 ```
 
-Unknown keys are fatal. Panel IDs are stable provenance labels. `vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not model. It must never be able to weaken read-only, sandbox, approval, or permission policy; those controls are owned by crbuddy even when config is project-local.
+Unknown keys are fatal, except keys left by the removed consolidation pass (§8). Panel IDs are stable provenance labels. `vendorArgs` is an escape hatch for non-safety CLI flags crbuddy does not model. It must never be able to weaken read-only, sandbox, approval, or permission policy; those controls are owned by crbuddy even when config is project-local.
 
 ### Wizard behavior
 
-The wizard detects installed vendor CLIs, builds the panel, configures consolidation, and chooses the target.
+The wizard detects installed vendor CLIs, builds the panel, chooses where the report goes, and chooses the target. Accepting every default adds one reviewer per installed CLI.
 
 Notification questions come last, after review and `.gitignore` questions, and
 always edit the global preference regardless of review-config scope. They
@@ -255,20 +247,20 @@ The help surface is adapter-specific. “Deepest subcommand” is not inherently
 
 ### Blocking and concurrency
 
-One `crbuddy go`, one terminal, wait. Discrete events are appended to terminal output, with a TTY-only live status line and terminal bell after successful completion. Recognized terminals with OSC 9;4 support also receive native indeterminate progress through consolidation and output commit. Detection is conservative because OSC 9;4 collides with the older OSC 9 notification protocol: Windows Terminal and ConEmu are identified by their environment markers, while iTerm2 and Ghostty are version-gated. VS Code receives the progress state, but stock VS Code does not render it unless `${progress}` is present in the configured terminal tab title or description.
+One `crbuddy go`, one terminal, wait. Discrete events are appended to terminal output, with a TTY-only live status line and terminal bell after successful completion. Recognized terminals with OSC 9;4 support also receive native indeterminate progress through output commit. Detection is conservative because OSC 9;4 collides with the older OSC 9 notification protocol: Windows Terminal and ConEmu are identified by their environment markers, while iTerm2 and Ghostty are version-gated. VS Code receives the progress state, but stock VS Code does not render it unless `${progress}` is present in the configured terminal tab title or description.
 
 Panel entries run concurrently by default. `maxConcurrent: 0` means unlimited; the semaphore is still part of the execution path so a cap is a policy setting rather than an architectural rewrite.
 
 ### Timeouts and cancellation
 
-Every review lane has a timeout; the consolidation step has a separate timeout.
+Every review lane has a timeout.
 
 Ctrl-C aborts the run and restores prior output. A second interrupt escalates process-tree termination.
 
 Optional ntfy delivery has one terminal hook after run cleanup, gated on a
 reviewer process having launched. It reports complete, partial or failed using
-the existing result semantics, including consolidation fallback. Pre-launch
-failures and cancellation during reviewer/consolidation work do not notify.
+the existing result semantics. Pre-launch failures and cancellation during
+reviewer work do not notify.
 The final report is committed or printed before delivery; optional clipboard
 UI runs only after delivery settles. Closing that menu, including with Ctrl-C,
 cannot send another notification. Delivery uses built-in `fetch` in a short-lived
@@ -294,10 +286,9 @@ A per-repository lock prevents two simultaneous crbuddy runs from racing output 
 
 ### Output lifecycle
 
-`output.merged` is always the deliverable.
+`output.merged` is the report file.
 
-- consolidation succeeds → write merged deliverable plus raw audit file
-- consolidation disabled or fails → write unmerged reviews to the merged-path filename
+- at least one review succeeds → write every review, verbatim, to that file
 - total reviewer failure → restore prior output and write no fresh report
 
 Stage temp files on the destination filesystem, then rename into place.
@@ -311,17 +302,11 @@ reviewers run, keep the previous report in its holding directory rather than
 replace the newer file. Temp-litter cleanup is likewise restricted to the
 canonical destinations approved during preflight and refuses path redirection.
 
-Panel spool files are removed before consolidation starts. The consolidator
-gets a fresh, unique working directory in the OS temp area rather than a
-sibling of the panel scratch directory.
-
 ### Exit codes
 
 - `0` - usable report produced; partial success also exits 0 by default
 - `1` - no usable review produced / fatal startup failure
 - `2` - partial success when `--strict` is requested
-
-Merge failure is separate from reviewer failure and counts as partial success when strict mode is enabled.
 
 ---
 
@@ -333,52 +318,32 @@ Each adapter supplies advisory values and a default for the wizard. Config valid
 
 Native Claude review is additionally deterministic when effort is omitted from a hand-edited config: the adapter explicitly applies its documented default (`high`) rather than allowing Claude Code to reuse prior interactive state.
 
-The applied value, or lack of one, is recorded in output provenance.
-
 ---
 
-## 8. Consolidation
+## 8. Consolidation (removed in 0.4.0)
 
-The consolidation model has **no authority to remove or rewrite a source finding**.
+Earlier versions could run an extra model pass that grouped findings from
+different reviewers that appeared to describe the same defect, writing the
+grouped report plus a second raw file. It never had authority to delete or
+rewrite a finding, but it still cost a model run, a timeout, a failure mode,
+and a second output file to do something the agent receiving the report
+already does as it reads. crbuddy's job is to run the reviews and hand every
+one of them over.
 
-The process has two passes:
-
-1. mechanically segment each successful review into enumerated findings while preserving all text
-2. ask a model only for relationships between finding IDs that appear to describe the same underlying defect
-
-The model does not decide correctness. It is not shown the repository.
-
-Validation requires:
-
-- every input finding ID present
-- each ID exactly once
-- no unknown IDs
-- no empty clusters
-
-Invalid consolidation is rejected and the deliverable falls back to unmerged review output.
-
-Clusters are ordered by the number of distinct successful review lanes represented. Agreement is a reading-order heuristic, not a confidence score.
+Configs from those versions still load. Their `merge`, `mergeTimeoutMs`, and
+`output.raw` keys are the one exception to unknown keys being fatal: they are
+ignored, `crbuddy go` says so, and `crbuddy config` saves the file without them.
 
 ---
 
 ## 9. Output format
 
-Both merged and raw output are rendered from structured in-memory data. Markdown is never parsed back into internal state.
+The report is rendered from structured in-memory data. Markdown is never parsed back into internal state.
 
-Consolidated output has YAML frontmatter recording at least:
-
-- crbuddy version and run ID
-- generated timestamp
-- target kind, snapshot/base/range metadata, digest, file/byte counts
-- configured/succeeded/failed lane counts
-- lane failures
-- per-lane CLI version, model, applied effort, and wall-clock time
-- consolidation state and failure reason when applicable
-
-Unconsolidated output omits the verbose frontmatter. Its visible report block
-retains the review count, failures, warnings, target range, and file count; the
-per-review markers retain vendor, model, and stable lane IDs. A compact hidden
-marker retains the run ID so a raw/consolidated mismatch remains detectable.
+It begins with a visible report block giving the review count, failures,
+warnings, target range, and file count; per-review markers retain vendor,
+model, and stable lane IDs, and a compact hidden marker retains the run ID.
+Each successful review follows verbatim, in configured order.
 
 HTML comments delimit human-navigation sections, but they are not parser boundaries because verbatim model output can contain the same strings.
 

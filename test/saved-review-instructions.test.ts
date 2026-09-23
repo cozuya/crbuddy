@@ -35,10 +35,8 @@ function existingConfig(savedReviewInstructions?: string): Config {
     ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
     refuseIfOutputExists: DEFAULTS.refuseIfOutputExists,
     timeoutMs: DEFAULTS.timeoutMs,
-    mergeTimeoutMs: DEFAULTS.mergeTimeoutMs,
     maxConcurrent: DEFAULTS.maxConcurrent,
     maxDiffBytes: DEFAULTS.maxDiffBytes,
-    merge: { enabled: false, vendor: '', model: '' },
     panel: [
       {
         id: 'old-reviewer',

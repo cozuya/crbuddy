@@ -97,7 +97,7 @@ test('existing directories and filesystem roots are rejected as output files', a
   assert.throws(
     () =>
       assertUsableOutput(
-        { merged: 'reports', raw: 'review.raw.md' },
+        { merged: 'reports' },
         'output',
         repoRoot,
       ),
@@ -108,7 +108,7 @@ test('existing directories and filesystem roots are rejected as output files', a
   assert.throws(
     () =>
       assertUsableOutput(
-        { merged: path.parse(repoRoot).root, raw: 'review.raw.md' },
+        { merged: path.parse(repoRoot).root },
         'output',
         repoRoot,
       ),
@@ -139,7 +139,7 @@ test('a symlink alias cannot hide a reserved output directory', async () => {
   assert.throws(
     () =>
       assertUsableOutput(
-        { merged: 'apparently-safe/config', raw: 'review.raw.md' },
+        { merged: 'apparently-safe/config' },
         'output',
         repoRoot,
       ),

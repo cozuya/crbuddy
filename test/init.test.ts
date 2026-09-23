@@ -9,13 +9,12 @@ import { DEFAULT_OUTPUT } from '../src/config/schema.js';
 
 const repoRoot = path.resolve(path.join('/', 'work', 'projects', 'crbuddy'));
 
-test('the two report filenames keep their defaults wherever they land', () => {
+test('the report filename keeps its default wherever it lands', () => {
   assert.deepEqual(inDirectory('.'), { ...DEFAULT_OUTPUT });
 
   assert.deepEqual(inDirectory('..'), {
     destination: 'file',
     merged: `../${DEFAULT_OUTPUT.merged}`,
-    raw: `../${DEFAULT_OUTPUT.raw}`,
   });
 });
 
@@ -97,13 +96,12 @@ test('without a repository root the answer is stored absolute', () => {
   assert.ok(path.isAbsolute(stored), stored);
 });
 
-test('re-running config keeps filenames a user already chose', () => {
+test('re-running config keeps a filename the user already chose', () => {
   // Accepting the location a config is already using must not rename its
-  // files out from under whatever consumes them.
+  // report out from under whatever consumes it.
   const existing = {
     destination: 'file' as const,
     merged: 'REVIEW.md',
-    raw: 'REVIEW.raw.md',
   };
 
   assert.deepEqual(inDirectory('.', existing), existing);
@@ -111,7 +109,6 @@ test('re-running config keeps filenames a user already chose', () => {
   assert.deepEqual(inDirectory('..', existing), {
     destination: 'file',
     merged: '../REVIEW.md',
-    raw: '../REVIEW.raw.md',
   });
 
   // A directory change keeps the names but moves them.
@@ -122,21 +119,3 @@ test('with no existing config the defaults are used', () => {
   assert.equal(inDirectory('.').merged, DEFAULT_OUTPUT.merged);
 });
 
-test('two same-named reports in different directories do not collapse', () => {
-  // `reports/a/REVIEW.md` + `reports/b/REVIEW.md` are two files. Keeping
-  // only the basenames would make them one, and the wizard would write a
-  // config that `crbuddy go` refuses to load.
-  const existing = {
-    destination: 'file' as const,
-    merged: 'reports/a/REVIEW.md',
-    raw: 'reports/b/REVIEW.md',
-  };
-
-  const collapsed = inDirectory('.', existing);
-
-  assert.notEqual(collapsed.merged, collapsed.raw);
-  assert.equal(collapsed.merged, 'REVIEW.md');
-  assert.equal(collapsed.raw, 'REVIEW.raw.md');
-
-  assert.doesNotThrow(() => assertUsableOutput(collapsed, 'output'));
-});

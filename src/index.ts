@@ -12,7 +12,7 @@ import { runDoctor } from './commands/doctor.js';
 import { runView } from './commands/view.js';
 import { configureClaudeBackgroundWait } from './run/claude-background-wait.js';
 
-const HELP = `crbuddy - fan one code review across several agent CLIs, then consolidate.
+const HELP = `crbuddy - fan one code review across several agent CLIs, then hand off every review.
 
 First run: use \`crb init\` to set up your code review panel, then \`crb go\`
 to run it.
@@ -28,7 +28,7 @@ Options for \`go\`:
   --force           Run even if the diff exceeds maxDiffBytes.
   --whole-checkout  Review the whole checkout when the target diff is empty;
                     required when running without a terminal.
-  --strict          Exit 2 when any run or the merge fails (default: exit 0).
+  --strict          Exit 2 when any run fails (default: exit 0).
 
 Other:
   --help, -h   This text.
@@ -38,7 +38,7 @@ The optional positional argument to \`go\` overrides the review instructions
 on every panel entry, for a one-off run without editing config.
 
 Exit codes:
-  0  panel completed (and merge, if enabled)
+  0  panel completed
   1  no usable review produced
   2  partial success, only with --strict
 `;

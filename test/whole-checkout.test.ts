@@ -1,20 +1,10 @@
 import assert from 'node:assert/strict';
-import path from 'node:path';
 import { test } from 'node:test';
 
 import { claudeAdapter, codexAdapter, geminiAdapter } from '../src/adapters/vendors.js';
 import { ResolvedTarget } from '../src/git/target.js';
-import {
-  ReportContext,
-  RunRecord,
-  renderFrontmatter,
-  renderMerged,
-  renderRaw,
-} from '../src/output/render.js';
-import {
-  reportRelativePath,
-  shouldReviewWholeCheckout,
-} from '../src/commands/go.js';
+import { ReportContext, RunRecord, renderReport } from '../src/output/render.js';
+import { shouldReviewWholeCheckout } from '../src/commands/go.js';
 
 const supports = () => true;
 
@@ -64,7 +54,6 @@ function context(overrides: Partial<ReportContext> = {}): ReportContext {
     generated: '2026-01-01T00:00:00.000Z',
     target: empty,
     runs: [run],
-    mergeState: 'off',
     configSource: '.crbuddy/config.json',
     configScope: 'project',
     warnings: [],
@@ -122,7 +111,7 @@ test('the instructions reach the reviewer intact, without diff framing', () => {
 });
 
 test('the report identifies the live whole-checkout run and its launch snapshot', () => {
-  const report = renderRaw(context({ wholeCheckout: true }));
+  const report = renderReport(context({ wholeCheckout: true }));
 
   assert.match(report, /no diff, so the reviews below cover the whole checkout/);
   assert.match(report, /Checkout snapshot captured at launch: `4{40}`/);
@@ -134,7 +123,7 @@ test('the report identifies the live whole-checkout run and its launch snapshot'
 
 test('whole-checkout reports use the launch-time live-checkout snapshot', () => {
   const checkoutLaunchSnapshot = '5555555555555555555555555555555555555555';
-  const report = renderRaw(
+  const report = renderReport(
     context({ wholeCheckout: true, checkoutLaunchSnapshot }),
   );
 
@@ -145,26 +134,8 @@ test('whole-checkout reports use the launch-time live-checkout snapshot', () => 
   assert.ok(!report.includes(`launch: \`${empty.snapshot}\``), report);
 });
 
-test('whole-checkout frontmatter labels the launch snapshot explicitly', () => {
-  const checkoutLaunchSnapshot = '5555555555555555555555555555555555555555';
-  const frontmatter = renderFrontmatter(
-    context({ wholeCheckout: true, checkoutLaunchSnapshot }),
-  );
-
-  assert.match(frontmatter, /target:\n    kind: whole-checkout\n/);
-  assert.match(
-    frontmatter,
-    new RegExp(`    launchSnapshot: ${checkoutLaunchSnapshot}`),
-  );
-  assert.match(frontmatter, /    requestedKind: uncommitted/);
-  assert.match(frontmatter, new RegExp(`    requestedSnapshot: ${empty.snapshot}`));
-  assert.ok(!frontmatter.includes('    digest:'), frontmatter);
-  assert.ok(!frontmatter.includes('    files:'), frontmatter);
-  assert.ok(!frontmatter.includes('    bytes:'), frontmatter);
-});
-
 test('an ordinary run still reports its range and file count', () => {
-  const report = renderRaw(
+  const report = renderReport(
     context({
       target: { ...empty, files: [{ status: 'M', path: 'src/a.ts' }], bytes: 4 },
     }),
@@ -174,24 +145,15 @@ test('an ordinary run still reports its range and file count', () => {
   assert.ok(!report.includes('whole checkout'), report);
 });
 
-test('unconsolidated reports omit verbose provenance frontmatter', () => {
-  const deliverable = renderRaw(context());
-  const auditTrail = renderRaw(context({ mergeState: 'ok' }));
-  const mergeFallback = renderRaw(
-    context({ mergeState: 'failed', mergeReason: 'invalid clusters' }),
-  );
+test('the report has no provenance frontmatter and no consolidation notice', () => {
+  const report = renderReport(context());
 
-  assert.ok(deliverable.startsWith('# Code review\n'));
-  assert.ok(auditTrail.startsWith('# Code review - unmerged reviews\n'));
-  assert.ok(mergeFallback.startsWith('# Code review\n'));
-
-  for (const report of [deliverable, auditTrail, mergeFallback]) {
-    assert.ok(!report.startsWith('---\n'), report);
-    assert.ok(!report.includes('\ncrbuddy:\n'), report);
-    assert.match(report, /<!-- crbuddy:raw runId=abc12345 -->/);
-    assert.match(report, /<!-- crbuddy:report -->/);
-    assert.match(report, /Reviewed `/);
-  }
+  assert.ok(report.startsWith('# Code review\n'), report);
+  assert.ok(!report.includes('\ncrbuddy:\n'), report);
+  assert.ok(!/consolidat/i.test(report), report);
+  assert.match(report, /<!-- crbuddy:raw runId=abc12345 -->/);
+  assert.match(report, /<!-- crbuddy:report -->/);
+  assert.match(report, /Reviewed `/);
 });
 
 test(
@@ -205,7 +167,7 @@ test(
       diagnostics: 'Usage: codex exec resume [OPTIONS]',
     };
 
-    const report = renderRaw(context({ runs: [failed] }));
+    const report = renderReport(context({ runs: [failed] }));
 
     assert.match(report, /This run did not complete: timeout/);
     assert.match(
@@ -215,57 +177,6 @@ test(
     assert.match(report, /```text\nUsage: codex exec resume \[OPTIONS\]\n```/);
   },
 );
-
-test('the consolidated report links to the unmerged file only when one exists', () => {
-  const clusters = [{ findingIds: ['claude-opus:1'] }];
-  const findings = [
-    {
-      id: 'claude-opus:1',
-      runId: 'claude-opus',
-      title: 'A finding',
-      text: 'A finding.',
-      locations: [],
-    },
-  ];
-
-  const onDisk = renderMerged(
-    context({ mergeState: 'ok', rawPath: 'CODE-REVIEW-HANDOFF.raw.md' }),
-    clusters,
-    findings,
-  );
-
-  assert.match(onDisk, /Unmerged reviews: `CODE-REVIEW-HANDOFF\.raw\.md`/);
-  assert.match(onDisk, /^---\ncrbuddy:\n/);
-  assert.match(onDisk, /\n  kind: consolidated\n/);
-  assert.ok(!onDisk.includes('kind: merged'), onDisk);
-
-  // Terminal mode writes no raw file, so the sentence has to go entirely
-  // rather than render as an empty pair of backticks.
-  const printed = renderMerged(context({ mergeState: 'ok' }), clusters, findings);
-
-  assert.ok(!printed.includes('Unmerged reviews'), printed);
-  assert.ok(!printed.includes('``'), printed);
-});
-
-test('the raw-report link resolves from the consolidated report directory', () => {
-  const repoRoot = path.resolve('repo');
-  const merged = path.resolve('outside', 'deliverable', 'review.md');
-  const raw = path.resolve('outside', 'audit', 'review.raw.md');
-
-  assert.equal(
-    reportRelativePath(repoRoot, merged, raw),
-    '../audit/review.raw.md',
-  );
-});
-
-test('the raw-report link is omitted when filesystem roots differ', {
-  skip: process.platform !== 'win32',
-}, () => {
-  assert.equal(
-    reportRelativePath('C:\\repo', 'D:\\reports\\review.md', 'E:\\audit\\raw.md'),
-    null,
-  );
-});
 
 test('custom instructions still say what the subject is', async () => {
   // With `target: null` there is no range for `genericPrompt` to describe,
