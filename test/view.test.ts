@@ -77,7 +77,7 @@ test('view prefers the repository config and shows global notifications', async 
     await writeJson(globalFile, config('gpt-6-astra', 'uncommitted'));
     await writeJson(
       projectConfigPath(repoRoot),
-      config('gpt-5.6-sol', { base: 'main' }),
+      config('gpt-6-sol', { base: 'main' }),
     );
     await writeJson(settingsFile, {
       notifications: {
@@ -98,7 +98,7 @@ test('view prefers the repository config and shows global notifications', async 
     assert.equal(notes.length, 1);
     assert.equal(notes[0]?.title, 'Configuration');
     assert.match(notes[0]?.message ?? '', /Config: This repository/);
-    assert.match(notes[0]?.message ?? '', /GPT-5\.6 Sol · high/);
+    assert.match(notes[0]?.message ?? '', /GPT-6 Sol · high/);
     assert.doesNotMatch(notes[0]?.message ?? '', /GPT-6 Astra/);
     assert.match(notes[0]?.message ?? '', /Target: Current branch vs main/);
     assert.match(notes[0]?.message ?? '', /Output: Terminal/);

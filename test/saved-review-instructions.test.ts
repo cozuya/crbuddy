@@ -43,7 +43,7 @@ function existingConfig(savedReviewInstructions?: string): Config {
       {
         id: 'old-reviewer',
         vendor: 'codex',
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         effort: 'high',
       },
     ],
@@ -129,7 +129,7 @@ function choiceByLabel<T>(choices: Array<Choice<T>>, label: string): T {
 
 test('config accepts savedReviewInstructions and rejects an empty saved value', () => {
   const config = validate({
-    panel: [{ vendor: 'codex', model: 'gpt-5.6-sol' }],
+    panel: [{ vendor: 'codex', model: 'gpt-6-sol' }],
     savedReviewInstructions: 'Review for correctness.',
   });
 
@@ -137,7 +137,7 @@ test('config accepts savedReviewInstructions and rejects an empty saved value', 
   assert.throws(
     () =>
       validate({
-        panel: [{ vendor: 'codex', model: 'gpt-5.6-sol' }],
+        panel: [{ vendor: 'codex', model: 'gpt-6-sol' }],
         savedReviewInstructions: '   ',
       }),
     /savedReviewInstructions.*non-empty string/,

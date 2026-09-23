@@ -163,11 +163,11 @@ A copyable configuration is shipped in
 
   "panel": [
     { "vendor": "claude", "model": "opus", "effort": "max" },
-    { "vendor": "codex", "model": "gpt-5.6-sol", "effort": "xhigh" },
+    { "vendor": "codex", "model": "gpt-6-sol", "effort": "xhigh" },
     {
       "id": "security",
       "vendor": "gemini",
-      "model": "gemini-2.5-pro",
+      "model": "gemini-3.1-pro-preview",
       "instructions": "Review only for security issues: injection, authz, secrets handling."
     }
   ]
@@ -263,16 +263,23 @@ security boundary or proof that an unknown flag is inert.
 
 ### Models and effort
 
-The Codex model picker offers GPT-6 Astra alongside GPT-5.6 Sol, Terra and Luna.
-Sol remains the default, and “Other…” still accepts arbitrary model IDs. Astra
-must be supported by your installed Codex CLI and account; adding it does not
-raise crbuddy's minimum Codex CLI version.
+The Codex model picker offers GPT-6 Astra, Sol and Luna. GPT-6 Sol is the
+default, and “Other…” still accepts arbitrary model IDs. The GPT-6 models must
+be supported by your installed Codex CLI and account; listing them does not
+raise crbuddy's minimum Codex CLI version. GPT-5.6 models are no longer listed,
+but a config that names one still runs: model IDs are passed through unchecked.
+
+The Gemini picker offers Gemini 3.1 Pro (preview, the default) and Gemini 3.5
+Flash. Gemini 2.5 models are no longer listed.
 Changing the consolidation vendor uses the new vendor's model and effort defaults.
 Re-enabling consolidation without a saved model also uses the vendor's default.
 
-For piped setup, Codex model numbers in v0.3.0 are `1` Astra, `2` Sol, `3` Terra,
-`4` Luna, `5` Other; update scripts that used the v0.2.0 positions. An empty
-model answer still accepts the configured model or, on first setup, Sol.
+For piped setup, Codex model numbers are `1` GPT-6 Astra, `2` GPT-6 Sol,
+`3` GPT-6 Luna, `4` Other; update scripts that used the v0.3.x positions
+(`2` GPT-5.6 Sol, `5` Other). Codex effort
+numbers are `1` low through `5` max, `6` Other: `none` was dropped because no
+current Codex model accepts it. An empty model answer still accepts the
+configured model or, on first setup, GPT-6 Sol.
 A saved custom model appears after Other as the default choice, so retaining it
 uses just one answer. Selecting Other explicitly still asks for a model ID.
 
@@ -280,7 +287,7 @@ Effort values are **vendor-native and passed through verbatim**. There is no
 crbuddy effort vocabulary and no translation.
 
 `crbuddy init` offers each vendor's own values - Claude Code's `low` through
-`max`, Codex's `none` through `max`, nothing at all for a CLI without an
+`max`, Codex's `low` through `max`, nothing at all for a CLI without an
 effort setting - plus an "Other…" escape for anything the shipped list
 doesn't cover. Whatever you pick is written to config and handed to the CLI
 unchanged.

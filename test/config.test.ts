@@ -188,7 +188,7 @@ test('any vendor-native effort string is accepted', () => {
   // require a crbuddy release to become usable.
   for (const level of ['high', 'xhigh', 'max', 'none', 'something-new-in-2027']) {
     const config = validate({
-      panel: [{ vendor: 'codex', model: 'gpt-5.6-sol', effort: level }],
+      panel: [{ vendor: 'codex', model: 'gpt-6-sol', effort: level }],
     });
 
     assert.equal(config.panel[0]?.effort, level);
@@ -203,7 +203,7 @@ test('an empty effort string is still rejected', () => {
 });
 
 test('effort is optional and stays absent when unspecified', () => {
-  const config = validate({ panel: [{ vendor: 'gemini', model: 'gemini-2.5-pro' }] });
+  const config = validate({ panel: [{ vendor: 'gemini', model: 'gemini-3.1-pro-preview' }] });
   assert.equal(config.panel[0]?.effort, undefined);
 });
 

@@ -29,7 +29,7 @@ This is useful when you want independent code review, cross-model code review, o
 
 crbuddy is a local CLI, not a hosted AI service. It holds no model credentials and uses your existing Claude Code, Codex, and Gemini CLI authentication and entitlements.
 
-`crb init` / `crb config` can optionally enable ntfy push notifications when a `crb go` review finishes. Notifications default to off and apply across all repositories. The Codex model picker includes GPT-6 Astra; GPT-5.6 Sol remains the default.
+`crb init` / `crb config` can optionally enable ntfy push notifications when a `crb go` review finishes. Notifications default to off and apply across all repositories. The Codex model picker includes GPT-6 Astra, Sol and Luna; GPT-6 Sol is the default.
 
 For configuration, targeting, consolidation, vendor behavior, and other details, see [`GUIDE.md`](GUIDE.md).
 

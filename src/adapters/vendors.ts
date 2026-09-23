@@ -293,7 +293,7 @@ export const claudeAdapter: Adapter = {
 
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'high',
-  listsStampedFor: '2.1.239',
+  listsStampedFor: '2.1.280',
 
   versionArgs() {
     return ['--version'];
@@ -469,15 +469,16 @@ export const codexAdapter: Adapter = {
 
   models: [
     { id: 'gpt-6-astra', label: 'GPT-6 Astra', hint: 'frontier' },
-    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', hint: 'flagship' },
-    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', hint: 'balanced workhorse' },
-    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', hint: 'fast and cheap' },
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', hint: 'workhorse' },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna', hint: 'fast and cheap' },
   ],
-  defaultModel: 'gpt-5.6-sol',
+  defaultModel: 'gpt-6-sol',
 
-  efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  // `ultra` is omitted: Codex runs it as a costly subagent fan-out rather
+  // than a plain reasoning level. Config still passes it through verbatim.
+  efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'high',
-  listsStampedFor: '0.153.4',
+  listsStampedFor: '0.155.0',
 
   versionArgs() {
     return ['--version'];
@@ -609,10 +610,10 @@ export const geminiAdapter: Adapter = {
   minVersion: '0.1.0',
 
   models: [
-    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', hint: 'deep reasoning' },
-    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', hint: 'fast' },
+    { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (preview)', hint: 'deep reasoning' },
+    { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', hint: 'fast' },
   ],
-  defaultModel: 'gemini-2.5-pro',
+  defaultModel: 'gemini-3.1-pro-preview',
 
   efforts: [],
   defaultEffort: null,

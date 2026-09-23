@@ -546,7 +546,7 @@ test('piped init appends notification answers, config Enter retains them, and No
   assert.deepEqual(first.posts, []);
   assert.deepEqual(JSON.parse(await readFile(f.settingsFile, 'utf8')), enabled);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
-  assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, 'gpt-5.6-sol');
+  assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, 'gpt-6-sol');
   assert.doesNotMatch(await readFile(globalConfig, 'utf8'), /notifications|ntfy/);
 
   // Editing retains the panel, adds none, keeps file output and no merge,
@@ -603,7 +603,7 @@ test('piped Codex model numbers match the documented Astra and Sol choices', asy
   const f = await fixture(t);
   await rm(f.configFile);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
-  for (const [answer, model] of [['1', 'gpt-6-astra'], ['2', 'gpt-5.6-sol']]) {
+  for (const [answer, model] of [['1', 'gpt-6-astra'], ['2', 'gpt-6-sol'], ['3', 'gpt-6-luna']]) {
     await rm(globalConfig, { force: true });
     const result = await f.run(['init', '--global'], {},
       ['', answer, '', 'n', 'n', '', 'n', '', '', 'n'].join('\n'));
@@ -628,7 +628,7 @@ test('piped consolidation defaults work after a vendor change or re-enabling wit
     assert.equal(result.code, 0, result.stdout + result.stderr);
     assert.doesNotMatch(result.stdout, /Model id/);
     assert.deepEqual(JSON.parse(await readFile(f.configFile, 'utf8')).merge, {
-      enabled: true, vendor: 'codex', model: 'gpt-5.6-sol', effort: 'high',
+      enabled: true, vendor: 'codex', model: 'gpt-6-sol', effort: 'high',
     });
     assert.deepEqual(result.posts, []);
   }
@@ -638,14 +638,14 @@ test('piped custom consolidation models preserve answer order and keep Other at 
   const f = await fixture(t);
   for (const [previous, answer, typed, model] of [
     ['my-custom-id', '', [], 'my-custom-id'],
-    ['my-custom-id', '5', ['replacement-model'], 'replacement-model'],
-    [' \t ', '5', ['', 'replacement-model'], 'replacement-model'],
+    ['my-custom-id', '4', ['replacement-model'], 'replacement-model'],
+    [' \t ', '4', ['', 'replacement-model'], 'replacement-model'],
   ] as const) {
     f.config.merge = { enabled: previous.trim() !== '', vendor: 'codex', model: previous };
     await f.saveConfig();
     // Keep panel, add none, file output, enable consolidation, keep location/vendor.
     // After the model answer(s), choose medium effort and a named branch target.
-    const answers = ['', 'n', '', 'y', '', '', answer, ...typed, '3', '2', 'review-base', 'n', 'n'];
+    const answers = ['', 'n', '', 'y', '', '', answer, ...typed, '2', '2', 'review-base', 'n', 'n'];
     const result = await f.run(['config', '--project'], {}, answers.join('\n'));
     assert.equal(result.code, 0, result.stdout + result.stderr);
     const written = JSON.parse(await readFile(f.configFile, 'utf8'));

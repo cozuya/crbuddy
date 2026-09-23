@@ -74,22 +74,22 @@ test('equivalent wizard answers produce the unchanged config schema', async (t) 
     merge: {
       enabled: true,
       vendor: 'codex',
-      model: 'gpt-5.6-sol',
+      model: 'gpt-6-sol',
       effort: 'high',
     },
     panel: [
       {
-        id: 'codex-gpt-5-6-sol',
+        id: 'codex-gpt-6-sol',
         vendor: 'codex',
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         effort: 'high',
       },
     ],
   });
 
   const summary = ui.notes.find((entry) => entry.title === 'Configuration');
-  assert.match(summary?.message ?? '', /Codex CLI \u00b7 GPT-5\.6 Sol \u00b7 high/);
-  assert.doesNotMatch(summary?.message ?? '', /codex-gpt-5-6-sol/);
+  assert.match(summary?.message ?? '', /Codex CLI \u00b7 GPT-6 Sol \u00b7 high/);
+  assert.doesNotMatch(summary?.message ?? '', /codex-gpt-6-sol/);
 });
 
 test('project config warns that external output needs consent on every run', async (t) => {
@@ -129,14 +129,14 @@ test('editing an existing config preserves accepted values', async (t) => {
     merge: {
       enabled: true,
       vendor: 'codex',
-      model: 'gpt-5.6-terra',
+      model: 'gpt-6-luna',
       effort: 'max',
     },
     panel: [
       {
         id: 'careful-review',
         vendor: 'codex',
-        model: 'gpt-5.6-terra',
+        model: 'gpt-6-luna',
         effort: 'xhigh',
         instructions: 'Focus on correctness.',
       },
@@ -177,9 +177,9 @@ test('editing replaces an output filename that is an existing directory', async 
     merge: { enabled: false, vendor: '', model: '' },
     panel: [
       {
-        id: 'codex-gpt-5-6-sol',
+        id: 'codex-gpt-6-sol',
         vendor: 'codex',
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         effort: 'high',
       },
     ],
@@ -227,7 +227,7 @@ test('the Codex model wizard offers Other and retains existing arbitrary model I
     override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
       if (question === 'Model for Codex CLI') {
         assert.equal(choices[0]?.label, 'GPT-6 Astra');
-        assert.equal(choices[initialIndex]?.value, 'gpt-5.6-sol');
+        assert.equal(choices[initialIndex]?.value, 'gpt-6-sol');
         const other = choices.find((choice) => choice.label === 'Other…');
         assert.ok(other && !other.disabled);
         return other.value;
@@ -340,7 +340,7 @@ test('re-enabling consolidation with an empty or whitespace-only model defaults 
       ...DEFAULTS,
       output: { ...DEFAULT_OUTPUT },
       merge: { enabled: false, vendor, model },
-      panel: [{ id: 'reviewer', vendor: 'codex', model: 'gpt-5.6-sol' }],
+      panel: [{ id: 'reviewer', vendor: 'codex', model: 'gpt-6-sol' }],
     };
     await mkdir(path.dirname(configPath));
     await writeFile(configPath, JSON.stringify(config));
@@ -355,7 +355,7 @@ test('re-enabling consolidation with an empty or whitespace-only model defaults 
         if (question === 'Model for Codex CLI') {
           modelPrompts++;
           assert.equal(choices[0]?.value, 'gpt-6-astra');
-          assert.equal(choices[initialIndex]?.value, 'gpt-5.6-sol');
+          assert.equal(choices[initialIndex]?.value, 'gpt-6-sol');
         }
         return super.select(question, choices, initialIndex);
       }
@@ -370,7 +370,7 @@ test('re-enabling consolidation with an empty or whitespace-only model defaults 
     ), 0);
     assert.equal(modelPrompts, 1);
     assert.deepEqual((await readAndValidate(configPath)).merge, {
-      enabled: true, vendor: 'codex', model: 'gpt-5.6-sol', effort: 'high',
+      enabled: true, vendor: 'codex', model: 'gpt-6-sol', effort: 'high',
     });
   }
 });

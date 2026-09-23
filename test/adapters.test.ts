@@ -37,7 +37,7 @@ type VendorName = 'claude' | 'codex' | 'gemini';
 
 function buildWithVendorArgs(vendor: VendorName, vendorArgs: string[]) {
   const common = {
-    model: vendor === 'claude' ? 'opus' : vendor === 'codex' ? 'gpt-5.6-sol' : 'gemini-2.5-pro',
+    model: vendor === 'claude' ? 'opus' : vendor === 'codex' ? 'gpt-6-sol' : 'gemini-3.1-pro-preview',
     repoRoot: '/repo',
     supports,
     vendorArgs,
@@ -146,7 +146,7 @@ test('Codex probes exec-level help where safety/config flags live', () => {
 test('Codex native review uses exec review --uncommitted', () => {
   const invocation = codexAdapter.build({
     operation: { kind: 'review', target: uncommitted },
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-sol',
     effort: 'high',
     repoRoot: '/repo',
     supports,
@@ -162,7 +162,7 @@ test('Codex native review uses exec review --uncommitted', () => {
 test('Codex native branch review uses exec review --base requested branch', () => {
   const invocation = codexAdapter.build({
     operation: { kind: 'review', target: branch },
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-sol',
     effort: 'xhigh',
     repoRoot: '/repo',
     supports,
@@ -179,7 +179,7 @@ test('Codex refuses when exec-level help does not advertise a safety sandbox', (
     () =>
       codexAdapter.build({
         operation: { kind: 'review', target: uncommitted },
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         repoRoot: '/repo',
         supports: (flag) => flag !== '--sandbox' && flag !== '-s',
       }),
@@ -192,7 +192,7 @@ test('Codex vendorArgs cannot weaken sandbox safety', () => {
     () =>
       codexAdapter.build({
         operation: { kind: 'review', target: uncommitted },
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         repoRoot: '/repo',
         supports,
         vendorArgs: ['--sandbox', 'danger-full-access'],
@@ -206,7 +206,7 @@ test('Codex vendorArgs cannot use arbitrary config overrides around safety', () 
     () =>
       codexAdapter.build({
         operation: { kind: 'review', target: uncommitted },
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         repoRoot: '/repo',
         supports,
         vendorArgs: ['-c', 'approval_policy=never'],
@@ -215,17 +215,17 @@ test('Codex vendorArgs cannot use arbitrary config overrides around safety', () 
   );
 });
 
-test('Codex offers Astra first while preserving its existing models and defaults', () => {
+test('Codex offers only the GPT-6 family, defaulting to Sol', () => {
   assert.deepEqual(codexAdapter.models.map(({ id, label }) => ({ id, label })), [
     { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
-    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
-    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
-    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol' },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
   ]);
-  assert.equal(codexAdapter.defaultModel, 'gpt-5.6-sol');
+  assert.equal(codexAdapter.defaultModel, 'gpt-6-sol');
   assert.equal(codexAdapter.defaultEffort, 'high');
   assert.equal(codexAdapter.minVersion, '0.130.0');
-  assert.equal(codexAdapter.listsStampedFor, '0.153.4');
+  assert.deepEqual(codexAdapter.efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.equal(codexAdapter.listsStampedFor, '0.155.0');
 });
 
 test('known per-vendor safety and configuration flags are rejected in split and equals forms', () => {
@@ -359,7 +359,7 @@ test('custom Codex instructions remain an explicit generic agent run', () => {
       target: uncommitted,
       instructions: 'Focus only on resource leaks.',
     },
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-sol',
     effort: 'high',
     repoRoot: '/repo',
     supports,
@@ -381,7 +381,7 @@ test('Gemini refuses implicit review rather than faking native review with a pro
     () =>
       geminiAdapter.build({
         operation: { kind: 'review', target: uncommitted },
-        model: 'gemini-2.5-pro',
+        model: 'gemini-3.1-pro-preview',
         repoRoot: '/repo',
         supports,
       }),

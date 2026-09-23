@@ -100,7 +100,7 @@ Named fields only. Model and effort identifiers are vendor-native strings.
     {
       "id": "security-gemini",
       "vendor": "gemini",
-      "model": "gemini-2.5-pro",
+      "model": "gemini-3.1-pro-preview",
       "instructions": "Review only for security defects."
     }
   ]
