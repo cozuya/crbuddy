@@ -318,6 +318,8 @@ Each adapter supplies advisory values and a default for the wizard. Config valid
 
 Native Claude review is additionally deterministic when effort is omitted from a hand-edited config: the adapter explicitly applies its documented default (`high`) rather than allowing Claude Code to reuse prior interactive state.
 
+The applied value, when there is one, is shown in each lane's terminal progress label and in its report heading.
+
 ---
 
 ## 8. Consolidation (removed in 0.4.0)
@@ -341,8 +343,9 @@ ignored, `crbuddy go` says so, and `crbuddy config` saves the file without them.
 The report is rendered from structured in-memory data. Markdown is never parsed back into internal state.
 
 It begins with a visible report block giving the review count, failures,
-warnings, target range, and file count; per-review markers retain vendor,
-model, and stable lane IDs, and a compact hidden marker retains the run ID.
+warnings, target range, and file count; per-review headings and markers retain
+vendor, model, applied effort, and stable lane IDs, and a compact hidden marker
+retains the run ID.
 Each successful review follows verbatim, in configured order.
 
 HTML comments delimit human-navigation sections, but they are not parser boundaries because verbatim model output can contain the same strings.

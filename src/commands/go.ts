@@ -598,10 +598,15 @@ async function detectVersion(adapter: Adapter, scratch: string): Promise<string 
   return adapter.parseVersion(`${result.stdout}\n${result.stderr}`);
 }
 
+/**
+ * Terminal labels, e.g. `Codex CLI (gpt-6-sol, high)`. Each is a function of
+ * the effort the adapter actually applied, which is only known once the
+ * invocation is built (Claude's native review fills in its default).
+ */
 function displayNames(
   panel: PanelEntry[],
   adapters: Map<string, Adapter>,
-): Map<string, string> {
+): Map<string, (effort: string | null) => string> {
   const base = new Map<string, string>();
   const counts = new Map<string, number>();
 
@@ -616,12 +621,19 @@ function displayNames(
     counts.set(name, (counts.get(name) ?? 0) + 1);
   }
 
-  const names = new Map<string, string>();
+  const names = new Map<string, (effort: string | null) => string>();
 
   for (const entry of panel) {
     const name = base.get(entry.id)!;
     const id = sanitizeTerminalInline(entry.id);
-    names.set(entry.id, (counts.get(name) ?? 0) > 1 ? `${name} [${id}]` : name);
+    const suffix = (counts.get(name) ?? 0) > 1 ? ` [${id}]` : '';
+
+    names.set(entry.id, (effort) => {
+      const shown = effort
+        ? `${name.slice(0, -1)}, ${sanitizeTerminalInline(effort)})`
+        : name;
+      return `${shown}${suffix}`;
+    });
   }
 
   return names;
@@ -634,7 +646,7 @@ interface ExecuteArgs {
   adapter: Adapter;
   cliVersion: string | null;
   supports: (flag: string) => boolean;
-  display: string;
+  display: (effort: string | null) => string;
   target: ResolvedTarget;
   repoRoot: string;
   scratch: string;
@@ -696,7 +708,8 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     });
   } catch (error) {
     if (error instanceof UnsafeInvocationError) {
-      progress.laneFinished(args.display);
+      const display = args.display(entry.effort ?? null);
+      progress.laneFinished(display);
 
       const outcome: RunRecord = {
         ...base,
@@ -707,7 +720,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       };
 
       progress.line(
-        `  ${args.display} - FAILED: unsafe_invocation\n      ` +
+        `  ${display} - FAILED: unsafe_invocation\n      ` +
           `${firstLine(outcome.diagnostics)}`,
       );
 
@@ -717,12 +730,14 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     throw error;
   }
 
+  const display = args.display(invocation.appliedEffort);
+
   for (const warning of invocation.warnings ?? []) {
-    progress.line(`  ${args.display} - ${warning}`);
+    progress.line(`  ${display} - ${warning}`);
   }
 
-  progress.laneStarted(args.display);
-  progress.dim(`  ${args.display} - started`);
+  progress.laneStarted(display);
+  progress.dim(`  ${display} - started`);
 
   const result = await runProcess({
     command: invocation.command,
@@ -736,7 +751,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     onStart: args.onStart,
   });
 
-  progress.laneFinished(args.display);
+  progress.laneFinished(display);
 
   const record = {
     ...base,
@@ -746,12 +761,12 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
 
   const report = (outcome: RunRecord): RunRecord => {
     if (outcome.ok) {
-      progress.dim(`  ${args.display} - done in ${formatElapsed(outcome.wallClockMs)}`);
+      progress.dim(`  ${display} - done in ${formatElapsed(outcome.wallClockMs)}`);
     } else {
       const detail = firstLine(outcome.diagnostics);
 
       progress.line(
-        `  ${args.display} - FAILED: ${outcome.reason}${detail ? `\n      ${detail}` : ''}`,
+        `  ${display} - FAILED: ${outcome.reason}${detail ? `\n      ${detail}` : ''}`,
       );
     }
 

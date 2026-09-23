@@ -156,6 +156,20 @@ test('the report has no provenance frontmatter and no consolidation notice', () 
   assert.match(report, /Reviewed `/);
 });
 
+test('each review heading records the applied effort when there is one', () => {
+  const report = renderReport(context({
+    runs: [
+      { ...run, id: 'with-effort', effortApplied: 'high' },
+      { ...run, id: 'without-effort', effortApplied: null },
+    ],
+  }));
+
+  assert.match(report, /<!-- crbuddy:review id=with-effort vendor=claude model=opus effort=high -->/);
+  assert.match(report, /## with-effort - claude \/ opus, effort high\n/);
+  assert.match(report, /<!-- crbuddy:review id=without-effort vendor=claude model=opus -->/);
+  assert.match(report, /## without-effort - claude \/ opus\n/);
+});
+
 test(
   'timeout output is labelled as the final stderr captured before termination',
   () => {

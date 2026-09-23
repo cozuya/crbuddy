@@ -433,8 +433,9 @@ predictable path in a shared OS temp directory.
 The report begins with the review itself. Its visible report block gives the
 review count, failures, warnings, target range, and file count, and a compact
 hidden marker records the run ID. Each review follows verbatim under a heading
-naming its reviewer, vendor, and model; a failed review shows its reason and,
-where there is one, the tail of its diagnostics.
+naming its reviewer, vendor, model, and the effort actually applied; a failed
+review shows its reason and, where there is one, the tail of its diagnostics.
+The same effort appears in each reviewer's progress lines in the terminal.
 
 For a whole-checkout fallback, the report block says there was no diff and
 gives the snapshot captured immediately before the panel started. Reviewers

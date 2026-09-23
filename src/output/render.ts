@@ -90,11 +90,19 @@ export function renderReport(context: ReportContext): string {
   ];
 
   for (const run of context.runs) {
+    // The applied effort, not the configured one: an adapter may fill in its
+    // default or be unable to pass the setting at all.
+    const effort = run.effortApplied;
+
     parts.push(
-      `<!-- crbuddy:review id=${run.id} vendor=${run.vendor} model=${run.modelRequested} -->`,
+      `<!-- crbuddy:review id=${run.id} vendor=${run.vendor} model=${run.modelRequested}` +
+        `${effort ? ` effort=${effort}` : ''} -->`,
     );
 
-    parts.push(`## ${run.id} - ${run.vendor} / ${run.modelRequested}\n`);
+    parts.push(
+      `## ${run.id} - ${run.vendor} / ${run.modelRequested}` +
+        `${effort ? `, effort ${effort}` : ''}\n`,
+    );
 
     if (run.ok) {
       parts.push(run.output.trim(), '');

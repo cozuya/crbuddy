@@ -241,6 +241,24 @@ test('successful launched go sends exactly one small POST using global preferenc
   assert.doesNotMatch(await readFile(path.join(f.repo, 'review.md'), 'utf8'), /crbuddy-test-secret-topic/);
 });
 
+test('the applied effort is shown in terminal progress and in the report', async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.configFile, JSON.stringify({
+    ...f.config,
+    panel: [
+      { id: 'one', vendor: 'codex', model: 'ok', effort: 'high' },
+      { id: 'two', vendor: 'codex', model: 'ok' },
+    ],
+  }));
+  const result = await f.run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /Codex CLI \(ok, high\) \[one\] - started/);
+  assert.match(result.stderr, /Codex CLI \(ok\) \[two\] - started/);
+  const report = await readFile(path.join(f.repo, 'review.md'), 'utf8');
+  assert.match(report, /## one - codex \/ ok, effort high\n/);
+  assert.match(report, /## two - codex \/ ok\n/);
+});
+
 test('all launched reviewers failing sends one failed notification and preserves exit 1', async (t) => {
   const f = await fixture(t);
   f.config.panel[0]!.model = 'fail';
