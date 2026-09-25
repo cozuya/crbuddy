@@ -61,6 +61,26 @@ function context(overrides: Partial<ReportContext> = {}): ReportContext {
   };
 }
 
+test('a review judged incomplete keeps its output, clearly marked', () => {
+  const incomplete: RunRecord = {
+    ...run,
+    ok: false,
+    reason: 'incomplete_review',
+    diagnostics: "Claude's last Stop still listed 1 background task.",
+    output: '## Finding\nA real finding.',
+  };
+  const report = renderReport(context({ runs: [incomplete] }));
+
+  assert.match(report, /failed: incomplete_review - its output is kept below, possibly incomplete/);
+  assert.match(report, /_This run did not complete: incomplete_review\._/);
+  assert.match(report, /still listed 1 background task/);
+  assert.match(report, /treat it as possibly incomplete\._\n\n## Finding\nA real finding\./);
+
+  // Other failures still carry no output.
+  const failed = renderReport(context({ runs: [{ ...incomplete, reason: 'exit_2', output: '' }] }));
+  assert.doesNotMatch(failed, /possibly incomplete/);
+});
+
 test('every vendor accepts a whole-checkout run, including one with no native review', () => {
   // Gemini refuses `kind: 'review'` outright, so this is the only mode in
   // which it can take part at all.

@@ -866,8 +866,14 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       ...record,
       ok: false,
       reason: completion.reason ?? 'unknown',
-      output: '',
-      diagnostics: tail(result.stderr || result.stdout),
+      output: completion.keepOutput
+        ? relativizePaths(body, args.repoRoot, { foldCase: args.repoFoldsCase })
+        : '',
+      // A kept output is already in the report; do not repeat its tail.
+      diagnostics: [
+        completion.detail,
+        tail(completion.keepOutput ? result.stderr : result.stderr || result.stdout),
+      ].filter(Boolean).join('\n'),
     });
   }
 

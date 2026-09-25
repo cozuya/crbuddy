@@ -69,7 +69,10 @@ export function renderReportBlock(context: ReportContext): string {
   }
 
   for (const run of context.runs.filter((r) => !r.ok)) {
-    body.push(`- \`${run.id}\` (${run.vendor}) failed: ${run.reason ?? 'unknown'}`);
+    body.push(
+      `- \`${run.id}\` (${run.vendor}) failed: ${run.reason ?? 'unknown'}` +
+        (run.output ? ' - its output is kept below, possibly incomplete' : ''),
+    );
   }
 
   for (const warning of context.warnings) {
@@ -123,6 +126,14 @@ export function renderReport(context: ReportContext): string {
           '```text',
           run.diagnostics.trim(),
           '```',
+          '',
+        );
+      }
+
+      if (run.output.trim()) {
+        parts.push(
+          '_Its output is kept below, but treat it as possibly incomplete._\n',
+          run.output.trim(),
           '',
         );
       }

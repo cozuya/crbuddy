@@ -143,7 +143,14 @@ test('Claude refuses to launch when repository settings disable all hooks', (t) 
 
 function invocationWithEvidence(
   t: import('node:test').TestContext,
-  evidence: { registryAvailable: boolean; backgroundTasks: number | null; sessionCrons: number | null },
+  evidence: {
+    registryAvailable: boolean;
+    backgroundTasks: number | null;
+    sessionCrons: number | null;
+    stops?: number;
+    tasks?: Array<Record<string, string>>;
+    crons?: Array<Record<string, string>>;
+  },
 ): Invocation {
   const dir = mkdtempSync(path.join(tmpdir(), 'crbuddy-claude-completion-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -190,8 +197,32 @@ test('Claude rejects output when authoritative Stop evidence says background wor
       result('No issues found. I will report back once agents finish.'),
       invocation,
     ),
-    { ok: false, reason: 'incomplete_review' },
+    {
+      ok: false,
+      reason: 'incomplete_review',
+      detail: "Claude's last Stop still listed 2 background tasks.",
+      keepOutput: true,
+    },
   );
+});
+
+test('an incomplete review names what the last Stop still listed', (t) => {
+  const invocation = invocationWithEvidence(t, {
+    registryAvailable: true,
+    backgroundTasks: 1,
+    sessionCrons: 0,
+    stops: 4,
+    tasks: [{ id: 'a1', status: 'running', description: 'Verify finding 2' }],
+    crons: [],
+  });
+  assert.deepEqual(claudeAdapter.checkCompletion(result('Finished review.'), invocation), {
+    ok: false,
+    reason: 'incomplete_review',
+    detail:
+      "Claude's last Stop (of 4 in this run) still listed 1 background task: " +
+      '{"id":"a1","status":"running","description":"Verify finding 2"}.',
+    keepOutput: true,
+  });
 });
 
 test('Claude reports when the task registry was unavailable', (t) => {
@@ -224,7 +255,12 @@ test('Claude rejects scheduled wakeups as unfinished session work', (t) => {
   });
   assert.deepEqual(
     claudeAdapter.checkCompletion(result('Finished review.'), invocation),
-    { ok: false, reason: 'incomplete_review' },
+    {
+      ok: false,
+      reason: 'incomplete_review',
+      detail: "Claude's last Stop still listed 1 session cron.",
+      keepOutput: true,
+    },
   );
 });
 
@@ -318,6 +354,34 @@ test('Claude Stop hook records pending work without blocking or emitting output'
     registryAvailable: true,
     backgroundTasks: 1,
     sessionCrons: 0,
+    stops: 1,
+    tasks: [{ id: 'task-1' }],
+    crons: [],
+  });
+
+  // Each Stop replaces the state and counts itself; entries keep only short
+  // scalar fields, so a failure can name what was still in flight.
+  const later = spawnSync(hook.command, hook.args, {
+    input: JSON.stringify({
+      hook_event_name: 'Stop',
+      background_tasks: [{
+        id: 'task-2',
+        status: 'running',
+        description: 'x'.repeat(200),
+        nested: { dropped: true },
+      }],
+      session_crons: [],
+    }),
+    encoding: 'utf8',
+  });
+  assert.equal(later.status, 0);
+  assert.deepEqual(JSON.parse(readFileSync(completionEvidencePath, 'utf8')), {
+    registryAvailable: true,
+    backgroundTasks: 1,
+    sessionCrons: 0,
+    stops: 2,
+    tasks: [{ id: 'task-2', status: 'running', description: 'x'.repeat(80) }],
+    crons: [],
   });
 });
 

@@ -307,20 +307,57 @@ export const CLAUDE_COMPLETION_MARKER = '<!-- crbuddy:review-complete -->';
  */
 const CLAUDE_STOP_EVIDENCE_SCRIPT = [
   "const fs=require('node:fs');",
+  "const file=process.argv[1];",
   "let input='';",
   "process.stdin.setEncoding('utf8');",
   "process.stdin.on('data',c=>input+=c);",
   "process.stdin.on('end',()=>{",
-  "let data={registryAvailable:false,backgroundTasks:null,sessionCrons:null};",
-  "try{const event=JSON.parse(input);const bg=event.background_tasks;const crons=event.session_crons;data={registryAvailable:Array.isArray(bg)&&Array.isArray(crons),backgroundTasks:Array.isArray(bg)?bg.length:null,sessionCrons:Array.isArray(crons)?crons.length:null};}catch{}",
-  "try{fs.writeFileSync(process.argv[1],JSON.stringify(data));}catch{}",
+  // Up to five entries, each cut to its short scalar fields: enough to say
+  // what was still in flight when a review is judged incomplete.
+  "const brief=l=>Array.isArray(l)?l.slice(0,5).map(e=>{const o={};if(e&&typeof e==='object')for(const[k,v]of Object.entries(e)){if(typeof v==='string')o[k]=v.slice(0,80);else if(typeof v==='number'||typeof v==='boolean')o[k]=v;}return o;}):null;",
+  "let stops=1;try{stops=(JSON.parse(fs.readFileSync(file,'utf8')).stops|0)+1;}catch{}",
+  "let data={registryAvailable:false,backgroundTasks:null,sessionCrons:null,stops};",
+  "try{const event=JSON.parse(input);const bg=event.background_tasks;const crons=event.session_crons;data={registryAvailable:Array.isArray(bg)&&Array.isArray(crons),backgroundTasks:Array.isArray(bg)?bg.length:null,sessionCrons:Array.isArray(crons)?crons.length:null,stops,tasks:brief(bg),crons:brief(crons)};}catch{}",
+  "try{fs.writeFileSync(file,JSON.stringify(data));}catch{}",
   "});",
 ].join('');
+
+type ClaudeEvidenceEntry = Record<string, string | number | boolean>;
 
 interface ClaudeCompletionEvidence {
   registryAvailable: boolean;
   backgroundTasks: number | null;
   sessionCrons: number | null;
+  /** Stop events seen in the run; every other field is from the last one. */
+  stops?: number;
+  /** Short fields of the background tasks and crons still listed. */
+  tasks?: ClaudeEvidenceEntry[];
+  crons?: ClaudeEvidenceEntry[];
+}
+
+const evidenceEntries = (value: unknown): ClaudeEvidenceEntry[] | undefined =>
+  Array.isArray(value)
+    ? value.filter((entry): entry is ClaudeEvidenceEntry =>
+        typeof entry === 'object' && entry !== null && !Array.isArray(entry))
+    : undefined;
+
+/** What the last Stop still listed, so an incomplete review can be traced. */
+function describePending(evidence: ClaudeCompletionEvidence): string {
+  const counts: Array<[number, string]> = [
+    [evidence.backgroundTasks ?? 0, 'background task'],
+    [evidence.sessionCrons ?? 0, 'session cron'],
+  ];
+  const counted = counts
+    .filter(([count]) => count > 0)
+    .map(([count, noun]) => `${count} ${noun}${count === 1 ? '' : 's'}`);
+  const listed = [...(evidence.tasks ?? []), ...(evidence.crons ?? [])]
+    .map((entry) => JSON.stringify(entry))
+    .join(', ');
+
+  return (
+    `Claude's last Stop${evidence.stops ? ` (of ${evidence.stops} in this run)` : ''} ` +
+    `still listed ${counted.join(' and ')}${listed ? `: ${listed}` : ''}.`
+  );
 }
 
 function claudeCompletionSettings(evidencePath: string): string {
@@ -363,10 +400,16 @@ function readClaudeCompletionEvidence(
       return null;
     }
 
+    const tasks = evidenceEntries(raw.tasks);
+    const crons = evidenceEntries(raw.crons);
+
     return {
       registryAvailable: raw.registryAvailable,
       backgroundTasks: raw.backgroundTasks ?? null,
       sessionCrons: raw.sessionCrons ?? null,
+      ...(typeof raw.stops === 'number' ? { stops: raw.stops } : {}),
+      ...(tasks ? { tasks } : {}),
+      ...(crons ? { crons } : {}),
     };
   } catch {
     return null;
@@ -571,7 +614,14 @@ export const claudeAdapter: Adapter = {
       return { ok: false, reason: 'completion_registry_unavailable' };
     }
     if (evidence.backgroundTasks !== 0 || evidence.sessionCrons !== 0) {
-      return { ok: false, reason: 'incomplete_review' };
+      // Kept, not dropped: a finished review has been judged incomplete this
+      // way, and discarding it lost every finding in it. The report marks it.
+      return {
+        ok: false,
+        reason: 'incomplete_review',
+        detail: describePending(evidence),
+        keepOutput: true,
+      };
     }
 
     return { ok: true };

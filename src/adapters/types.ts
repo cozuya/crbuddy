@@ -40,6 +40,13 @@ export interface CompletionCheck {
   ok: boolean;
   /** Machine-ish reason when not ok: rate_limited, auth, empty, unknown. */
   reason?: string;
+  /** A sentence on what exactly went wrong, shown with the failure. */
+  detail?: string;
+  /**
+   * The run did not complete, but its output may still be worth reading:
+   * the report keeps it, marked as possibly incomplete, instead of dropping it.
+   */
+  keepOutput?: boolean;
 }
 
 export interface VendorModel {
