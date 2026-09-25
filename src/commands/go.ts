@@ -456,11 +456,20 @@ export async function runGo(options: GoOptions): Promise<number> {
       { allowedPaths: [outputPaths.merged] },
     );
 
-    if (legacyRaw.some((absolute) => existsSync(absolute))) {
+    // Worked out again now that crash recovery may have put a file back: two
+    // spellings of one file on a case-folding volume can only be recognized
+    // as one while it exists, and stashing both would fail on the second.
+    const legacyPresent = legacyRawOutputPaths(
+      repoRoot,
+      loaded.legacyRawOutput,
+      outputPaths.merged,
+    ).filter((absolute) => legacyRaw.includes(absolute));
+
+    if (legacyPresent.some((absolute) => existsSync(absolute))) {
       legacyStashed = await stashExistingOutputs(
         repoRoot,
         stateDir,
-        legacyRaw,
+        legacyPresent,
         `${runId}-legacy`,
         { allowedPaths: legacyRaw },
       );
