@@ -235,7 +235,11 @@ export async function runGo(options: GoOptions): Promise<number> {
           : 'This repository’s own config uses output paths outside the repository:',
       );
 
-      for (const file of [...new Set(external)]) progress.line(`  ${file}`);
+      // Escaped: this list is what the user consents to, and a cloned repo's
+      // config chose it. Control sequences could rewrite what it shows.
+      for (const file of [...new Set(external)]) {
+        progress.line(`  ${sanitizeTerminalInline(file)}`);
+      }
 
       progress.dim(
         config.output.destination === 'file'
@@ -283,7 +287,8 @@ export async function runGo(options: GoOptions): Promise<number> {
 
     if (recovered.length > 0) {
       progress.dim(
-        `Recovered ${recovered.join(', ')} left behind by an interrupted run.`,
+        `Recovered ${recovered.map(sanitizeTerminalInline).join(', ')} left behind ` +
+          'by an interrupted run.',
       );
     }
 
@@ -305,7 +310,7 @@ export async function runGo(options: GoOptions): Promise<number> {
 
         const ok = await confirm(
           `These files already exist and will be replaced:\n` +
-            existing.map((file) => `  ${file}`).join('\n') +
+            existing.map((file) => `  ${sanitizeTerminalInline(file)}`).join('\n') +
             `\nContinue?`,
         );
 
@@ -932,7 +937,7 @@ function reportStranded(stranded: string[]): void {
 
   progress.line('Could not move the previous output back into place.');
 
-  for (const file of stranded) progress.line(`  it is still at ${file}`);
+  for (const file of stranded) progress.line(`  it is still at ${sanitizeTerminalInline(file)}`);
 }
 
 /**
@@ -1210,7 +1215,10 @@ function firstLine(text: string | undefined): string {
     .find((entry) => entry !== '');
 
   if (!line) return '';
-  return line.length > 160 ? `${line.slice(0, 157)}\u2026` : line;
+
+  // Vendor output and model-written text: never raw into the terminal.
+  const safe = sanitizeTerminalInline(line);
+  return safe.length > 160 ? `${safe.slice(0, 157)}\u2026` : safe;
 }
 
 async function flagProbe(

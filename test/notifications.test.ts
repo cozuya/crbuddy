@@ -425,6 +425,22 @@ test('a pre-0.4 crash stash with an outside raw report is recovered only for a g
   }
 });
 
+test('config paths in the consent list cannot carry terminal control sequences', async (t) => {
+  const f = await fixture(t);
+  const spoof = path.join(f.root, 'outside\u001b[2K\u001b[1Gharmless', 'review.md');
+  await writeFile(f.configFile, JSON.stringify({
+    ...f.config,
+    output: { ...f.config.output, merged: spoof },
+  }));
+
+  const result = await f.run();
+  // Unattended, so the outside path is refused - after it has been listed.
+  assert.equal(result.code, 1);
+  // The sequences are removed whole, so what is listed is plain text.
+  assert.match(result.stderr, /outsideharmless\/review\.md/);
+  assert.ok(!result.stderr.includes('\u001b'), 'no escape character reaches the terminal');
+});
+
 test('missing, disabled and malformed global settings do not prevent a review or send a POST', async (t) => {
   const f = await fixture(t);
   for (const contents of [null, '{}', '{bad secret-topic']) {
