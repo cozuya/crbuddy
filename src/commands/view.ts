@@ -5,8 +5,9 @@ import {
   assertUsableOutput,
   homeConfigPath,
   loadConfig,
+  obsoleteKeysNote,
   projectConfigPath,
-  readAndValidate,
+  readConfigFile,
 } from '../config/load.js';
 import { loadGlobalSettings } from '../config/settings.js';
 import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
@@ -34,11 +35,9 @@ async function configSummary(
   if (options.repoRoot && dependencies.globalConfigFile === undefined) {
     try {
       const loaded = await loadConfig(options.repoRoot);
-      return formatConfigSummary(
-        loaded.scope,
-        loaded.source,
-        loaded.config,
-        null,
+      return withObsoleteNote(
+        formatConfigSummary(loaded.scope, loaded.source, loaded.config, null),
+        obsoleteKeysNote(loaded, options.repoRoot, 'this config'),
       );
     } catch (error) {
       if (
@@ -60,20 +59,44 @@ async function configSummary(
   const globalFile = dependencies.globalConfigFile ?? homeConfigPath();
 
   if (projectFile && existsSync(projectFile)) {
-    const config = await readAndValidate(projectFile);
-    assertUsableOutput(config.output, `${projectFile}.output`, options.repoRoot!);
-    return formatConfigSummary('project', projectFile, config, null);
+    const read = await readConfigFile(projectFile);
+    assertUsableOutput(read.config.output, `${projectFile}.output`, options.repoRoot!);
+    return summarize('project', projectFile, read, options.repoRoot);
   }
 
   if (existsSync(globalFile)) {
-    const config = await readAndValidate(globalFile);
+    const read = await readConfigFile(globalFile);
     if (options.repoRoot) {
-      assertUsableOutput(config.output, `${globalFile}.output`, options.repoRoot);
+      assertUsableOutput(read.config.output, `${globalFile}.output`, options.repoRoot);
     }
-    return formatConfigSummary('global', globalFile, config, null);
+    return summarize('global', globalFile, read, options.repoRoot);
   }
 
   return 'Config: None';
+}
+
+/** `crb go` prints this note for the same file, so view shows it too. */
+function withObsoleteNote(summary: string, note: string | null): string {
+  return note ? `${summary}\n\n${note}` : summary;
+}
+
+function summarize(
+  scope: 'project' | 'global',
+  file: string,
+  read: Awaited<ReturnType<typeof readConfigFile>>,
+  repoRoot: string | null,
+): string {
+  const loaded = {
+    config: read.config,
+    scope,
+    obsoleteKeys: read.obsoleteKeys,
+    ...(read.legacyRawOutput ? { legacyRawOutput: read.legacyRawOutput } : {}),
+  };
+
+  return withObsoleteNote(
+    formatConfigSummary(scope, file, read.config, null),
+    obsoleteKeysNote(loaded, repoRoot, 'this config'),
+  );
 }
 
 export async function runView(

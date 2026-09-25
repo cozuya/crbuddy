@@ -12,6 +12,7 @@ import {
   legacyRawOutputPaths,
   legacyRawRecoveryPaths,
   LoadedConfig,
+  obsoleteKeysNote,
   repoRelative,
   resolveOutputPaths,
 } from '../config/load.js';
@@ -96,23 +97,8 @@ export async function runGo(options: GoOptions): Promise<number> {
   const { repoRoot, loaded, version } = options;
   const config = loaded.config;
 
-  if (loaded.obsoleteKeys.length > 0) {
-    // `crbuddy config` drops the rest but keeps output.raw: it is how a
-    // leftover raw report at that path is still found and hidden.
-    const dropped = loaded.obsoleteKeys.filter((key) => key !== 'output.raw');
-
-    progress.dim(
-      `Ignoring ${loaded.obsoleteKeys.join(', ')} in ` +
-        `${displayPath(loaded.source, repoRoot)}: consolidation was removed in 0.4.0.` +
-        (dropped.length > 0
-          ? ` \`crbuddy config\` rewrites the file without ${dropped.join(' and ')}.`
-          : '') +
-        (dropped.length < loaded.obsoleteKeys.length
-          ? ' output.raw still hides the old raw report it names from reviewers; ' +
-            'remove it once that report is gone.'
-          : ''),
-    );
-  }
+  const obsolete = obsoleteKeysNote(loaded, repoRoot, displayPath(loaded.source, repoRoot));
+  if (obsolete) progress.dim(obsolete);
 
   // Resolve and validate this before creating any per-run directory. A
   // repository rooted at the home directory would otherwise contain the

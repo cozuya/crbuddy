@@ -3,6 +3,8 @@ import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+import { sanitizeTerminalInline } from '../util/ansi.js';
+
 import {
   CONFIG_FILENAME,
   CONFIG_VERSION,
@@ -200,6 +202,70 @@ export function obsoleteKeys(input: unknown): string[] {
   }
 
   return found;
+}
+
+/**
+ * The note for keys left by the removed consolidation pass: which are
+ * ignored, which `crbuddy config` drops, and what a custom `output.raw` still
+ * does here. Built from what crbuddy actually does with the path, so it never
+ * claims a key hides a file it does not. Null when there are no such keys.
+ */
+export function obsoleteKeysNote(
+  loaded: Pick<LoadedConfig, 'obsoleteKeys' | 'legacyRawOutput' | 'scope' | 'config'>,
+  repoRoot: string | null,
+  source: string,
+): string | null {
+  const keys = loaded.obsoleteKeys;
+  if (keys.length === 0) return null;
+
+  // `crbuddy config` keeps only a custom output.raw: the default name needs
+  // no key, and a blank or non-string value names nothing.
+  const raw = loaded.legacyRawOutput;
+  const kept = raw !== undefined && raw !== LEGACY_RAW_OUTPUT;
+  const dropped = keys.filter((key) => !(kept && key === 'output.raw'));
+
+  return (
+    `Ignoring ${keys.join(', ')} in ${source}: consolidation was removed in 0.4.0.` +
+    (dropped.length > 0
+      ? ` \`crbuddy config\` rewrites the file without ${dropped.join(' and ')}.`
+      : '') +
+    (kept ? ` ${legacyRawRole(loaded, repoRoot, raw)}` : '')
+  );
+}
+
+function legacyRawRole(
+  loaded: Pick<LoadedConfig, 'scope' | 'config'>,
+  repoRoot: string | null,
+  raw: string,
+): string {
+  const shown = sanitizeTerminalInline(raw);
+
+  if (repoRoot === null) {
+    return `output.raw stays so crbuddy can still find an old raw report at ${shown}; ` +
+      'remove it once no repository has one.';
+  }
+
+  try {
+    const configured = canonicalOutputPath(repoRoot, raw);
+    const merged = canonicalOutputPath(repoRoot, loaded.config.output.merged);
+
+    if (legacyRawOutputPaths(repoRoot, raw, merged).includes(configured)) {
+      return `output.raw stays: it keeps the old raw report at ${shown} hidden from ` +
+        'reviewers. Remove it once that report is gone.';
+    }
+
+    if (legacyRawRecoveryPaths(repoRoot, raw, loaded.scope).includes(configured)) {
+      return `output.raw stays only so a crash stash holding ${shown} can be ` +
+        'recovered. Remove it once no such stash is left.';
+    }
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+  }
+
+  return loaded.scope === 'global'
+    ? `output.raw (${shown}) does nothing in this repository; remove it once no ` +
+        'repository has a report there.'
+    : `output.raw (${shown}) does nothing; remove it.`;
 }
 
 /** The obsolete `output.raw` path, when it is a usable string. */

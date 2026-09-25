@@ -106,6 +106,34 @@ test('view prefers the repository config and shows global notifications', async 
   }
 });
 
+test('view shows the same obsolete-keys note as go', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-obsolete-'));
+
+  try {
+    const repoRoot = path.join(root, 'repo');
+    const globalFile = path.join(root, 'global.json');
+    await mkdir(repoRoot, { recursive: true });
+    await writeJson(globalFile, {
+      ...config('gpt-6-astra', 'uncommitted'),
+      output: { ...DEFAULT_OUTPUT, destination: 'terminal', raw: 'CODE-REVIEW-HANDOFF.raw.md' },
+      mergeTimeoutMs: 5_000,
+    });
+
+    const { ui, notes } = recordingUi();
+    await runView(
+      { repoRoot },
+      { ui, globalConfigFile: globalFile, settingsFile: path.join(root, 'missing.json') },
+    );
+
+    assert.match(
+      notes[0]?.message ?? '',
+      /Ignoring mergeTimeoutMs, output\.raw in this config: consolidation was removed in 0\.4\.0\. `crbuddy config` rewrites the file without mergeTimeoutMs and output\.raw\./,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('view falls back to the global config', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-global-'));
 

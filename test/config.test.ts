@@ -11,6 +11,7 @@ import {
   legacyRawOutput,
   legacyRawOutputPaths,
   obsoleteKeys,
+  obsoleteKeysNote,
   stripJsonComments,
   validate,
 } from '../src/config/load.js';
@@ -199,6 +200,52 @@ test('leftover raw reports are tracked only at usable paths inside the repositor
   assert.deepEqual(legacyRawOutputPaths(repoRoot, '.crbuddy/raw.md', merged), [legacyDefault]);
   await mkdir(path.join(repoRoot, 'a-directory'));
   assert.deepEqual(legacyRawOutputPaths(repoRoot, 'a-directory', merged), [legacyDefault]);
+});
+
+test('the obsolete-keys note says what output.raw actually does', async (t) => {
+  const repoRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-obsolete-note-')));
+  t.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const note = (
+    keys: string[],
+    raw?: string,
+    scope: 'project' | 'global' = 'project',
+    root: string | null = repoRoot,
+  ) => obsoleteKeysNote(
+    { config: validate(minimal), scope, obsoleteKeys: keys, ...(raw ? { legacyRawOutput: raw } : {}) },
+    root,
+    'config.json',
+  );
+
+  // Setup before 0.4.0 wrote the default name into every config: crbuddy
+  // config drops it, and it is not what hides the file.
+  assert.equal(
+    note(['merge', 'output.raw'], 'CODE-REVIEW-HANDOFF.raw.md'),
+    'Ignoring merge, output.raw in config.json: consolidation was removed in 0.4.0. ' +
+      '`crbuddy config` rewrites the file without merge and output.raw.',
+  );
+  // A blank or non-string value names nothing.
+  assert.equal(
+    note(['output.raw']),
+    'Ignoring output.raw in config.json: consolidation was removed in 0.4.0. ' +
+      '`crbuddy config` rewrites the file without output.raw.',
+  );
+
+  const hidden = note(['output.raw'], 'reviews/raw.md') ?? '';
+  assert.match(hidden, /output\.raw stays: it keeps the old raw report at reviews\/raw\.md hidden from reviewers\./);
+  assert.doesNotMatch(hidden, /rewrites the file/);
+  assert.match(
+    note(['output.raw'], '../outside.raw.md', 'global') ?? '',
+    /stays only so a crash stash holding \.\.\/outside\.raw\.md can be recovered/,
+  );
+  assert.match(
+    note(['output.raw'], '../outside.raw.md') ?? '',
+    /output\.raw \(\.\.\/outside\.raw\.md\) does nothing; remove it\./,
+  );
+  assert.match(
+    note(['output.raw'], 'reviews/raw.md', 'global', null) ?? '',
+    /stays so crbuddy can still find an old raw report at reviews\/raw\.md/,
+  );
+  assert.equal(note([]), null);
 });
 
 test('one leftover raw report under two spellings is tracked once', async (t) => {
