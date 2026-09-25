@@ -20,25 +20,43 @@ const TYPES = {
 
 export function startServer(port = 0) {
   const server = createServer((request, response) => {
-    const url = new URL(request.url, 'http://localhost');
-    const file = path.join(root, decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname));
+    let pathname;
 
-    if (!file.startsWith(root)) {
+    try {
+      pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
+    } catch {
+      response.writeHead(400).end();
+      return;
+    }
+
+    const file = path.join(root, pathname === '/' ? 'index.html' : pathname);
+    const relative = path.relative(root, file);
+
+    // Segment-wise, so a sibling such as `promo-old` is outside too.
+    if (relative.split(path.sep)[0] === '..' || path.isAbsolute(relative)) {
       response.writeHead(403).end();
       return;
     }
 
+    let stats;
+
     try {
-      const { size } = statSync(file);
-      response.writeHead(200, {
-        'content-type': TYPES[path.extname(file)] ?? 'application/octet-stream',
-        'content-length': size,
-        'cache-control': 'no-store',
-      });
-      createReadStream(file).pipe(response);
+      stats = statSync(file);
     } catch {
-      response.writeHead(404).end();
+      stats = null;
     }
+
+    if (!stats?.isFile()) {
+      response.writeHead(404).end();
+      return;
+    }
+
+    response.writeHead(200, {
+      'content-type': TYPES[path.extname(file)] ?? 'application/octet-stream',
+      'content-length': stats.size,
+      'cache-control': 'no-store',
+    });
+    createReadStream(file).on('error', () => response.destroy()).pipe(response);
   });
 
   return new Promise((resolve) => {

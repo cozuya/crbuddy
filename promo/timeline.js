@@ -116,7 +116,7 @@ export function buildTimeline() {
       t += (1 / cps) * (0.7 + random() * 0.6) + (ch === ' ' ? 0.035 : 0);
     }
     op(t0, { kind: 'type', text, times });
-    return times.at(-1);
+    return times.at(-1) ?? t0;
   }
 
   /** Prompt, pause, type, Enter. Returns the moment Enter lands. */

@@ -14,6 +14,9 @@ import { buildTimeline, FPS, HEIGHT, WIDTH } from './timeline.js';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const stillsArg = args.includes('--stills') ? args[args.indexOf('--stills') + 1] : null;
+if (args.includes('--stills') && !stillsArg) {
+  throw new Error('--stills needs a comma-separated list of times, e.g. --stills 1,5.5');
+}
 const workers = Number(process.env.WORKERS ?? Math.min(8, Math.max(1, availableParallelism() - 2)));
 
 const server = await startServer();

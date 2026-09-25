@@ -207,7 +207,7 @@ for (let i = 0; i < N; i++) {
   R[i] = Math.tanh(R[i] * 1.1);
   peak = Math.max(peak, Math.abs(L[i]), Math.abs(R[i]));
 }
-const scale = 0.78 / peak;
+const scale = peak > 0 ? 0.78 / peak : 0;
 
 const data = Buffer.alloc(N * 4);
 for (let i = 0; i < N; i++) {
