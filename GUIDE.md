@@ -280,10 +280,11 @@ For piped setup, Codex model numbers are `1` GPT-6 Astra, `2` GPT-6 Sol,
 `3` GPT-6 Luna, `4` Other; update scripts that used the v0.3.x positions
 (`2` GPT-5.6 Sol, `5` Other). Codex effort
 numbers are `1` low through `5` max, `6` Other: `none` was dropped because no
-current Codex model accepts it. An empty model answer still accepts the
-configured model or, on first setup, GPT-6 Sol.
-A saved custom model appears after Other as the default choice, so retaining it
-uses just one answer. Selecting Other explicitly still asks for a model ID.
+current Codex model accepts it. The model picker always defaults to the CLI's
+default model (GPT-6 Sol for Codex), so an empty model answer picks it even
+when you are editing a reviewer that used another model. Answer Yes to "Keep
+these reviewers?" to keep the existing panel as it is; to re-enter a custom
+model, select Other, which asks for its model ID.
 
 Effort values are **vendor-native and passed through verbatim**. There is no
 crbuddy effort vocabulary and no translation.
