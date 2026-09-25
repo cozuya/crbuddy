@@ -80,3 +80,40 @@ test('paths outside the repo root are left alone', () => {
   const text = 'compare with /usr/lib/node/thing.js:9';
   assert.equal(relativizePaths(text, '/home/someone/repo'), text);
 });
+
+test('the repo root is stripped only where it is a whole path', () => {
+  const root = '/home/u/app';
+
+  assert.equal(
+    relativizePaths('see `/home/u/app/src/a.ts:3` and (/home/u/app/b.ts)', root),
+    'see `src/a.ts:3` and (b.ts)',
+  );
+
+  // Siblings sharing the prefix, and longer paths ending in it, are not it.
+  for (const text of [
+    'see /home/u/app-server/src/x.ts:1',
+    'see /home/u/app.old/x.ts',
+    'see /home/u/app2/x.ts',
+    'see /mnt/home/u/app/x.ts',
+  ]) {
+    assert.equal(relativizePaths(text, root), text);
+  }
+});
+
+test('repo-root case is ignored only on a volume that folds case', () => {
+  const text = 'notes in /home/u/APP/notes.md';
+  assert.equal(relativizePaths(text, '/home/u/app'), text);
+  assert.equal(
+    relativizePaths('see c:/users/chris/AI/crbuddy/src/a.ts', 'C:/Users/Chris/ai/crbuddy', {
+      foldCase: true,
+    }),
+    'see src/a.ts',
+  );
+});
+
+test('a repository at a filesystem root rewrites nothing', () => {
+  const text = 'see /etc/hosts, C:\\Windows\\x.dll and C:/tmp/y';
+  assert.equal(relativizePaths(text, '/'), text);
+  assert.equal(relativizePaths(text, 'C:\\'), text);
+  assert.equal(relativizePaths(text, 'C:/'), text);
+});

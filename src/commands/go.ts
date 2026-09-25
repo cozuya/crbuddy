@@ -849,7 +849,9 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     });
   }
 
-  const output = relativizePaths(body, args.repoRoot);
+  const output = relativizePaths(body, args.repoRoot, {
+    foldCase: repoFoldsCase(args.repoRoot),
+  });
 
   return report({
     ...record,
@@ -992,6 +994,15 @@ export function repoStateDir(
   }
 
   return path.join(canonicalStateRoot, key);
+}
+
+/** Whether the volume holding this repository treats path case as equal. */
+function repoFoldsCase(repoRoot: string): boolean {
+  try {
+    return filesystemFoldsCase(realpathSync.native(path.resolve(repoRoot)));
+  } catch {
+    return false;
+  }
 }
 
 /** Probe the actual volume instead of assuming every macOS volume folds. */
