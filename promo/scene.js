@@ -688,7 +688,8 @@ function file(t) {
   inOut(els.s6h, t, cue.fileHead + 0.08, out + 0.03, { dy: 40 });
   inOut(els.s6p, t, cue.fileHead + 0.2, out + 0.06, { dy: 30 });
   inOut(els.wrote, t, cue.wrote - 0.3, out + 0.09, { dy: 30 });
-  els.wroteLine.style.visibility = t >= cue.wrote ? 'visible' : 'hidden';
+  // Empty, not 'visible', so the line still hides with its parent.
+  els.wroteLine.style.visibility = t >= cue.wrote ? '' : 'hidden';
 
   inOut(els.doc, t, cue.doc, out + 0.05, { dx: 220, dy: 30, s0: 0.9, r: -1.5, dur: 0.7, outDx: 200, outDy: 0 });
   cue.docSections.forEach((at, i) => {
