@@ -504,7 +504,7 @@ export function legacyRawOutputPaths(
   configured: string | undefined,
   merged: string,
 ): string[] {
-  const paths = new Set<string>();
+  const paths: string[] = [];
 
   for (const candidate of [configured, LEGACY_RAW_OUTPUT]) {
     if (!candidate) continue;
@@ -513,15 +513,36 @@ export function legacyRawOutputPaths(
       assertUsableOutput({ merged: candidate }, 'output.raw', repoRoot);
       const absolute = canonicalOutputPath(repoRoot, candidate);
 
-      if (absolute !== merged && repoRelative(absolute, repoRoot) !== null) {
-        paths.add(absolute);
+      if (
+        repoRelative(absolute, repoRoot) !== null &&
+        ![merged, ...paths].some((known) => sameOutputFile(known, absolute))
+      ) {
+        paths.push(absolute);
       }
     } catch (error) {
       if (!(error instanceof ConfigError)) throw error;
     }
   }
 
-  return [...paths];
+  return paths;
+}
+
+/**
+ * One file under two spellings: identical, or differing only in case while
+ * naming the same directory entry, as a case-folding volume allows. Stashing
+ * both spellings would move the file once and then fail on the second move.
+ */
+function sameOutputFile(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (a.toLowerCase() !== b.toLowerCase()) return false;
+
+  try {
+    const left = lstatSync(a);
+    const right = lstatSync(b);
+    return left.dev === right.dev && left.ino === right.ino;
+  } catch {
+    return false;
+  }
 }
 
 /** Resolve the longest existing prefix and preserve any missing suffix. */

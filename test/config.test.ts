@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -198,6 +199,22 @@ test('leftover raw reports are tracked only at usable paths inside the repositor
   assert.deepEqual(legacyRawOutputPaths(repoRoot, '.crbuddy/raw.md', merged), [legacyDefault]);
   await mkdir(path.join(repoRoot, 'a-directory'));
   assert.deepEqual(legacyRawOutputPaths(repoRoot, 'a-directory', merged), [legacyDefault]);
+});
+
+test('one leftover raw report under two spellings is tracked once', async (t) => {
+  const repoRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-legacy-case-')));
+  t.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const merged = path.join(repoRoot, 'CODE-REVIEW-HANDOFF.md');
+  await writeFile(path.join(repoRoot, 'CODE-REVIEW-HANDOFF.raw.md'), 'old raw report');
+  const lower = path.join(repoRoot, 'code-review-handoff.raw.md');
+  const folds = existsSync(lower);
+
+  // Stashing one file under both spellings would move it, then fail.
+  if (!folds) await writeFile(lower, 'a different file on this volume');
+  assert.equal(
+    legacyRawOutputPaths(repoRoot, 'code-review-handoff.raw.md', merged).length,
+    folds ? 1 : 2,
+  );
 });
 
 test('an empty panel is rejected', () => {
