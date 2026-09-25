@@ -139,12 +139,6 @@ function vendorArgFlag(arg: string): string {
       : flag;
 }
 
-/**
- * Best-effort guardrail for known vendor flags that can change permissions,
- * configuration sources, loaded capabilities, or the review root. This is
- * exact per-vendor matching, not proof that an unknown flag is inert;
- * repository and vendor configuration remain trusted inputs.
- */
 function environmentFlagEnabled(value: string | undefined): boolean {
   return /^(?:1|true|yes|on)$/i.test(value?.trim() ?? '');
 }
@@ -278,6 +272,12 @@ function assertClaudeHooksEnabledBySettings(repoRoot: string): void {
   }
 }
 
+/**
+ * Best-effort guardrail for known vendor flags that can change permissions,
+ * configuration sources, loaded capabilities, or the review root. This is
+ * exact per-vendor matching, not proof that an unknown flag is inert;
+ * repository and vendor configuration remain trusted inputs.
+ */
 function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void {
   if (!args || args.length === 0) return;
 
