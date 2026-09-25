@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,8 @@ import {
   CLAUDE_COMPLETION_MARKER,
   claudeAdapter,
   claudeHookDisablingEnvironmentVariable,
+  claudeHookDisablingSettingsFile,
+  claudeHooksDisabledReason,
 } from '../src/adapters/vendors.js';
 import { UnsafeInvocationError, type Invocation } from '../src/adapters/types.js';
 import { ResolvedTarget } from '../src/git/target.js';
@@ -47,6 +49,88 @@ test('Claude hook-disabling environment values match Claude boolean semantics', 
     claudeHookDisablingEnvironmentVariable({ CLAUDE_CODE_SAFE_MODE: 'yes' }),
     'CLAUDE_CODE_SAFE_MODE',
   );
+});
+
+function settingsFixture(t: import('node:test').TestContext) {
+  const root = mkdtempSync(path.join(tmpdir(), 'crbuddy-claude-settings-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repoRoot = path.join(root, 'repo');
+  const userDir = path.join(root, 'user-claude');
+  mkdirSync(path.join(repoRoot, '.claude'), { recursive: true });
+  mkdirSync(userDir, { recursive: true });
+  const env = { CLAUDE_CONFIG_DIR: userDir };
+  const write = (file: string, value: unknown) =>
+    writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value));
+  return {
+    repoRoot,
+    env,
+    user: path.join(userDir, 'settings.json'),
+    project: path.join(repoRoot, '.claude', 'settings.json'),
+    local: path.join(repoRoot, '.claude', 'settings.local.json'),
+    write,
+  };
+}
+
+test('the most specific Claude settings file that sets disableAllHooks decides', (t) => {
+  const f = settingsFixture(t);
+  assert.equal(claudeHookDisablingSettingsFile(f.repoRoot, f.env), null);
+
+  f.write(f.user, { disableAllHooks: true });
+  assert.equal(claudeHookDisablingSettingsFile(f.repoRoot, f.env), f.user);
+  // Outside a repository only the user file applies.
+  assert.equal(claudeHookDisablingSettingsFile(null, f.env), f.user);
+
+  f.write(f.project, { disableAllHooks: false });
+  assert.equal(claudeHookDisablingSettingsFile(f.repoRoot, f.env), null);
+
+  f.write(f.local, { disableAllHooks: true });
+  assert.equal(claudeHookDisablingSettingsFile(f.repoRoot, f.env), f.local);
+
+  // A file that does not set the key, or cannot be read, defers to the next.
+  f.write(f.local, { hooks: {} });
+  assert.equal(claudeHookDisablingSettingsFile(f.repoRoot, f.env), null);
+  f.write(f.project, '{not json');
+  assert.equal(claudeHookDisablingSettingsFile(f.repoRoot, f.env), f.user);
+});
+
+test('doctor names whatever disables Claude hooks, environment first', (t) => {
+  const f = settingsFixture(t);
+  assert.equal(claudeHooksDisabledReason(f.repoRoot, f.env), null);
+
+  f.write(f.project, { disableAllHooks: true });
+  assert.equal(
+    claudeHooksDisabledReason(f.repoRoot, f.env),
+    '.claude/settings.json sets "disableAllHooks": true',
+  );
+  assert.equal(
+    claudeHooksDisabledReason(f.repoRoot, { ...f.env, CLAUDE_CODE_SIMPLE: '1' }),
+    'CLAUDE_CODE_SIMPLE disables Claude hooks',
+  );
+});
+
+test('Claude refuses to launch when repository settings disable all hooks', (t) => {
+  const f = settingsFixture(t);
+  f.write(f.local, { disableAllHooks: true });
+  const request = {
+    operation: { kind: 'review' as const, target },
+    model: 'opus',
+    effort: 'high' as const,
+    repoRoot: f.repoRoot,
+    completionEvidencePath: path.join(f.repoRoot, 'completion.json'),
+    supports: () => true,
+  };
+
+  assert.throws(
+    () => claudeAdapter.build(request),
+    (error: unknown) =>
+      error instanceof UnsafeInvocationError &&
+      error.message.startsWith('.claude/settings.local.json sets "disableAllHooks": true') &&
+      error.message.includes('will not override it') &&
+      !error.message.includes(f.repoRoot),
+  );
+
+  f.write(f.local, { disableAllHooks: false });
+  assert.doesNotThrow(() => claudeAdapter.build(request));
 });
 
 function invocationWithEvidence(
@@ -204,7 +288,8 @@ test('Claude Stop hook records pending work without blocking or emitting output'
   const settings = JSON.parse(invocation.args[settingsIndex + 1] ?? '{}');
   const hook = settings.hooks?.Stop?.[0]?.hooks?.[0];
 
-  assert.equal(settings.disableAllHooks, false);
+  // Never forced on: that would re-enable every hook the user disabled.
+  assert.ok(!('disableAllHooks' in settings));
   const run = spawnSync(
     hook.command,
     hook.args,

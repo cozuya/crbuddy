@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
 
 import {
   Adapter,
@@ -169,6 +171,99 @@ function assertClaudeHooksEnabledByEnvironment(): void {
   }
 }
 
+/**
+ * Claude Code settings files that can set `disableAllHooks`, most specific
+ * first, which is also their precedence. Managed policy is not read: crbuddy
+ * cannot override it, and a policy that blocks the Stop hook already fails
+ * closed as missing completion evidence.
+ */
+function claudeSettingsFiles(repoRoot: string | null, env: NodeJS.ProcessEnv): string[] {
+  const userDir = env.CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), '.claude');
+  const project = repoRoot
+    ? [
+        path.join(repoRoot, '.claude', 'settings.local.json'),
+        path.join(repoRoot, '.claude', 'settings.json'),
+      ]
+    : [];
+
+  return [...project, path.join(userDir, 'settings.json')];
+}
+
+/**
+ * The settings file whose `"disableAllHooks": true` is in effect, if any. As
+ * in Claude Code, the most specific file that sets the key decides, so a
+ * project's `false` wins over a user-level `true`.
+ */
+export function claudeHookDisablingSettingsFile(
+  repoRoot: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  for (const file of claudeSettingsFiles(repoRoot, env)) {
+    let value: unknown;
+
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      value = typeof parsed === 'object' && parsed !== null
+        ? (parsed as Record<string, unknown>).disableAllHooks
+        : undefined;
+    } catch {
+      continue;
+    }
+
+    if (typeof value === 'boolean') return value ? file : null;
+  }
+
+  return null;
+}
+
+/** Repo-relative or ~-prefixed: the message can land in a shared report. */
+function displaySettingsPath(file: string, repoRoot: string | null): string {
+  for (const [base, prefix] of [[repoRoot, ''], [homedir(), '~/']] as const) {
+    if (!base) continue;
+
+    const relative = path.relative(base, file);
+
+    if (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+      return `${prefix}${relative.split(path.sep).join('/')}`;
+    }
+  }
+
+  return file;
+}
+
+/** Why Claude hooks would be off for a run in this repository, if they would. */
+export function claudeHooksDisabledReason(
+  repoRoot: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const variable = claudeHookDisablingEnvironmentVariable(env);
+  if (variable) return `${variable} disables Claude hooks`;
+
+  const file = claudeHookDisablingSettingsFile(repoRoot, env);
+  if (file) return `${displaySettingsPath(file, repoRoot)} sets "disableAllHooks": true`;
+
+  return null;
+}
+
+/**
+ * Refuse rather than override. Forcing `disableAllHooks: false` from the
+ * command line would switch back on every hook the user turned off, including
+ * hooks a cloned repository ships, just to install crbuddy's own.
+ */
+function assertClaudeHooksEnabledBySettings(repoRoot: string): void {
+  const file = claudeHookDisablingSettingsFile(repoRoot);
+
+  if (file) {
+    throw new UnsafeInvocationError(
+      `${displaySettingsPath(file, repoRoot)} sets "disableAllHooks": true, which also ` +
+        `turns off the per-run Stop hook crbuddy needs to verify that a Claude review ` +
+        `finished. crbuddy will not override it, because that would re-enable every hook ` +
+        `you disabled. Remove the setting to use Claude reviewers here, or take the ` +
+        `Claude entries out of this panel.`,
+    );
+  }
+}
+
 function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void {
   if (!args || args.length === 0) return;
 
@@ -216,11 +311,9 @@ interface ClaudeCompletionEvidence {
 
 function claudeCompletionSettings(evidencePath: string): string {
   return JSON.stringify({
-    // Command-line settings outrank user/project/local settings, so a local
-    // `disableAllHooks: true` cannot silently suppress crbuddy's evidence hook.
-    // Managed policy can still prohibit non-managed hooks; in that case the
-    // missing evidence remains a fail-closed completion error.
-    disableAllHooks: false,
+    // `disableAllHooks` is deliberately left alone; build() refuses instead
+    // (see assertClaudeHooksEnabledBySettings). Anything that still blocks
+    // this hook, such as managed policy, fails closed as missing evidence.
     hooks: {
       Stop: [
         {
@@ -338,6 +431,7 @@ export const claudeAdapter: Adapter = {
 
     if (request.completionEvidencePath) {
       assertClaudeHooksEnabledByEnvironment();
+      assertClaudeHooksEnabledBySettings(request.repoRoot);
 
       const settingsFlag = requireSafetyFlag(
         request,

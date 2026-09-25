@@ -307,6 +307,15 @@ effort setting unless their adapter documents a default.
 separate cloud Ultrareview product, which is asynchronous under `claude -p` and
 may consume paid usage credits. crbuddy refuses it on the normal Claude lane.
 
+Claude lanes need hooks: crbuddy confirms that a Claude review finished with a
+per-run Stop hook. If `CLAUDE_CODE_SIMPLE` or `CLAUDE_CODE_SAFE_MODE` is set, or
+the Claude Code settings in effect for the repository set `"disableAllHooks":
+true` (`.claude/settings.local.json`, then `.claude/settings.json`, then
+`~/.claude/settings.json`; the most specific file that sets it wins), crbuddy
+refuses the Claude lanes rather than overriding that choice, since turning hooks
+back on would also re-enable every other hook you disabled. `crbuddy doctor`
+reports the same.
+
 ## Caveats
 
 Read these. Several are consequences of deliberate design choices rather than

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { ADAPTERS, claudeHookDisablingEnvironmentVariable } from '../adapters/vendors.js';
+import { ADAPTERS, claudeHooksDisabledReason } from '../adapters/vendors.js';
 import { isNewerThanStamp } from '../adapters/effort.js';
 import { isVersionAtLeast } from '../adapters/version.js';
 import { probe, runProcess } from '../run/spawn.js';
@@ -104,7 +104,7 @@ export async function runDoctor(): Promise<number> {
       // and lets go perform the authoritative build-time check.
       const requiredFlagsOk = help === null || missingRequired.length === 0;
       const hookDisabledBy =
-        adapter.name === 'claude' ? claudeHookDisablingEnvironmentVariable() : null;
+        adapter.name === 'claude' ? claudeHooksDisabledReason(repoRoot) : null;
       const adapterUsable =
         result.present && versionOk && requiredFlagsOk && hookDisabledBy === null;
       const mark = !result.present
@@ -181,7 +181,7 @@ export async function runDoctor(): Promise<number> {
 
         if (hookDisabledBy) {
           console.log(
-            `       problem:  ${hookDisabledBy} disables Claude hooks; crbuddy go will refuse Claude`,
+            `       problem:  ${hookDisabledBy}; crbuddy go will refuse Claude`,
           );
         }
       }
