@@ -10,7 +10,10 @@ import { FPS } from './timeline.js';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const name = args.includes('--name') ? args[args.indexOf('--name') + 1] : 'crbuddy-promo';
-if (!name || name.startsWith('--')) throw new Error('--name needs a file name, e.g. --name crbuddy-promo-2');
+// A plain file name, so the video always lands in out/.
+if (!name || name.startsWith('--') || name !== path.basename(name) || name === '..') {
+  throw new Error('--name needs a plain file name, e.g. --name crbuddy-promo-2');
+}
 const run = (command, args) => execFileSync(command, args, { cwd: root, stdio: 'inherit' });
 
 run(process.execPath, ['audio.mjs']);
