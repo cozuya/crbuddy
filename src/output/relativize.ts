@@ -32,7 +32,8 @@ export function relativizePaths(
   }
 
   // Characters that continue a path segment. A `.` counts only when a name
-  // follows it, so a root that ends a sentence is still stripped.
+  // follows it, so a root that ends a sentence is still stripped. That makes
+  // a sibling literally named `<root>..x` look like one; an accepted miss.
   const before = '(?<![\\p{L}\\p{N}_.~-])';
   const after = '(?:[\\\\/]|(?![\\p{L}\\p{N}_~-]|\\.[\\p{L}\\p{N}_~-]))';
   const flags = options.foldCase ? 'giu' : 'gu';

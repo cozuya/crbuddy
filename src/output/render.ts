@@ -23,6 +23,12 @@ export interface RunRecord {
   diagnostics?: string;
 }
 
+/**
+ * `version`, `generated`, `configSource` and `configScope` (and a run's
+ * `cliVersion`) are not rendered: they went unused when the report's
+ * frontmatter was removed with the consolidation pass in 0.4.0, and nothing
+ * else reads them. Kept for now as provenance a report block could show.
+ */
 export interface ReportContext {
   version: string;
   runId: string;

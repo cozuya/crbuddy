@@ -506,6 +506,10 @@ export function legacyRawOutputPaths(
 ): string[] {
   const paths: string[] = [];
 
+  // The default name is covered even in a repository that never ran an old
+  // version. A file of that name is taken to be crbuddy's; the cost is only
+  // that its changes sit out of review, while missing a real leftover would
+  // put the last run's findings in front of every reviewer.
   for (const candidate of [configured, LEGACY_RAW_OUTPUT]) {
     if (!candidate) continue;
 
@@ -556,6 +560,10 @@ export function legacyRawRecoveryPaths(
  * One file under two spellings: identical, or differing only in case while
  * naming the same directory entry, as a case-folding volume allows. Stashing
  * both spellings would move the file once and then fail on the second move.
+ *
+ * Deliberately exact, unlike the output-lock key (go.ts pathKey), which folds
+ * case on every macOS volume: over-merging is harmless for a lock, but here it
+ * would drop a real, distinct file from the set that is hidden.
  */
 function sameOutputFile(a: string, b: string): boolean {
   if (a === b) return true;
