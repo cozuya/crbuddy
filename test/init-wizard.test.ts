@@ -375,6 +375,23 @@ test('a CLI too old for crbuddy go is flagged and never added by default', async
   assert.ok(vendors.includes(`✓ Codex CLI  ${codexAdapter.minVersion} (codex)`), vendors);
 });
 
+test('setup stops when every installed CLI is too old for crbuddy go', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-all-outdated-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const ui = new DefaultingUI();
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    {
+      ui,
+      detect: async () => [{ adapter: claudeAdapter, present: true, version: '2.0.0' }],
+      settingsFile: path.join(repo, 'settings.json'),
+    },
+  );
+  assert.equal(code, 1);
+  assert.match(ui.cancelled.join('\n'), /Every installed vendor CLI is older than crbuddy supports/);
+  assert.ok(!existsSync(path.join(repo, '.crbuddy', 'config.json')));
+});
+
 class DefaultingUI implements WizardUI {
   readonly interactive: boolean = false;
   readonly notes: Array<{ title?: string; message: string }> = [];

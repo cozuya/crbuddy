@@ -274,7 +274,8 @@ Accepting every setup default adds one reviewer per installed CLI: "Add
 another?" defaults to Yes, and the vendor picker to a CLI without a reviewer,
 until each installed CLI has one. A CLI older than crbuddy supports is marked
 in the setup list and is never a default, since `crbuddy go` would refuse the
-whole panel; you can still pick it if you are about to update it.
+whole panel; you can still pick it if you are about to update it. If every
+installed CLI is that old, setup stops and asks you to update one first.
 
 For piped setup, Codex model numbers are `1` GPT-6 Astra, `2` GPT-6 Sol,
 `3` GPT-6 Luna, `4` Other; update scripts that used the v0.3.x positions

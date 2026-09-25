@@ -204,6 +204,16 @@ async function wizard(
     return 1;
   }
 
+  // A panel of only these would be refused by every `crbuddy go`, so there
+  // is nothing worth saving yet.
+  if (available.every((adapter) => outdated.has(adapter))) {
+    ui.cancel(
+      'Every installed vendor CLI is older than crbuddy supports (marked above).\n' +
+        'Update at least one, then run setup again.',
+    );
+    return 1;
+  }
+
   ui.message(
     'Detection checks presence only; crbuddy does not check whether CLIs are logged in.',
   );
