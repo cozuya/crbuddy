@@ -342,7 +342,9 @@ output while it exists. It is excluded from the diff and moved aside while
 reviewers run, and crash recovery accepts it, because a stash from before
 0.4.0 may hold one next to the report. Unlike the report it is always put
 back, since nothing replaces it. Paths outside the repository are left alone:
-an ignored key does not get the consent such a path requires. For the same
+an ignored key does not get the consent such a path requires. The exception is
+crash recovery for a global config, which is the user's own: a stash from
+before 0.4.0 that holds such a path next to the report is restored whole. For the same
 reason `crbuddy config` keeps a custom `output.raw` while the report it names
 may still exist; only the default name is found without it.
 

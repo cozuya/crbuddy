@@ -10,6 +10,7 @@ import {
   assertUsableOutput,
   canonicalOutputPath,
   legacyRawOutputPaths,
+  legacyRawRecoveryPaths,
   LoadedConfig,
   repoRelative,
   resolveOutputPaths,
@@ -206,6 +207,11 @@ export async function runGo(options: GoOptions): Promise<number> {
       outputPaths.merged,
     );
     const ownOutputs = [outputPaths.merged, ...legacyRaw];
+    // Recovery may also restore an old raw report outside the repository.
+    const recoverable = [
+      ...ownOutputs,
+      ...legacyRawRecoveryPaths(repoRoot, loaded.legacyRawOutput, loaded.scope),
+    ];
 
     // A project-local config is a file that ships with a repository, so a
     // repository you merely cloned can choose where crbuddy writes. Obtain
@@ -248,7 +254,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     // Hold the destination locks while checking whether existing files may
     // be replaced. Otherwise another repository sharing an output path can
     // change that answer between confirmation and commit.
-    outputLocks = await acquireOutputLocks(ownOutputs);
+    outputLocks = await acquireOutputLocks(recoverable);
 
     // Recover anything a crashed run left in a holding directory before
     // deciding whether an existing report may be replaced. Otherwise the
@@ -259,10 +265,10 @@ export async function runGo(options: GoOptions): Promise<number> {
     // is restored whole or not at all, so that path must be allowed too.
     const recovered = [
       ...(await recoverStrandedOutputs(repoRoot, stateDir, {
-        allowedPaths: ownOutputs,
+        allowedPaths: recoverable,
       })),
       ...(await recoverStrandedOutputs(repoRoot, workDir, {
-        allowedPaths: ownOutputs,
+        allowedPaths: recoverable,
       })),
     ];
 

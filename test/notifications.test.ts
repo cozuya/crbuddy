@@ -384,6 +384,45 @@ test('a crash stash from before 0.4.0 that holds the raw report is recovered who
   assert.ok(!seen.includes('CODE-REVIEW-HANDOFF.raw.md'));
 });
 
+test('a pre-0.4 crash stash with an outside raw report is recovered only for a global config', async (t) => {
+  for (const scope of ['global', 'project'] as const) {
+    const f = await fixture(t);
+    const repo = await realpath(f.repo);
+    const outside = path.join(await realpath(f.root), 'outside.raw.md');
+    const config = JSON.stringify({ ...f.config, output: { ...f.config.output, raw: outside } });
+    if (scope === 'global') {
+      await rm(f.configFile);
+      await writeFile(path.join(f.userDir, '.crbuddy', 'config.json'), config);
+    } else {
+      await writeFile(f.configFile, config);
+    }
+
+    const batch = path.join(repo, '.crbuddy', 'previous', 'old-run');
+    await mkdir(batch, { recursive: true });
+    await writeFile(path.join(batch, '0.stashed'), 'previous report\n');
+    await writeFile(path.join(batch, '1.stashed'), 'previous raw report\n');
+    await writeFile(path.join(batch, 'manifest.json'), JSON.stringify([
+      { stored: '0.stashed', relative: path.join(repo, 'review.md') },
+      { stored: '1.stashed', relative: outside },
+    ]));
+
+    const result = await f.run();
+    assert.equal(result.code, 0, result.stderr);
+
+    if (scope === 'global') {
+      assert.match(result.stderr, /Recovered .*review\.md, .*outside\.raw\.md left behind/);
+      assert.ok(!existsSync(batch));
+      assert.equal(await readFile(outside, 'utf8'), 'previous raw report\n');
+    } else {
+      // Restoring outside the repository from a cloned repo's config would
+      // need consent, so the whole batch is left where it is.
+      assert.doesNotMatch(result.stderr, /Recovered/);
+      assert.ok(existsSync(path.join(batch, '1.stashed')));
+      assert.ok(!existsSync(outside));
+    }
+  }
+});
+
 test('missing, disabled and malformed global settings do not prevent a review or send a POST', async (t) => {
   const f = await fixture(t);
   for (const contents of [null, '{}', '{bad secret-topic']) {

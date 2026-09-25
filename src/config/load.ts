@@ -528,6 +528,31 @@ export function legacyRawOutputPaths(
 }
 
 /**
+ * A global config's obsolete `output.raw` when it points outside the
+ * repository. Nothing hides or writes that file, but a crash stash from
+ * before 0.4.0 may hold it next to the report, and recovery restores a batch
+ * whole or not at all. A project config's outside path is never returned:
+ * restoring there would be a write outside the repository nobody consented to,
+ * so such a batch stays in the holding directory.
+ */
+export function legacyRawRecoveryPaths(
+  repoRoot: string,
+  configured: string | undefined,
+  scope: 'project' | 'global',
+): string[] {
+  if (!configured || scope !== 'global') return [];
+
+  try {
+    assertUsableOutput({ merged: configured }, 'output.raw', repoRoot);
+    const absolute = canonicalOutputPath(repoRoot, configured);
+    return repoRelative(absolute, repoRoot) === null ? [absolute] : [];
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    return [];
+  }
+}
+
+/**
  * One file under two spellings: identical, or differing only in case while
  * naming the same directory entry, as a case-folding volume allows. Stashing
  * both spellings would move the file once and then fail on the second move.
