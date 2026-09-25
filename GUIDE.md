@@ -39,7 +39,9 @@ receiving agent already does. Old configs still load; their `merge`,
 `mergeTimeoutMs`, and `output.raw` keys are ignored with a one-line note, and
 `crbuddy config` rewrites the file without them. A raw report an earlier
 version left in the repository is still hidden from reviewers during a run
-and put back afterwards; delete it when convenient.
+and put back afterwards; delete it when convenient. Until you do,
+`crbuddy config` keeps a custom `output.raw`, since that key is how crbuddy
+finds the file.
 
 It's blocking on purpose - run it in a spare terminal. There's no daemon, no
 `status` command, and no resumability, because a second terminal solves that

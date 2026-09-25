@@ -99,7 +99,8 @@ export async function runGo(options: GoOptions): Promise<number> {
     progress.dim(
       `Ignoring ${loaded.obsoleteKeys.join(', ')} in ` +
         `${displayPath(loaded.source, repoRoot)}: consolidation was removed in ` +
-        '0.4.0. `crbuddy config` rewrites the file without them.',
+        '0.4.0. `crbuddy config` drops them, keeping output.raw only while the ' +
+        'old report it names may still exist.',
     );
   }
 

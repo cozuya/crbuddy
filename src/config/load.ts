@@ -90,7 +90,7 @@ export async function readAndValidate(file: string): Promise<Config> {
   return (await readConfigFile(file)).config;
 }
 
-async function readConfigFile(
+export async function readConfigFile(
   file: string,
 ): Promise<{ config: Config; obsoleteKeys: string[]; legacyRawOutput: string | null }> {
   let text: string;

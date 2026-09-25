@@ -148,6 +148,52 @@ test('editing an existing config preserves accepted values and drops consolidati
   assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), existing);
 });
 
+test('editing keeps a custom pre-0.4 output.raw while its report is still here', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-legacy-raw-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const configPath = path.join(repo, '.crbuddy', 'config.json');
+  const report = path.join(repo, 'reviews', 'raw.md');
+  const existing: Config = {
+    configVersion: CONFIG_VERSION,
+    output: { destination: 'terminal', merged: 'REVIEW.md' },
+    target: 'uncommitted',
+    refuseIfOutputExists: false,
+    timeoutMs: DEFAULTS.timeoutMs,
+    maxConcurrent: DEFAULTS.maxConcurrent,
+    maxDiffBytes: DEFAULTS.maxDiffBytes,
+    panel: [{ id: 'codex-gpt-6-luna', vendor: 'codex', model: 'gpt-6-luna', effort: 'xhigh' }],
+  };
+  const withRaw = { ...existing, output: { ...existing.output, raw: 'reviews/raw.md' } };
+
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await mkdir(path.dirname(report), { recursive: true });
+  await writeFile(configPath, JSON.stringify(withRaw), 'utf8');
+  await writeFile(report, 'old raw report', 'utf8');
+
+  const edit = async () => {
+    const ui = new DefaultingUI();
+    const code = await runInit(
+      { repoRoot: repo, scope: 'project' },
+      { ui, detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
+    );
+    assert.equal(code, 0);
+    return ui;
+  };
+
+  // `crbuddy go` can only keep hiding that report while the key names it.
+  const ui = await edit();
+  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), withRaw);
+  assert.match(
+    ui.messages.map((entry) => entry.message).join('\n'),
+    /Kept output\.raw: reviews\/raw\.md is a report from crbuddy before 0\.4\.0/,
+  );
+
+  // Once the report is gone, the next rewrite drops the key.
+  await rm(report);
+  await edit();
+  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), existing);
+});
+
 test('editing replaces an output filename that is an existing directory', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-directory-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
