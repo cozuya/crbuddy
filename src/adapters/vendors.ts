@@ -216,9 +216,23 @@ export function claudeHookDisablingSettingsFile(
   return null;
 }
 
-/** Repo-relative or ~-prefixed: the message can land in a shared report. */
-function displaySettingsPath(file: string, repoRoot: string | null): string {
-  for (const [base, prefix] of [[repoRoot, ''], [homedir(), '~/']] as const) {
+/**
+ * Never an absolute path: the message can land in a shared report. Relative
+ * to the repository, then to CLAUDE_CONFIG_DIR, then to the home directory.
+ */
+function displaySettingsPath(
+  file: string,
+  repoRoot: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const configDir = env.CLAUDE_CONFIG_DIR?.trim();
+  const bases: Array<[string | null | undefined, string]> = [
+    [repoRoot, ''],
+    [configDir, '$CLAUDE_CONFIG_DIR/'],
+    [homedir(), '~/'],
+  ];
+
+  for (const [base, prefix] of bases) {
     if (!base) continue;
 
     const relative = path.relative(base, file);
@@ -228,7 +242,7 @@ function displaySettingsPath(file: string, repoRoot: string | null): string {
     }
   }
 
-  return file;
+  return path.basename(file);
 }
 
 /** Why Claude hooks would be off for a run in this repository, if they would. */
@@ -240,7 +254,7 @@ export function claudeHooksDisabledReason(
   if (variable) return `${variable} disables Claude hooks`;
 
   const file = claudeHookDisablingSettingsFile(repoRoot, env);
-  if (file) return `${displaySettingsPath(file, repoRoot)} sets "disableAllHooks": true`;
+  if (file) return `${displaySettingsPath(file, repoRoot, env)} sets "disableAllHooks": true`;
 
   return null;
 }
@@ -319,6 +333,10 @@ function claudeCompletionSettings(evidencePath: string): string {
         {
           hooks: [
             {
+              // Exec form: Claude Code runs `command` with `args` directly, no
+              // shell, so a node path with spaces needs no quoting. Every
+              // Claude lane depends on it; if `args` were ever ignored, each
+              // would fail as completion_evidence_missing, never pass quietly.
               type: 'command',
               command: process.execPath,
               args: ['-e', CLAUDE_STOP_EVIDENCE_SCRIPT, evidencePath],
@@ -355,6 +373,11 @@ function readClaudeCompletionEvidence(
   }
 }
 
+/**
+ * Kept deliberately (see the "legacy completion marker" test). The marker is
+ * no longer requested, but a trailing copy is still protocol, not review
+ * text. Only an exact final line is ever removed.
+ */
 function stripClaudeCompletionMarker(output: string): string {
   const trimmed = output.trimEnd();
   const lines = trimmed.split(/\r\n|\r|\n/);
@@ -527,6 +550,9 @@ export const claudeAdapter: Adapter = {
     return stripClaudeCompletionMarker(result.stdout);
   },
 
+  // Completion is the Stop hook's evidence that no background work is left,
+  // not anything in the text: once that holds, any nonempty final output is
+  // the review, even a short one. Guessing from prose is what this replaced.
   checkCompletion(result, invocation): CompletionCheck {
     const review = stripClaudeCompletionMarker(result.stdout).trim();
     const base = defaultCompletion({ ...result, body: review });

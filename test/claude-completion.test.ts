@@ -106,6 +106,14 @@ test('doctor names whatever disables Claude hooks, environment first', (t) => {
     claudeHooksDisabledReason(f.repoRoot, { ...f.env, CLAUDE_CODE_SIMPLE: '1' }),
     'CLAUDE_CODE_SIMPLE disables Claude hooks',
   );
+
+  // A config directory outside the repository and home is never spelled out.
+  f.write(f.project, { hooks: {} });
+  f.write(f.user, { disableAllHooks: true });
+  assert.equal(
+    claudeHooksDisabledReason(f.repoRoot, f.env),
+    '$CLAUDE_CONFIG_DIR/settings.json sets "disableAllHooks": true',
+  );
 });
 
 test('Claude refuses to launch when repository settings disable all hooks', (t) => {
