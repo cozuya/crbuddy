@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>crbuddy promo</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="stage"></div>
+<script type="module">
+import { init, render, DURATION } from './scene.js';
+
+const stage = document.getElementById('stage');
+const capture = new URLSearchParams(location.search).has('capture');
+
+await init(stage);
+window.render = render;
+window.DURATION = DURATION;
+window.__ready = true;
+
+if (!capture) {
+  // Preview player: scale the stage to the window and play in real time.
+  const fit = () => {
+    const scale = Math.min(innerWidth / 1920, (innerHeight - 44) / 1080);
+    stage.style.transform = `scale(${scale})`;
+  };
+  addEventListener('resize', fit);
+  fit();
+
+  const bar = document.createElement('div');
+  bar.id = 'player';
+  bar.innerHTML = `<button id="play">pause</button><input id="seek" type="range" min="0"
+    max="${DURATION}" step="0.001" value="0"><span id="clock"></span>`;
+  document.body.appendChild(bar);
+
+  const audio = new Audio('out/audio.wav');
+  const seek = bar.querySelector('#seek');
+  const clock = bar.querySelector('#clock');
+  const button = bar.querySelector('#play');
+  let playing = true;
+  let origin = performance.now();
+  let at = 0;
+
+  const syncAudio = () => {
+    audio.currentTime = at;
+    if (playing) audio.play().catch(() => {});
+    else audio.pause();
+  };
+
+  button.onclick = () => {
+    playing = !playing;
+    origin = performance.now() - at * 1000;
+    button.textContent = playing ? 'pause' : 'play';
+    syncAudio();
+  };
+  seek.oninput = () => {
+    at = Number(seek.value);
+    origin = performance.now() - at * 1000;
+    syncAudio();
+  };
+  addEventListener('keydown', (event) => {
+    if (event.code === 'Space') button.onclick();
+  });
+  addEventListener('pointerdown', syncAudio, { once: true });
+
+  const tick = (now) => {
+    if (playing) {
+      at = (now - origin) / 1000;
+      if (at >= DURATION) {
+        at = 0;
+        origin = now;
+        syncAudio();
+      }
+      seek.value = at;
+    }
+    render(at);
+    clock.textContent = `${at.toFixed(2)}s / ${DURATION.toFixed(2)}s`;
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+</script>
+</body>
+</html>
