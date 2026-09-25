@@ -494,6 +494,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     );
 
     const names = displayNames(config.panel, adapters);
+    const foldsCase = repoFoldsCase(repoRoot);
     progress.startPulse(startedAt);
 
     const records = await Promise.all(
@@ -507,6 +508,7 @@ export async function runGo(options: GoOptions): Promise<number> {
             display: names.get(entry.id)!,
             target,
             repoRoot,
+            repoFoldsCase: foldsCase,
             scratch,
             timeoutMs: config.timeoutMs,
             onStart: () => { launchedReviewers.add(entry.id); },
@@ -593,7 +595,7 @@ export async function runGo(options: GoOptions): Promise<number> {
 
       progress.stopPulse();
       progress.dim('');
-      progress.line(`Wrote ${config.output.merged}.`);
+      progress.line(`Wrote ${sanitizeTerminalInline(config.output.merged)}.`);
 
       progress.bell();
     }
@@ -705,6 +707,8 @@ interface ExecuteArgs {
   display: (effort: string | null) => string;
   target: ResolvedTarget;
   repoRoot: string;
+  /** Whether the repository's volume folds path case; fixed for the run. */
+  repoFoldsCase: boolean;
   scratch: string;
   timeoutMs: number;
   instructionsOverride?: string;
@@ -752,6 +756,8 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       ...(entry.effort ? { effort: entry.effort } : {}),
       ...(entry.vendorArgs ? { vendorArgs: entry.vendorArgs } : {}),
       repoRoot: args.repoRoot,
+      // Only Claude proves completion with an evidence file, written by its
+      // Stop hook into this run's scratch, which the adapter cannot see.
       ...(adapter.name === 'claude'
         ? {
             completionEvidencePath: path.join(
@@ -866,7 +872,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
   }
 
   const output = relativizePaths(body, args.repoRoot, {
-    foldCase: repoFoldsCase(args.repoRoot),
+    foldCase: args.repoFoldsCase,
   });
 
   return report({
@@ -1072,11 +1078,11 @@ function filesystemFoldsCase(canonical: string): boolean {
  *
  * Kept in the user's crbuddy state rather than a predictable shared-temp
  * path that another local account could pre-create or redirect.
- */
-/**
- * Every path this run moves, replaces or sweeps temp files beside, including
- * a leftover pre-0.4 raw report: another repository may use one as its own
- * output, and cleanup here would otherwise delete that run's staged report.
+ *
+ * `files` is every path this run moves, replaces or sweeps temp files beside,
+ * including a leftover pre-0.4 raw report: another repository may use one as
+ * its own output, and cleanup here would otherwise delete that run's staged
+ * report.
  */
 async function acquireOutputLocks(files: string[]): Promise<Lock[]> {
 
