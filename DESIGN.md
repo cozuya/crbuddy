@@ -103,7 +103,7 @@ Unknown keys are fatal, except keys left by the removed consolidation pass (§8)
 
 ### Wizard behavior
 
-The wizard detects installed vendor CLIs, builds the panel, chooses where the report goes, and chooses the target. Accepting every default adds one reviewer per installed CLI.
+The wizard detects installed vendor CLIs, builds the panel, chooses where the report goes, and chooses the target. Accepting every default adds one reviewer per installed CLI, skipping any CLI whose detected version `crbuddy go` would refuse.
 
 Notification questions come last, after review and `.gitignore` questions, and
 always edit the global preference regardless of review-config scope. They

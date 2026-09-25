@@ -23,6 +23,7 @@ import {
   slug,
 } from '../config/load.js';
 import { ADAPTERS, getAdapter } from '../adapters/vendors.js';
+import { isVersionAtLeast } from '../adapters/version.js';
 import { probe } from '../run/spawn.js';
 import { Adapter } from '../adapters/types.js';
 import { PromptAborted } from '../util/prompt.js';
@@ -187,6 +188,7 @@ async function wizard(
     'Vendor CLIs checked',
   );
   const available = detections.filter((d) => d.present).map((d) => d.adapter);
+  const outdated = new Set(detections.filter(isTooOld).map((d) => d.adapter));
 
   ui.note(detections.map(formatDetection).join('\n'), 'Vendor CLIs');
 
@@ -206,6 +208,7 @@ async function wizard(
   const { panel, savedReviewInstructions } = await buildPanel(
     ui,
     available,
+    outdated,
     existing?.panel ?? [],
     initialSavedReviewInstructions,
   );
@@ -428,14 +431,28 @@ async function detectAdapters(signal?: AbortSignal): Promise<Detection[]> {
   return results;
 }
 
+/**
+ * Installed at a version `crbuddy go` is certain to refuse, which aborts the
+ * whole panel. An unparsed version does not count: go probes again first.
+ */
+function isTooOld(detection: Detection): boolean {
+  return (
+    detection.present &&
+    detection.version !== null &&
+    !isVersionAtLeast(detection.version, detection.adapter.minVersion)
+  );
+}
+
 function formatDetection(detection: Detection): string {
-  const mark = detection.present ? '\u2713' : '\u00b7';
+  const tooOld = isTooOld(detection);
+  const mark = !detection.present ? '\u00b7' : tooOld ? '\u2717' : '\u2713';
   const version = detection.present
     ? detection.version ?? 'installed; version unknown'
     : 'unavailable';
   const summary =
     `${mark} ${detection.adapter.label}  ${version} ` +
-    `(${detection.adapter.command})`;
+    `(${detection.adapter.command})` +
+    (tooOld ? ` - too old; crbuddy needs ${detection.adapter.minVersion} or newer` : '');
 
   return detection.error ? `${summary}\n  ${detection.error}` : summary;
 }
@@ -772,6 +789,7 @@ async function chooseReviewInstructions(
 async function buildPanel(
   ui: WizardUI,
   available: Adapter[],
+  outdated: ReadonlySet<Adapter>,
   existing: PanelEntry[],
   initialSavedReviewInstructions?: string,
 ): Promise<PanelBuildResult> {
@@ -803,9 +821,13 @@ async function buildPanel(
   for (;;) {
     // A panel is the point of crbuddy, so Enter keeps adding reviewers until
     // every installed CLI has one, then stops. Defaulting to an unused CLI
-    // means accepting every default yields one reviewer per vendor.
+    // means accepting every default yields one reviewer per vendor. A CLI
+    // too old for `crbuddy go` is never a default: go would refuse the whole
+    // panel, so adding it stays a deliberate choice.
     const unused = available.findIndex(
-      (candidate) => !panel.some((entry) => entry.vendor === candidate.name),
+      (candidate) =>
+        !outdated.has(candidate) &&
+        !panel.some((entry) => entry.vendor === candidate.name),
     );
 
     if (panel.length > 0) {
@@ -820,7 +842,13 @@ async function buildPanel(
 
     const adapter = await ui.select(
       'Add a reviewer',
-      available.map((candidate) => ({ label: candidate.label, value: candidate })),
+      available.map((candidate) => ({
+        label: candidate.label,
+        value: candidate,
+        ...(outdated.has(candidate)
+          ? { hint: `too old; update ${candidate.command} before crbuddy go` }
+          : {}),
+      })),
       unused >= 0 ? unused : 0,
     );
 

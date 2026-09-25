@@ -270,6 +270,54 @@ test('accepting every default adds one reviewer per installed CLI, then stops', 
   );
 });
 
+test('a CLI too old for crbuddy go is flagged and never added by default', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-outdated-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const addAnotherDefaults: boolean[] = [];
+  const reviewerHints: Array<string | undefined> = [];
+  class RecordingUI extends DefaultingUI {
+    override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+      if (question.endsWith('Add another?')) addAnotherDefaults.push(defaultYes);
+      return super.confirm(question, defaultYes);
+    }
+    override async select<T>(
+      question: string,
+      choices: Array<Choice<T>>,
+      initialIndex = 0,
+    ): Promise<T> {
+      if (question === 'Add a reviewer') reviewerHints.push(...choices.map((choice) => choice.hint));
+      return super.select(question, choices, initialIndex);
+    }
+  }
+  const ui = new RecordingUI();
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    {
+      ui,
+      detect: async () => [
+        { adapter: claudeAdapter, present: true, version: '2.0.0' },
+        { adapter: codexAdapter, present: true, version: codexAdapter.minVersion },
+      ],
+      settingsFile: path.join(repo, 'settings.json'),
+    },
+  );
+  assert.equal(code, 0);
+  // Codex is the only usable CLI: it is the first default, and none follows.
+  assert.deepEqual(addAnotherDefaults, [false]);
+  const saved = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.panel.map((entry: PanelEntry) => entry.vendor), ['codex']);
+  // Still offered, for someone about to update it.
+  assert.deepEqual(reviewerHints, ['too old; update claude before crbuddy go', undefined]);
+  const vendors = ui.notes.find((entry) => entry.title === 'Vendor CLIs')?.message ?? '';
+  assert.ok(
+    vendors.includes(
+      `✗ Claude Code  2.0.0 (claude) - too old; crbuddy needs ${claudeAdapter.minVersion} or newer`,
+    ),
+    vendors,
+  );
+  assert.ok(vendors.includes(`✓ Codex CLI  ${codexAdapter.minVersion} (codex)`), vendors);
+});
+
 class DefaultingUI implements WizardUI {
   readonly interactive: boolean = false;
   readonly notes: Array<{ title?: string; message: string }> = [];
