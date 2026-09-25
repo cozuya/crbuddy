@@ -97,11 +97,20 @@ export async function runGo(options: GoOptions): Promise<number> {
   const config = loaded.config;
 
   if (loaded.obsoleteKeys.length > 0) {
+    // `crbuddy config` drops the rest but keeps output.raw: it is how a
+    // leftover raw report at that path is still found and hidden.
+    const dropped = loaded.obsoleteKeys.filter((key) => key !== 'output.raw');
+
     progress.dim(
       `Ignoring ${loaded.obsoleteKeys.join(', ')} in ` +
-        `${displayPath(loaded.source, repoRoot)}: consolidation was removed in ` +
-        '0.4.0. `crbuddy config` drops them, keeping output.raw only while the ' +
-        'old report it names may still exist.',
+        `${displayPath(loaded.source, repoRoot)}: consolidation was removed in 0.4.0.` +
+        (dropped.length > 0
+          ? ` \`crbuddy config\` rewrites the file without ${dropped.join(' and ')}.`
+          : '') +
+        (dropped.length < loaded.obsoleteKeys.length
+          ? ' output.raw still hides the old raw report it names from reviewers; ' +
+            'remove it once that report is gone.'
+          : ''),
     );
   }
 

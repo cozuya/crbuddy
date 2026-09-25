@@ -17,10 +17,7 @@ import {
 } from '../config/schema.js';
 import {
   assertUsableOutput,
-  canonicalOutputPath,
-  ConfigError,
   homeConfigPath,
-  legacyRawOutputPaths,
   projectConfigPath,
   readConfigFile,
   repoRelative,
@@ -254,7 +251,7 @@ async function wizard(
     return 1;
   }
 
-  const keptRaw = keptLegacyRawOutput(ui, existingLegacyRaw, scope, options.repoRoot, config);
+  const keptRaw = keptLegacyRawOutput(ui, existingLegacyRaw);
   const saved = keptRaw ? { ...config, output: { ...config.output, raw: keptRaw } } : config;
 
   await mkdir(path.dirname(targetFile), { recursive: true });
@@ -441,56 +438,20 @@ async function detectAdapters(signal?: AbortSignal): Promise<Detection[]> {
 }
 
 /**
- * A custom pre-0.4 `output.raw` survives a rewrite while the report it names
- * may still exist: `crbuddy go` can only keep that file hidden from reviewers
- * while the key names it. The default name needs no key, and a path outside
- * the repository is never hidden anyway. A global config serves repositories
- * this run cannot see, so it keeps any path that could be inside one.
+ * A custom pre-0.4 `output.raw` survives every rewrite. The key is how
+ * `crbuddy go` finds a raw report at that path to hide it from reviewers and
+ * to recover it after a crash, and whether one is left - in this repository,
+ * another, or a crash stash - cannot be settled from here. So only the user
+ * removes it. The default name needs no key: it is always covered.
  */
-function keptLegacyRawOutput(
-  ui: WizardUI,
-  raw: string | null,
-  scope: 'global' | 'project',
-  repoRoot: string | null,
-  config: Config,
-): string | null {
+function keptLegacyRawOutput(ui: WizardUI, raw: string | null): string | null {
   if (!raw || raw === LEGACY_RAW_OUTPUT) return null;
 
-  let present = false;
-
-  if (repoRoot !== null) {
-    try {
-      // Tracked only if usable, inside the repository, and not merely another
-      // spelling of the report or of the default name, which need no key.
-      const configured = canonicalOutputPath(repoRoot, raw);
-      present =
-        existsSync(configured) &&
-        legacyRawOutputPaths(
-          repoRoot,
-          raw,
-          canonicalOutputPath(repoRoot, config.output.merged),
-        ).includes(configured);
-    } catch (error) {
-      if (!(error instanceof ConfigError)) throw error;
-    }
-  }
-
-  const insideSomeRepository = !path.isAbsolute(raw) &&
-    path.normalize(raw).split(/[\\/]/)[0] !== '..';
-
-  if (!(scope === 'project' ? present : present || insideSomeRepository)) return null;
-
-  const shown = sanitizeTerminalInline(raw);
-
   ui.message(
-    (present
-      ? `Kept output.raw: ${shown} is a report from crbuddy before 0.4.0 that is still ` +
-        'in this repository.'
-      : `Kept output.raw: crbuddy before 0.4.0 wrote raw reports to ${shown}.`) +
-      ' crbuddy keeps such a file hidden from reviewers only while this key names it. ' +
-      (scope === 'project'
-        ? 'Delete the file, then run `crbuddy config` again to drop the key.'
-        : 'Once no repository has one, remove the key from the file.'),
+    `Kept output.raw (${sanitizeTerminalInline(raw)}): crbuddy before 0.4.0 wrote raw ` +
+      'reports there, and crbuddy keeps such a file hidden from reviewers, and ' +
+      'recovers it after a crash, only while this key names it. Remove the key ' +
+      'yourself once no such report is left.',
     'warn',
   );
 

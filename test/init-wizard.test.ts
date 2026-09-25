@@ -128,7 +128,8 @@ test('editing an existing config preserves accepted values and drops consolidati
     ],
   };
 
-  // As an earlier version wrote it: the wizard saves it back without them.
+  // As an earlier version wrote it: the wizard saves it back without the
+  // consolidation keys, keeping only the custom output.raw.
   const legacy = {
     ...existing,
     output: { ...existing.output, raw: 'REVIEW.raw.md' },
@@ -145,10 +146,13 @@ test('editing an existing config preserves accepted values and drops consolidati
   );
 
   assert.equal(code, 0);
-  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), existing);
+  assert.deepEqual(
+    JSON.parse(await readFile(configPath, 'utf8')),
+    { ...existing, output: { ...existing.output, raw: 'REVIEW.raw.md' } },
+  );
 });
 
-test('editing keeps a custom pre-0.4 output.raw while its report is still here', async (t) => {
+test('editing keeps a custom pre-0.4 output.raw until it is removed by hand', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-legacy-raw-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
   const configPath = path.join(repo, '.crbuddy', 'config.json');
@@ -180,16 +184,23 @@ test('editing keeps a custom pre-0.4 output.raw while its report is still here',
     return ui;
   };
 
-  // `crbuddy go` can only keep hiding that report while the key names it.
-  const ui = await edit();
-  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), withRaw);
-  assert.match(
-    ui.messages.map((entry) => entry.message).join('\n'),
-    /Kept output\.raw: reviews\/raw\.md is a report from crbuddy before 0\.4\.0/,
-  );
+  // `crbuddy go` can only keep hiding that report while the key names it,
+  // and whether one is left elsewhere cannot be settled from here.
+  for (const reportPresent of [true, false]) {
+    if (!reportPresent) await rm(report);
+    const ui = await edit();
+    assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), withRaw);
+    assert.match(
+      ui.messages.map((entry) => entry.message).join('\n'),
+      /Kept output\.raw \(reviews\/raw\.md\).*Remove the key yourself/s,
+    );
+  }
 
-  // Once the report is gone, the next rewrite drops the key.
-  await rm(report);
+  // The default name needs no key: it is always covered.
+  await writeFile(configPath, JSON.stringify({
+    ...existing,
+    output: { ...existing.output, raw: 'CODE-REVIEW-HANDOFF.raw.md' },
+  }), 'utf8');
   await edit();
   assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), existing);
 });

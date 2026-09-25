@@ -320,6 +320,8 @@ test('a config with consolidation keys still reviews and says they are ignored',
   const result = await f.run();
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stderr, /Ignoring merge, mergeTimeoutMs, output\.raw in /);
+  assert.match(result.stderr, /rewrites the file without merge and mergeTimeoutMs\./);
+  assert.match(result.stderr, /output\.raw still hides the old raw report/);
   assert.equal(result.posts.length, 1);
   assert.ok(existsSync(path.join(f.repo, 'review.md')));
   assert.ok(!existsSync(path.join(f.repo, 'review.raw.md')));

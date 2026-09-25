@@ -334,7 +334,8 @@ one of them over.
 
 Configs from those versions still load. Their `merge`, `mergeTimeoutMs`, and
 `output.raw` keys are the one exception to unknown keys being fatal: they are
-ignored, `crbuddy go` says so, and `crbuddy config` saves the file without them.
+ignored, `crbuddy go` says so, and `crbuddy config` saves the file without them,
+except a custom `output.raw` (below).
 
 A raw report an earlier version left inside the repository - at the configured
 `output.raw` or the default `CODE-REVIEW-HANDOFF.raw.md` - is still crbuddy
@@ -344,9 +345,12 @@ reviewers run, and crash recovery accepts it, because a stash from before
 back, since nothing replaces it. Paths outside the repository are left alone:
 an ignored key does not get the consent such a path requires. The exception is
 crash recovery for a global config, which is the user's own: a stash from
-before 0.4.0 that holds such a path next to the report is restored whole. For the same
-reason `crbuddy config` keeps a custom `output.raw` while the report it names
-may still exist; only the default name is found without it.
+before 0.4.0 that holds such a path next to the report is restored whole.
+
+Because a custom `output.raw` is the only way crbuddy finds such a report,
+`crbuddy config` keeps that key until the user removes it: whether a report is
+left at that path, in some repository or crash stash, cannot be settled from
+the config alone. The default name needs no key.
 
 ---
 
