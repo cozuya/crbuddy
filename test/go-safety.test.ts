@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
   mkdtemp,
@@ -9,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { after, test } from 'node:test';
@@ -19,11 +20,12 @@ import { LoadedConfig } from '../src/config/load.js';
 import {
   canConfirm,
   confirm,
+  pathKey,
   PreflightError,
   repoStateDir,
   runGo,
 } from '../src/commands/go.js';
-import { acquireLock, LockError } from '../src/util/lock.js';
+import { acquireLock, acquireLockAt, LockError } from '../src/util/lock.js';
 import { stashExistingOutputs } from '../src/output/write.js';
 
 const created: string[] = [];
@@ -92,6 +94,33 @@ test('a contending run cannot clear the active run scratch directory', async () 
     );
 
     assert.equal(await readFile(sentinel, 'utf8'), 'active run');
+  } finally {
+    await held.release();
+  }
+});
+
+test('a leftover pre-0.4 raw report is locked along with the report', async () => {
+  const repoRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-go-legacy-lock-')));
+  created.push(repoRoot, repoStateDir(repoRoot));
+
+  // Another repository writing its report to this path holds this lock.
+  const legacy = path.join(repoRoot, 'CODE-REVIEW-HANDOFF.raw.md');
+  const key = createHash('sha1').update(pathKey(legacy)).digest('hex').slice(0, 16);
+  const held = await acquireLockAt(path.join(homedir(), '.crbuddy', 'locks', key), 'test');
+
+  try {
+    await assert.rejects(
+      runGo({
+        repoRoot,
+        loaded: loaded(repoRoot, config('review.md'), 'global'),
+        version: 'test',
+        force: false,
+        wholeCheckout: false,
+        strict: false,
+      }),
+      (error: unknown) =>
+        error instanceof LockError && error.message.includes('CODE-REVIEW-HANDOFF.raw.md'),
+    );
   } finally {
     await held.release();
   }

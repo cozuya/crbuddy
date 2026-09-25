@@ -247,7 +247,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     // Hold the destination locks while checking whether existing files may
     // be replaced. Otherwise another repository sharing an output path can
     // change that answer between confirmation and commit.
-    outputLocks = await acquireOutputLocks(outputPaths);
+    outputLocks = await acquireOutputLocks(ownOutputs);
 
     // Recover anything a crashed run left in a holding directory before
     // deciding whether an existing report may be replaced. Otherwise the
@@ -1057,8 +1057,12 @@ function filesystemFoldsCase(canonical: string): boolean {
  * Kept in the user's crbuddy state rather than a predictable shared-temp
  * path that another local account could pre-create or redirect.
  */
-async function acquireOutputLocks(output: { merged: string }): Promise<Lock[]> {
-  const files = [output.merged];
+/**
+ * Every path this run moves, replaces or sweeps temp files beside, including
+ * a leftover pre-0.4 raw report: another repository may use one as its own
+ * output, and cleanup here would otherwise delete that run's staged report.
+ */
+async function acquireOutputLocks(files: string[]): Promise<Lock[]> {
 
   // Keyed by the same string that decides identity, so two spellings can
   // never collapse to one key while still counting as two locks to take.
