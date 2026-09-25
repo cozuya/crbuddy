@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
@@ -1015,40 +1015,51 @@ export function repoStateDir(
   return path.join(canonicalStateRoot, key);
 }
 
-/** Whether the volume holding this repository treats path case as equal. */
-function repoFoldsCase(repoRoot: string): boolean {
+/**
+ * Whether the volume holding this repository treats path case as equal, for
+ * relativizing reviewer output. Probed by identity on every platform: a
+ * case-insensitive volume mounted under Linux (WSL's /mnt/c, for one) folds
+ * too. lstat, so a symlink spelled with other case is not taken for folding.
+ *
+ * Deliberately separate from filesystemFoldsCase, whose answer keys the
+ * state directory: changing it would strand existing checkouts' crash stashes.
+ */
+export function repoFoldsCase(repoRoot: string): boolean {
   try {
-    return filesystemFoldsCase(realpathSync.native(path.resolve(repoRoot)));
+    const canonical = realpathSync.native(path.resolve(repoRoot));
+    const alternate = otherCaseSpelling(canonical);
+    if (alternate === null) return false;
+
+    const real = lstatSync(canonical);
+    const other = lstatSync(alternate);
+    return real.dev === other.dev && real.ino === other.ino;
   } catch {
     return false;
   }
+}
+
+/** The path with its last letter's case flipped, or null if it has none. */
+function otherCaseSpelling(canonical: string): string | null {
+  for (let index = canonical.length - 1; index >= 0; index -= 1) {
+    const character = canonical[index]!;
+    const flipped = character === character.toLowerCase()
+      ? character.toUpperCase()
+      : character.toLowerCase();
+
+    if (/[a-zA-Z]/.test(character)) {
+      return `${canonical.slice(0, index)}${flipped}${canonical.slice(index + 1)}`;
+    }
+  }
+
+  return null;
 }
 
 /** Probe the actual volume instead of assuming every macOS volume folds. */
 function filesystemFoldsCase(canonical: string): boolean {
   if (process.platform !== 'win32' && process.platform !== 'darwin') return false;
 
-  let alternate = '';
-
-  for (let index = canonical.length - 1; index >= 0; index -= 1) {
-    const character = canonical[index]!;
-
-    if (/[a-z]/.test(character)) {
-      alternate =
-        `${canonical.slice(0, index)}${character.toUpperCase()}` +
-        canonical.slice(index + 1);
-      break;
-    }
-
-    if (/[A-Z]/.test(character)) {
-      alternate =
-        `${canonical.slice(0, index)}${character.toLowerCase()}` +
-        canonical.slice(index + 1);
-      break;
-    }
-  }
-
-  if (alternate === '') return false;
+  const alternate = otherCaseSpelling(canonical);
+  if (alternate === null) return false;
 
   try {
     return realpathSync.native(alternate) === canonical;

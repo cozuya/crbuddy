@@ -22,6 +22,7 @@ import {
   confirm,
   pathKey,
   PreflightError,
+  repoFoldsCase,
   repoStateDir,
   runGo,
 } from '../src/commands/go.js';
@@ -96,6 +97,24 @@ test('a contending run cannot clear the active run scratch directory', async () 
     assert.equal(await readFile(sentinel, 'utf8'), 'active run');
   } finally {
     await held.release();
+  }
+});
+
+test('case folding is probed by file identity, not guessed from the platform', async () => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-fold-probe-')));
+  created.push(root);
+  const repo = path.join(root, 'Repo');
+  const otherCase = path.join(root, 'RepO');
+  await mkdir(repo);
+
+  // Whatever this volume does, the probe must agree with it.
+  const folds = existsSync(otherCase);
+  assert.equal(repoFoldsCase(repo), folds);
+
+  if (!folds) {
+    // A symlink spelled with other case is an alias, not case folding.
+    await linkDirectory(repo, otherCase);
+    assert.equal(repoFoldsCase(repo), false);
   }
 });
 
