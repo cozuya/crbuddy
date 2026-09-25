@@ -86,6 +86,13 @@ export const DEFAULT_OUTPUT: OutputConfig = {
   merged: 'CODE-REVIEW-HANDOFF.md',
 };
 
+/**
+ * Where versions before 0.4.0 wrote the consolidation pass's raw report
+ * unless `output.raw` said otherwise. Nothing writes it now, but a copy left
+ * behind must still be hidden from reviewers and recoverable from a crash.
+ */
+export const LEGACY_RAW_OUTPUT = 'CODE-REVIEW-HANDOFF.raw.md';
+
 export const DEFAULTS = {
   configVersion: CONFIG_VERSION,
   target: 'uncommitted' as Target,

@@ -9,6 +9,7 @@ import { HOME_CONFIG_DIR, PanelEntry, WORK_DIR } from '../config/schema.js';
 import {
   assertUsableOutput,
   canonicalOutputPath,
+  legacyRawOutputPaths,
   LoadedConfig,
   repoRelative,
   resolveOutputPaths,
@@ -146,6 +147,10 @@ export async function runGo(options: GoOptions): Promise<number> {
   };
 
   let stashed: Awaited<ReturnType<typeof stashExistingOutputs>> | null = null;
+  // A raw report left by a version before 0.4.0. Hidden while reviewers run,
+  // like the previous report, but always put back: this run replaces it with
+  // nothing, so discarding it would only delete the user's file.
+  let legacyStashed: Awaited<ReturnType<typeof stashExistingOutputs>> | null = null;
   let interrupted = false;
   const launchedReviewers = new Set<string>();
   let notificationOutcome: ReviewOutcome = 'failed';
@@ -169,11 +174,19 @@ export async function runGo(options: GoOptions): Promise<number> {
     killAll('SIGTERM');
   };
 
+  const restoreLegacyOutput = async (): Promise<void> => {
+    const pending = legacyStashed;
+    legacyStashed = null;
+
+    if (pending) reportStranded(await pending.restore());
+  };
+
   const restorePreviousOutput = async (): Promise<void> => {
     const pending = stashed;
     stashed = null;
 
     if (pending) reportStranded(await pending.restore());
+    await restoreLegacyOutput();
   };
 
   process.on('SIGINT', onInterrupt);
@@ -186,6 +199,12 @@ export async function runGo(options: GoOptions): Promise<number> {
     // somewhere else for locking or writes.
     assertUsableOutput(config.output, 'output', repoRoot);
     const outputPaths = resolveOutputPaths(repoRoot, config.output);
+    const legacyRaw = legacyRawOutputPaths(
+      repoRoot,
+      loaded.legacyRawOutput,
+      outputPaths.merged,
+    );
+    const ownOutputs = [outputPaths.merged, ...legacyRaw];
 
     // A project-local config is a file that ships with a repository, so a
     // repository you merely cloned can choose where crbuddy writes. Obtain
@@ -235,12 +254,14 @@ export async function runGo(options: GoOptions): Promise<number> {
     // refusal check sees an empty destination, recovery restores the report,
     // and this run overwrites it without the configured confirmation.
     // External project-config paths have already passed their separate gate.
+    // A crash stash from before 0.4.0 also holds the raw report, and a batch
+    // is restored whole or not at all, so that path must be allowed too.
     const recovered = [
       ...(await recoverStrandedOutputs(repoRoot, stateDir, {
-        allowedPaths: [outputPaths.merged],
+        allowedPaths: ownOutputs,
       })),
       ...(await recoverStrandedOutputs(repoRoot, workDir, {
-        allowedPaths: [outputPaths.merged],
+        allowedPaths: ownOutputs,
       })),
     ];
 
@@ -283,8 +304,8 @@ export async function runGo(options: GoOptions): Promise<number> {
     await rm(scratch, { recursive: true, force: true });
     await mkdir(scratch, { recursive: true });
 
-    await cleanupTemps(repoRoot, [outputPaths.merged], {
-      allowedPaths: [outputPaths.merged],
+    await cleanupTemps(repoRoot, ownOutputs, {
+      allowedPaths: ownOutputs,
     });
 
     // --- preflight -------------------------------------------------------
@@ -352,7 +373,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       // worktree, and an absolute path that DOES resolve inside still has
       // to be handed over repo-relative or it is silently not excluded -
       // which would feed the last run's report back into this one.
-      exclude: [outputPaths.merged, `${WORK_DIR}/`]
+      exclude: [...ownOutputs, `${WORK_DIR}/`]
         .map((entry) => repoRelative(entry, repoRoot))
         .filter((entry): entry is string => entry !== null),
     };
@@ -427,6 +448,24 @@ export async function runGo(options: GoOptions): Promise<number> {
       runId,
       { allowedPaths: [outputPaths.merged] },
     );
+
+    if (legacyRaw.some((absolute) => existsSync(absolute))) {
+      legacyStashed = await stashExistingOutputs(
+        repoRoot,
+        stateDir,
+        legacyRaw,
+        `${runId}-legacy`,
+        { allowedPaths: legacyRaw },
+      );
+
+      for (const absolute of legacyStashed.moved) {
+        progress.dim(
+          `${repoRelative(absolute, repoRoot) ?? absolute} is a report from crbuddy ` +
+            'before 0.4.0, which no longer updates it. It is hidden from reviewers ' +
+            'and put back afterwards; delete it when convenient.',
+        );
+      }
+    }
 
     // --- panel -----------------------------------------------------------
 
@@ -534,6 +573,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       );
       await stashed.discard();
       stashed = null;
+      await restoreLegacyOutput();
 
       progress.stopPulse();
       progress.dim('');

@@ -37,7 +37,9 @@ duplicate findings with an extra model run and wrote a second `.raw.md` file.
 It was removed: it cost a model run and a failure mode to do something the
 receiving agent already does. Old configs still load; their `merge`,
 `mergeTimeoutMs`, and `output.raw` keys are ignored with a one-line note, and
-`crbuddy config` rewrites the file without them.
+`crbuddy config` rewrites the file without them. A raw report an earlier
+version left in the repository is still hidden from reviewers during a run
+and put back afterwards; delete it when convenient.
 
 It's blocking on purpose - run it in a spare terminal. There's no daemon, no
 `status` command, and no resumability, because a second terminal solves that

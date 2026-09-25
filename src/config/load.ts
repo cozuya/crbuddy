@@ -10,6 +10,7 @@ import {
   DEFAULTS,
   DEFAULT_OUTPUT,
   HOME_CONFIG_DIR,
+  LEGACY_RAW_OUTPUT,
   OutputConfig,
   OutputDestination,
   PROJECT_CONFIG_DIR,
@@ -26,6 +27,12 @@ export interface LoadedConfig {
   scope: 'project' | 'global';
   /** Keys from removed features that were present and ignored. */
   obsoleteKeys: string[];
+  /**
+   * The obsolete `output.raw` value, if the file still has one. Ignored as
+   * configuration, but it names a file an earlier version may have left in
+   * the repository.
+   */
+  legacyRawOutput?: string;
 }
 
 export function homeConfigPath(): string {
@@ -44,7 +51,7 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
   const projectPath = projectConfigPath(repoRoot);
 
   if (existsSync(projectPath)) {
-    const { config, obsoleteKeys } = await readConfigFile(projectPath);
+    const { config, obsoleteKeys, legacyRawOutput } = await readConfigFile(projectPath);
     assertUsableOutput(config.output, `${projectPath}.output`, repoRoot);
 
     return {
@@ -52,13 +59,14 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
       source: projectPath,
       scope: 'project',
       obsoleteKeys,
+      ...(legacyRawOutput ? { legacyRawOutput } : {}),
     };
   }
 
   const globalPath = homeConfigPath();
 
   if (existsSync(globalPath)) {
-    const { config, obsoleteKeys } = await readConfigFile(globalPath);
+    const { config, obsoleteKeys, legacyRawOutput } = await readConfigFile(globalPath);
     assertUsableOutput(config.output, `${globalPath}.output`, repoRoot);
 
     return {
@@ -66,6 +74,7 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
       source: globalPath,
       scope: 'global',
       obsoleteKeys,
+      ...(legacyRawOutput ? { legacyRawOutput } : {}),
     };
   }
 
@@ -83,7 +92,7 @@ export async function readAndValidate(file: string): Promise<Config> {
 
 async function readConfigFile(
   file: string,
-): Promise<{ config: Config; obsoleteKeys: string[] }> {
+): Promise<{ config: Config; obsoleteKeys: string[]; legacyRawOutput: string | null }> {
   let text: string;
 
   try {
@@ -100,7 +109,11 @@ async function readConfigFile(
     throw new ConfigError(`Config at ${file} is not valid JSON: ${String(error)}`);
   }
 
-  return { config: validate(parsed, file), obsoleteKeys: obsoleteKeys(parsed) };
+  return {
+    config: validate(parsed, file),
+    obsoleteKeys: obsoleteKeys(parsed),
+    legacyRawOutput: legacyRawOutput(parsed),
+  };
 }
 
 /** Tolerate // and /* *\/ comments so the shipped example stays annotated. */
@@ -187,6 +200,17 @@ export function obsoleteKeys(input: unknown): string[] {
   }
 
   return found;
+}
+
+/** The obsolete `output.raw` path, when it is a usable string. */
+export function legacyRawOutput(input: unknown): string | null {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
+
+  const output = (input as Record<string, unknown>).output;
+  if (typeof output !== 'object' || output === null) return null;
+
+  const raw = (output as Record<string, unknown>).raw;
+  return typeof raw === 'string' && raw.trim() !== '' ? raw : null;
 }
 
 const TOP_LEVEL_KEYS = new Set([
@@ -463,6 +487,41 @@ export function resolveOutputPaths(
   output: { merged: string },
 ): { merged: string } {
   return { merged: canonicalOutputPath(repoRoot, output.merged) };
+}
+
+/**
+ * Canonical paths where a version before 0.4.0 may have left a raw report:
+ * the configured `output.raw`, and its default name. Nothing writes these any
+ * more, but such a file still has to be moved aside while reviewers run, and
+ * a crash stash holding one has to stay recoverable.
+ *
+ * Only usable paths inside the repository qualify. An ignored key never gets
+ * the consent a path outside it needs, and outside the repository the file
+ * is not in front of the reviewers anyway.
+ */
+export function legacyRawOutputPaths(
+  repoRoot: string,
+  configured: string | undefined,
+  merged: string,
+): string[] {
+  const paths = new Set<string>();
+
+  for (const candidate of [configured, LEGACY_RAW_OUTPUT]) {
+    if (!candidate) continue;
+
+    try {
+      assertUsableOutput({ merged: candidate }, 'output.raw', repoRoot);
+      const absolute = canonicalOutputPath(repoRoot, candidate);
+
+      if (absolute !== merged && repoRelative(absolute, repoRoot) !== null) {
+        paths.add(absolute);
+      }
+    } catch (error) {
+      if (!(error instanceof ConfigError)) throw error;
+    }
+  }
+
+  return [...paths];
 }
 
 /** Resolve the longest existing prefix and preserve any missing suffix. */

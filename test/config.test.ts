@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -6,6 +7,8 @@ import { test } from 'node:test';
 import {
   assertUsableOutput,
   ConfigError,
+  legacyRawOutput,
+  legacyRawOutputPaths,
   obsoleteKeys,
   stripJsonComments,
   validate,
@@ -167,6 +170,34 @@ test('keys from the removed consolidation pass are ignored and reported', () => 
   assert.ok(!('mergeTimeoutMs' in config));
   assert.deepEqual(obsoleteKeys(legacy), ['merge', 'mergeTimeoutMs', 'output.raw']);
   assert.deepEqual(obsoleteKeys(minimal), []);
+  assert.equal(legacyRawOutput(legacy), 'x.md');
+  assert.equal(legacyRawOutput(minimal), null);
+  assert.equal(legacyRawOutput({ output: { raw: 7 } }), null);
+  assert.equal(legacyRawOutput({ output: { raw: '  ' } }), null);
+});
+
+test('leftover raw reports are tracked only at usable paths inside the repository', async (t) => {
+  const repoRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-legacy-raw-')));
+  t.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const merged = path.join(repoRoot, 'CODE-REVIEW-HANDOFF.md');
+  const legacyDefault = path.join(repoRoot, 'CODE-REVIEW-HANDOFF.raw.md');
+
+  // The default name is always covered; a configured path is added to it.
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, undefined, merged), [legacyDefault]);
+  assert.deepEqual(
+    legacyRawOutputPaths(repoRoot, 'reviews/raw.md', merged),
+    [path.join(repoRoot, 'reviews', 'raw.md'), legacyDefault],
+  );
+
+  // Never the live report, never outside the repository, never git's or
+  // crbuddy's own state, and never a directory.
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, 'CODE-REVIEW-HANDOFF.md', merged), [legacyDefault]);
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, legacyDefault, legacyDefault), []);
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, '../outside.raw.md', merged), [legacyDefault]);
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, '.git/hooks/pre-commit', merged), [legacyDefault]);
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, '.crbuddy/raw.md', merged), [legacyDefault]);
+  await mkdir(path.join(repoRoot, 'a-directory'));
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, 'a-directory', merged), [legacyDefault]);
 });
 
 test('an empty panel is rejected', () => {

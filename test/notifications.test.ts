@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -40,6 +40,7 @@ async function fixture(t: TestContext) {
   const printedFile = path.join(root, 'printed');
   const postStartedFile = path.join(root, 'post-started.json');
   const launchedFile = path.join(root, 'launched');
+  const seenFile = path.join(root, 'seen.json');
   const fakeCli = path.join(root, 'reviewer.cjs');
   const preload = path.join(root, 'preload.mjs');
   await mkdir(path.dirname(configFile), { recursive: true });
@@ -67,6 +68,7 @@ async function fixture(t: TestContext) {
   await writeFile(fakeCli, `
     const fs = require('node:fs');
     const model = process.argv[2];
+    fs.writeFileSync(${JSON.stringify(seenFile)}, JSON.stringify(fs.readdirSync('.')));
     fs.writeFileSync(${JSON.stringify(launchedFile)}, model);
     if (process.env.CRB_TEST_COMMIT_FAILURE) fs.mkdirSync('review.md');
     const finish = () => {
@@ -218,7 +220,7 @@ async function fixture(t: TestContext) {
     return { ...result, posts, menu };
   }
 
-  return { root, repo, userDir, config, configFile, settingsFile, launchedFile, saveConfig, run };
+  return { root, repo, userDir, config, configFile, settingsFile, launchedFile, seenFile, saveConfig, run };
 }
 
 test('successful launched go sends exactly one small POST using global preferences', async (t) => {
@@ -321,6 +323,65 @@ test('a config with consolidation keys still reviews and says they are ignored',
   assert.equal(result.posts.length, 1);
   assert.ok(existsSync(path.join(f.repo, 'review.md')));
   assert.ok(!existsSync(path.join(f.repo, 'review.raw.md')));
+});
+
+test('a raw report left by crbuddy before 0.4.0 is hidden, excluded and put back', async (t) => {
+  const f = await fixture(t);
+  const legacyDefault = path.join(f.repo, 'CODE-REVIEW-HANDOFF.raw.md');
+  const legacyConfigured = path.join(f.repo, 'custom.raw.md');
+
+  for (const destination of ['file', 'terminal']) {
+    await writeFile(f.configFile, JSON.stringify({
+      ...f.config,
+      output: { ...f.config.output, destination, raw: 'custom.raw.md' },
+    }));
+    await writeFile(legacyDefault, 'old default raw findings\n');
+    await writeFile(legacyConfigured, 'old configured raw findings\n');
+
+    const result = await f.run();
+    assert.equal(result.code, 0, result.stderr);
+
+    const seen: string[] = JSON.parse(await readFile(f.seenFile, 'utf8'));
+    assert.ok(seen.includes('code.txt'), destination);
+    assert.ok(!seen.includes('CODE-REVIEW-HANDOFF.raw.md'), destination);
+    assert.ok(!seen.includes('custom.raw.md'), destination);
+    // Out of the diff too: the one real change is all that is under review.
+    assert.match(result.stderr, /Reviewing 1 file\(s\)/);
+    assert.match(result.stderr, /custom\.raw\.md is a report from crbuddy before 0\.4\.0/);
+
+    assert.equal(await readFile(legacyDefault, 'utf8'), 'old default raw findings\n');
+    assert.equal(await readFile(legacyConfigured, 'utf8'), 'old configured raw findings\n');
+  }
+});
+
+test('a crash stash from before 0.4.0 that holds the raw report is recovered whole', async (t) => {
+  const f = await fixture(t);
+  const repo = await realpath(f.repo);
+  const batch = path.join(repo, '.crbuddy', 'previous', 'old-run');
+  await mkdir(batch, { recursive: true });
+  await writeFile(path.join(batch, '0.stashed'), 'previous report\n');
+  await writeFile(path.join(batch, '1.stashed'), 'previous raw report\n');
+  await writeFile(path.join(batch, 'manifest.json'), JSON.stringify([
+    { stored: '0.stashed', relative: path.join(repo, 'review.md') },
+    { stored: '1.stashed', relative: path.join(repo, 'CODE-REVIEW-HANDOFF.raw.md') },
+  ]));
+
+  const result = await f.run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(
+    result.stderr,
+    /Recovered .*review\.md, .*CODE-REVIEW-HANDOFF\.raw\.md left behind by an interrupted run/,
+  );
+  assert.ok(!existsSync(batch));
+
+  // This run replaces the recovered report and keeps the raw one hidden.
+  assert.match(await readFile(path.join(repo, 'review.md'), 'utf8'), /First defect/);
+  assert.equal(
+    await readFile(path.join(repo, 'CODE-REVIEW-HANDOFF.raw.md'), 'utf8'),
+    'previous raw report\n',
+  );
+  const seen: string[] = JSON.parse(await readFile(f.seenFile, 'utf8'));
+  assert.ok(!seen.includes('CODE-REVIEW-HANDOFF.raw.md'));
 });
 
 test('missing, disabled and malformed global settings do not prevent a review or send a POST', async (t) => {

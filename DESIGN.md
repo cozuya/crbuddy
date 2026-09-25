@@ -336,6 +336,14 @@ Configs from those versions still load. Their `merge`, `mergeTimeoutMs`, and
 `output.raw` keys are the one exception to unknown keys being fatal: they are
 ignored, `crbuddy go` says so, and `crbuddy config` saves the file without them.
 
+A raw report an earlier version left inside the repository - at the configured
+`output.raw` or the default `CODE-REVIEW-HANDOFF.raw.md` - is still crbuddy
+output while it exists. It is excluded from the diff and moved aside while
+reviewers run, and crash recovery accepts it, because a stash from before
+0.4.0 may hold one next to the report. Unlike the report it is always put
+back, since nothing replaces it. Paths outside the repository are left alone:
+an ignored key does not get the consent such a path requires.
+
 ---
 
 ## 9. Output format
