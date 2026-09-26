@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
   mkdtemp,
@@ -9,21 +10,23 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { after, test } from 'node:test';
 
 import { Config } from '../src/config/schema.js';
-import { ConfigError, LoadedConfig } from '../src/config/load.js';
+import { LoadedConfig } from '../src/config/load.js';
 import {
   canConfirm,
   confirm,
+  pathKey,
   PreflightError,
+  repoFoldsCase,
   repoStateDir,
   runGo,
 } from '../src/commands/go.js';
-import { acquireLock, LockError } from '../src/util/lock.js';
+import { acquireLock, acquireLockAt, LockError } from '../src/util/lock.js';
 import { stashExistingOutputs } from '../src/output/write.js';
 
 const created: string[] = [];
@@ -34,21 +37,15 @@ after(async () => {
   }
 });
 
-function config(
-  merged: string,
-  raw: string,
-  refuseIfOutputExists = false,
-): Config {
+function config(merged: string, refuseIfOutputExists = false): Config {
   return {
     configVersion: 1,
-    output: { destination: 'file', merged, raw },
+    output: { destination: 'file', merged },
     target: 'uncommitted',
     refuseIfOutputExists,
     timeoutMs: 1_000,
-    mergeTimeoutMs: 1_000,
     maxConcurrent: 1,
     maxDiffBytes: 1_000,
-    merge: { enabled: false, vendor: '', model: '' },
     panel: [{ id: 'unused', vendor: 'unused', model: 'unused' }],
   };
 }
@@ -62,6 +59,7 @@ function loaded(
     config: value,
     source: path.join(repoRoot, '.crbuddy', 'config.json'),
     scope,
+    obsoleteKeys: [],
   };
 }
 
@@ -87,7 +85,7 @@ test('a contending run cannot clear the active run scratch directory', async () 
     await assert.rejects(
       runGo({
         repoRoot,
-        loaded: loaded(repoRoot, config('review.md', 'review.raw.md'), 'global'),
+        loaded: loaded(repoRoot, config('review.md'), 'global'),
         version: 'test',
         force: false,
         wholeCheckout: false,
@@ -102,6 +100,51 @@ test('a contending run cannot clear the active run scratch directory', async () 
   }
 });
 
+test('case folding is probed by file identity, not guessed from the platform', async () => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-fold-probe-')));
+  created.push(root);
+  const repo = path.join(root, 'Repo');
+  const otherCase = path.join(root, 'RepO');
+  await mkdir(repo);
+
+  // Whatever this volume does, the probe must agree with it.
+  const folds = existsSync(otherCase);
+  assert.equal(repoFoldsCase(repo), folds);
+
+  if (!folds) {
+    // A symlink spelled with other case is an alias, not case folding.
+    await linkDirectory(repo, otherCase);
+    assert.equal(repoFoldsCase(repo), false);
+  }
+});
+
+test('a leftover pre-0.4 raw report is locked along with the report', async () => {
+  const repoRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-go-legacy-lock-')));
+  created.push(repoRoot, repoStateDir(repoRoot));
+
+  // Another repository writing its report to this path holds this lock.
+  const legacy = path.join(repoRoot, 'CODE-REVIEW-HANDOFF.raw.md');
+  const key = createHash('sha1').update(pathKey(legacy)).digest('hex').slice(0, 16);
+  const held = await acquireLockAt(path.join(homedir(), '.crbuddy', 'locks', key), 'test');
+
+  try {
+    await assert.rejects(
+      runGo({
+        repoRoot,
+        loaded: loaded(repoRoot, config('review.md'), 'global'),
+        version: 'test',
+        force: false,
+        wholeCheckout: false,
+        strict: false,
+      }),
+      (error: unknown) =>
+        error instanceof LockError && error.message.includes('CODE-REVIEW-HANDOFF.raw.md'),
+    );
+  } finally {
+    await held.release();
+  }
+});
+
 test('external-output refusal happens before temp cleanup and recovery', async () => {
   const parent = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-external-'));
   created.push(parent);
@@ -110,14 +153,13 @@ test('external-output refusal happens before temp cleanup and recovery', async (
   const workDir = path.join(repoRoot, '.crbuddy');
   const outside = path.join(parent, 'outside');
   const merged = path.join(outside, 'review.md');
-  const raw = path.join(outside, 'review.raw.md');
   const litter = `${merged}.crbuddy-tmp-interrupted`;
   const stored = path.join(workDir, 'previous', 'old-run', '0.stashed');
 
   await mkdir(outside, { recursive: true });
   await writeFile(litter, 'unfinished report', 'utf8');
-  await writeFile(raw, 'previous raw report', 'utf8');
-  await stashExistingOutputs(repoRoot, workDir, [raw], 'old-run');
+  await writeFile(merged, 'previous report', 'utf8');
+  await stashExistingOutputs(repoRoot, workDir, [merged], 'old-run');
 
   const originalTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
   Object.defineProperty(process.stdin, 'isTTY', {
@@ -129,7 +171,7 @@ test('external-output refusal happens before temp cleanup and recovery', async (
     await assert.rejects(
       runGo({
         repoRoot,
-        loaded: loaded(repoRoot, config(merged, raw), 'project'),
+        loaded: loaded(repoRoot, config(merged), 'project'),
         version: 'test',
         force: false,
         wholeCheckout: false,
@@ -149,8 +191,8 @@ test('external-output refusal happens before temp cleanup and recovery', async (
   }
 
   assert.equal(await readFile(litter, 'utf8'), 'unfinished report');
-  assert.ok(!existsSync(raw), 'stranded output must not be recovered before consent');
-  assert.equal(await readFile(stored, 'utf8'), 'previous raw report');
+  assert.ok(!existsSync(merged), 'stranded output must not be recovered before consent');
+  assert.equal(await readFile(stored, 'utf8'), 'previous report');
 });
 
 test('a project output hidden behind an in-repo symlink requires external consent', async () => {
@@ -173,11 +215,7 @@ test('a project output hidden behind an in-repo symlink requires external consen
     await assert.rejects(
       runGo({
         repoRoot,
-        loaded: loaded(
-          repoRoot,
-          config('out/review.md', 'out/review.raw.md'),
-          'project',
-        ),
+        loaded: loaded(repoRoot, config('out/review.md'), 'project'),
         version: 'test',
         force: false,
         wholeCheckout: false,
@@ -190,28 +228,6 @@ test('a project output hidden behind an in-repo symlink requires external consen
   }
 
   assert.ok(!existsSync(path.join(outside, 'review.md')));
-  assert.ok(!existsSync(path.join(outside, 'review.raw.md')));
-});
-
-test('terminal mode rejects merged and raw paths that resolve to one file', async () => {
-  const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-same-output-'));
-  created.push(repoRoot);
-
-  const value = config('review.md', path.join(repoRoot, 'review.md'));
-  value.output.destination = 'terminal';
-
-  await assert.rejects(
-    runGo({
-      repoRoot,
-      loaded: loaded(repoRoot, value, 'global'),
-      version: 'test',
-      force: false,
-      wholeCheckout: false,
-      strict: false,
-    }),
-    (error: unknown) =>
-      error instanceof ConfigError && error.message.includes('same file'),
-  );
 });
 
 test('redirected refusal reports why confirmation is unavailable', async () => {
@@ -219,10 +235,10 @@ test('redirected refusal reports why confirmation is unavailable', async () => {
   created.push(repoRoot);
 
   const workDir = path.join(repoRoot, '.crbuddy');
-  const report = path.join(repoRoot, 'review.raw.md');
+  const report = path.join(repoRoot, 'review.md');
   await mkdir(workDir, { recursive: true });
   await writeFile(report, 'previous report', 'utf8');
-  await stashExistingOutputs(repoRoot, workDir, ['review.raw.md'], 'old-run');
+  await stashExistingOutputs(repoRoot, workDir, ['review.md'], 'old-run');
 
   const originalInputTty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
   const originalErrorTty = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY');
@@ -233,11 +249,7 @@ test('redirected refusal reports why confirmation is unavailable', async () => {
     await assert.rejects(
       runGo({
         repoRoot,
-        loaded: loaded(
-          repoRoot,
-          config('review.md', 'review.raw.md', true),
-          'global',
-        ),
+        loaded: loaded(repoRoot, config('review.md', true), 'global'),
         version: 'test',
         force: false,
         wholeCheckout: false,
@@ -311,7 +323,7 @@ test('confirmation requires a TTY prompt stream and writes the prompt there', as
 });
 
 test('panel scratch is removed after a preflight failure', async () => {
-  const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-merge-cleanup-'));
+  const repoRoot = await mkdtemp(path.join(tmpdir(), 'crbuddy-go-scratch-cleanup-'));
   created.push(repoRoot);
 
   const stateDir = repoStateDir(repoRoot);
@@ -320,7 +332,7 @@ test('panel scratch is removed after a preflight failure', async () => {
   await assert.rejects(
     runGo({
       repoRoot,
-      loaded: loaded(repoRoot, config('review.md', 'review.raw.md'), 'global'),
+      loaded: loaded(repoRoot, config('review.md'), 'global'),
       version: 'test',
       force: false,
       wholeCheckout: false,

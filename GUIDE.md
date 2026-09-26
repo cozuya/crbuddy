@@ -1,8 +1,8 @@
 # crbuddy - detailed documentation
 
 Fan one code review out across several coding-agent CLIs in parallel, each
-blind to the others, then consolidate the results into one markdown file
-meant to be handed to an agent that makes the fixes.
+blind to the others, then collect the results into one markdown file meant to
+be handed to an agent that makes the fixes.
 
 crbuddy holds no model credentials. It drives the vendor CLIs you already
 have installed and logged in, as subprocesses, so reviews run on whatever
@@ -27,16 +27,21 @@ review commands differ in how precisely they accept a target: some can take an
 explicit range, while others expose selectors such as "uncommitted" or "against
 this base branch." Do not edit the tree while a panel is running.
 
-When the reviewers finish, an optional consolidation pass groups findings that
-appear to describe the same defect. The consolidator is deliberately not a
-judge: it cannot reject, rewrite, summarize away, or delete a review finding.
+When the reviewers finish, **`CODE-REVIEW-HANDOFF.md` holds every review
+verbatim**, in the order the reviewers are configured. Nothing is grouped,
+ranked, or deduplicated: the agent you hand the file to reads every finding
+and can judge overlap itself.
 
-**`CODE-REVIEW-HANDOFF.md` is always the deliverable.** With consolidation
-on it holds findings grouped and ordered by how many reviewers raised them,
-and `CODE-REVIEW-HANDOFF.raw.md` is written alongside as the unmerged audit
-trail. With consolidation off - or if it fails - the primary file holds the
-reviews unmerged, with a header saying so. The filename you point an agent at
-never changes.
+Versions before 0.4.0 had an optional consolidation pass that grouped
+duplicate findings with an extra model run and wrote a second `.raw.md` file.
+It was removed: it cost a model run and a failure mode to do something the
+receiving agent already does. Old configs still load; their `merge`,
+`mergeTimeoutMs`, and `output.raw` keys are ignored with a one-line note, and
+`crbuddy config` rewrites the file without them. A raw report an earlier
+version left in the repository is still hidden from reviewers during a run
+and put back afterwards; delete it when convenient. `crbuddy config` keeps a
+custom `output.raw`, since that key is how crbuddy finds the file; remove the
+key yourself once the file is gone.
 
 It's blocking on purpose - run it in a spare terminal. There's no daemon, no
 `status` command, and no resumability, because a second terminal solves that
@@ -46,7 +51,7 @@ for free.
 
 crbuddy has adapters for exactly three CLI interfaces:
 
-| Config `vendor` | Executable | Native diff review | Generic instructed lanes and consolidation |
+| Config `vendor` | Executable | Native diff review | Generic instructed lanes |
 |---|---|---|---|
 | `claude` | Claude Code (`claude`) | Yes - `/code-review` | Yes |
 | `codex` | Codex CLI (`codex`) | Yes - `codex exec review` | Yes |
@@ -77,6 +82,7 @@ separately supported `deepseek` vendor.
 |---|---|
 | `crbuddy init` | Interactive setup. Writes a config. |
 | `crbuddy config` | The same command; edits an existing config. |
+| `crbuddy view` | Show the effective repository-or-global config. Read-only. |
 | `crbuddy go [instructions]` | Run the panel. |
 | `crbuddy doctor` | Report which vendor CLIs are usable, which flags they accept, and why not. Read-only; contacts no models. Also aliased as `check`. |
 
@@ -140,33 +146,26 @@ A copyable configuration is shipped in
   // The paths are relative to the repository root, so one config serves
   // many repos. `../` puts the report outside the repo entirely, where it
   // cannot land in a diff or be committed by accident. An absolute path is
-  // allowed and pins every repository to the same file. Both paths are
-  // kept and validated even in "terminal" mode, so switching back to
-  // "file" restores the last choice. Each path must name a file, never an
-  // existing directory or a filesystem root.
+  // allowed and pins every repository to the same file. The path is kept
+  // and validated even in "terminal" mode, so switching back to "file"
+  // restores the last choice. It must name a file, never an existing
+  // directory or a filesystem root. (The key is `merged` for compatibility
+  // with configs written before consolidation was removed.)
   "output": {
     "destination": "file",
-    "merged": "CODE-REVIEW-HANDOFF.md",
-    "raw": "CODE-REVIEW-HANDOFF.raw.md"
+    "merged": "CODE-REVIEW-HANDOFF.md"
   },
 
   // "uncommitted", or { "base": "main" } for a branch-style review
   "target": "uncommitted",
 
-  "merge": {
-    "enabled": true,
-    "vendor": "claude",
-    "model": "opus",
-    "effort": "high"
-  },
-
   "panel": [
     { "vendor": "claude", "model": "opus", "effort": "max" },
-    { "vendor": "codex", "model": "gpt-5.6-sol", "effort": "xhigh" },
+    { "vendor": "codex", "model": "gpt-6-sol", "effort": "xhigh" },
     {
       "id": "security",
       "vendor": "gemini",
-      "model": "gemini-2.5-pro",
+      "model": "gemini-3.1-pro-preview",
       "instructions": "Review only for security issues: injection, authz, secrets handling."
     }
   ]
@@ -174,9 +173,9 @@ A copyable configuration is shipped in
 ```
 
 Other keys, all optional: `refuseIfOutputExists` (default `false`),
-`timeoutMs` and `mergeTimeoutMs` (both default to one hour),
+`timeoutMs` (default one hour),
 `maxConcurrent` (`0` = unlimited),
-`maxDiffBytes`.
+`maxDiffBytes`, and `savedReviewInstructions` (one reusable custom review prompt).
 
 Unknown keys are a hard error. A typo that silently does nothing is worse
 than a failed startup.
@@ -233,6 +232,20 @@ Not every vendor exposes a usable headless native review surface. For those
 vendors, `crbuddy init` requires explicit `instructions` rather than creating a
 lane that would later be refused. Gemini is currently in this category.
 
+
+In interactive `crb init` / `crb config`, a custom review prompt can be saved as
+`savedReviewInstructions`. Later reviewers can use the vendor default, reuse the
+saved prompt, or enter a new one. Reuse copies the text into that reviewer's own
+`instructions`; review execution never dereferences the saved field. Existing saved
+text can also be forgotten from interactive config. `crb view` and the final setup
+summary show only a sanitized first-line preview (truncated when long) plus an
+approximate wrapped-line count; subsequent lines are never printed verbatim.
+
+Piped setup deliberately keeps its pre-existing answer order. It does not add the
+save/reuse/forget questions: native reviewers still ask only default-vs-custom and
+reviewers without a native lane still read the required custom-instructions answer.
+Manage `savedReviewInstructions` interactively (or edit the JSON) when reuse is wanted.
+
 For Claude Code, native review uses `/code-review` through print mode and gives
 the command crbuddy's captured git range. For Codex, native review uses
 `codex exec review` with the vendor's `--uncommitted` or `--base` selector.
@@ -248,24 +261,39 @@ security boundary or proof that an unknown flag is inert.
 
 ### Models and effort
 
-The Codex model picker offers GPT-6 Astra alongside GPT-5.6 Sol, Terra and Luna.
-Sol remains the default, and “Other…” still accepts arbitrary model IDs. Astra
-must be supported by your installed Codex CLI and account; adding it does not
-raise crbuddy's minimum Codex CLI version.
-Changing the consolidation vendor uses the new vendor's model and effort defaults.
-Re-enabling consolidation without a saved model also uses the vendor's default.
+The Codex model picker offers GPT-6 Astra, Sol and Luna. GPT-6 Sol is the
+default, and “Other…” still accepts arbitrary model IDs. The GPT-6 models must
+be supported by your installed Codex CLI and account; listing them does not
+raise crbuddy's minimum Codex CLI version. GPT-5.6 models are no longer listed,
+but a config that names one still runs: model IDs are passed through unchecked.
 
-For piped setup, Codex model numbers in v0.3.0 are `1` Astra, `2` Sol, `3` Terra,
-`4` Luna, `5` Other; update scripts that used the v0.2.0 positions. An empty
-model answer still accepts the configured model or, on first setup, Sol.
-A saved custom model appears after Other as the default choice, so retaining it
-uses just one answer. Selecting Other explicitly still asks for a model ID.
+The Gemini picker offers Gemini 3.1 Pro (preview, the default) and Gemini 3.5
+Flash. Gemini 2.5 models are no longer listed.
+
+Accepting every setup default adds one reviewer per installed CLI: "Add
+another?" defaults to Yes, and the vendor picker to a CLI without a reviewer,
+until each installed CLI has one. A CLI older than crbuddy supports, or one
+whose version crbuddy cannot read, is marked in the setup list and is never a
+default, since `crbuddy go` would refuse the whole panel; you can still pick it
+if you are about to update it. If every installed CLI is like that, setup stops
+and asks you to update one first. Setup, `crbuddy doctor` and `crbuddy go` all
+read the version the same way, from everything `--version` prints.
+
+For piped setup, Codex model numbers are `1` GPT-6 Astra, `2` GPT-6 Sol,
+`3` GPT-6 Luna, `4` Other; update scripts that used the v0.3.x positions
+(`2` GPT-5.6 Sol, `5` Other). Codex effort
+numbers are `1` low through `5` max, `6` Other: `none` was dropped because no
+current Codex model accepts it. The model picker always defaults to the CLI's
+default model (GPT-6 Sol for Codex), so an empty model answer picks it even
+when you are editing a reviewer that used another model. Answer Yes to "Keep
+these reviewers?" to keep the existing panel as it is; to re-enter a custom
+model, select Other, which asks for its model ID.
 
 Effort values are **vendor-native and passed through verbatim**. There is no
 crbuddy effort vocabulary and no translation.
 
 `crbuddy init` offers each vendor's own values - Claude Code's `low` through
-`max`, Codex's `none` through `max`, nothing at all for a CLI without an
+`max`, Codex's `low` through `max`, nothing at all for a CLI without an
 effort setting - plus an "Other…" escape for anything the shipped list
 doesn't cover. Whatever you pick is written to config and handed to the CLI
 unchanged.
@@ -286,6 +314,15 @@ effort setting unless their adapter documents a default.
 `ultra` is intentionally not a normal Claude effort in crbuddy. It selects the
 separate cloud Ultrareview product, which is asynchronous under `claude -p` and
 may consume paid usage credits. crbuddy refuses it on the normal Claude lane.
+
+Claude lanes need hooks: crbuddy confirms that a Claude review finished with a
+per-run Stop hook. If `CLAUDE_CODE_SIMPLE` or `CLAUDE_CODE_SAFE_MODE` is set, or
+the Claude Code settings in effect for the repository set `"disableAllHooks":
+true` (`.claude/settings.local.json`, then `.claude/settings.json`, then
+`~/.claude/settings.json`; the most specific file that sets it wins), crbuddy
+refuses the Claude lanes rather than overriding that choice, since turning hooks
+back on would also re-enable every other hook you disabled. `crbuddy doctor`
+reports the same.
 
 ## Caveats
 
@@ -313,22 +350,6 @@ configuration according to the vendor's behavior. `.crbuddy/config.json` and
 those vendor files are loaded by design; inspect them before running crbuddy
 on a repository you do not trust. Read-only agent modes do not make arbitrary
 vendor configuration safe to load.
-
-**The consolidator cannot delete anything.** It receives enumerated findings
-and returns only relationships between their IDs; crbuddy renders the groups
-from the original text. Every input ID must appear exactly once, or the merge
-is rejected and you get the raw file with a warning. The failure mode is
-under-grouping, never a finding that quietly vanished.
-
-The consolidator is not shown the repository, only the findings and the
-changed-file manifest. Under a keep-them-separate-when-unsure rule, code access
-buys little and mainly creates opportunities to adjudicate correctness, which
-is not its job.
-
-**Segmentation is mechanical, not a model call.** Splitting each review into
-findings is done by a heuristic that guarantees losslessness: concatenating
-the segments reproduces the review byte for byte. A bad split produces a
-finding that's too large or too small - never one that's missing.
 
 **Flags and versions are detected, not assumed.** Vendor CLI behavior churns
 between releases. Preflight checks each adapter's minimum supported CLI version
@@ -381,16 +402,12 @@ processes.
 
 `output.destination` decides between a file and the terminal.
 
-**`file`** is the default and the original behavior. `output.merged` is always
-the deliverable; `output.raw` is written alongside it only when consolidation
-ran.
+**`file`** is the default and the original behavior. The report is written
+to `output.merged`.
 
 **`terminal`** writes nothing to disk. The report goes to stdout, so
 `crbuddy go > review.md` works and every progress line or preflight
-confirmation stays on stderr where it cannot interleave. With consolidation
-on, only the consolidated report is printed - the unmerged reviews are an
-audit trail worth having on disk, not worth doubling the scrollback for. When
-both ends are a terminal the run then stops on a prompt offering to copy the
+confirmation stays on stderr where it cannot interleave. When both ends are a terminal the run then stops on a prompt offering to copy the
 report to the clipboard; piped or redirected, it prints and exits. Nothing
 clears the screen or uses the alternate buffer, so the report survives in the
 scrollback either way.
@@ -416,10 +433,8 @@ running reviewer, which breaks blindness in a way the diff pathspec cannot
 prevent - and a whole-checkout run, which has no pathspec at all, loses it
 entirely. Under the home directory rather than the OS temp directory because a
 crashed run's only copy of the previous report waits there until the next run
-recovers it. Panel spool files are removed before consolidation starts. The
-consolidator uses a separate, unique OS-temp working directory, which is
-removed when it finishes; only a report that still needs crash recovery may
-remain.
+recovers it. Panel spool files are removed when the run ends; only a report
+that still needs crash recovery may remain.
 
 If the Git root is the home directory or one of its ancestors, that state
 location would fall inside the repository and reviewers could read it. crbuddy
@@ -434,41 +449,37 @@ predictable path in a shared OS temp directory.
 
 ## How output is structured
 
-Consolidated reports carry YAML frontmatter with the captured snapshot and
-base SHAs, diff digest, per-run CLI versions and applied effort, failures with
-reasons, and consolidation state. Unconsolidated reports omit that verbose
-block and begin with the review itself. Their visible report block still gives
-the review count, failures, warnings, target range, and file count. A compact
-hidden marker keeps the run ID so a raw file can be matched to its consolidated
-companion without restoring the large metadata block.
+The report begins with the review itself. Its visible report block gives the
+review count, failures, warnings, target range, and file count, and a compact
+hidden marker records the run ID. Each review follows verbatim under a heading
+naming its reviewer, vendor, model, and the effort actually applied; a failed
+review shows its reason and, where there is one, the tail of its diagnostics.
+The same effort appears in each reviewer's progress lines in the terminal.
 
-For a whole-checkout fallback, the frontmatter identifies the subject as
-`whole-checkout` and records `launchSnapshot`, a snapshot captured immediately
-before the panel starts. Reviewers still run against the original live working
-tree, so this is launch provenance rather than filesystem isolation. The
-original empty target is retained as `requestedKind`/`requestedSnapshot`; diff
-byte and file counts are omitted because no diff was the review subject.
+For a whole-checkout fallback, the report block says there was no diff and
+gives the snapshot captured immediately before the panel started. Reviewers
+still run against the live working tree, so that snapshot is launch
+provenance rather than filesystem isolation.
 
-HTML comment markers delimit reviews, clusters, and findings. **They are
+HTML comment markers delimit the report block and each review. **They are
 navigation aids, not a parsing boundary** - a model's verbatim output can
-contain the closing marker. Both files are rendered from structured data;
-nothing in crbuddy parses markdown back out of them.
+contain the closing marker. The report is rendered from structured data;
+nothing in crbuddy parses markdown back out of it.
 
 ## Exit codes
 
 | | |
 |---|---|
 | `0` | Usable report produced; partial success also exits 0 by default |
-| `1` | No usable review produced |
+| `1` | No review completed. The previous report is left in place, unless a review that did not finish kept its output: then the report is replaced and holds that output, marked possibly incomplete |
 | `2` | Partial success - only with `--strict` |
 
-Use `--strict` in a hook where a failed lane or failed consolidation should
-break the command chain.
+Use `--strict` in a hook where a failed lane should break the command chain.
 
 ## Status
 
-The pure-logic surface - config, target resolution, merge
-validation, rendering, adapter safety, and adapter dispatch - has unit tests.
+The pure-logic surface - config, target resolution, rendering, adapter
+safety, and adapter dispatch - has unit tests.
 Vendor CLIs change quickly, so the native adapter layer is the most
 version-sensitive part of the program. Run `crbuddy doctor` on every machine
 that will actually execute the panel.

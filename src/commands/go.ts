@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { homedir, tmpdir } from 'node:os';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { existsSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
 
@@ -9,8 +9,10 @@ import { HOME_CONFIG_DIR, PanelEntry, WORK_DIR } from '../config/schema.js';
 import {
   assertUsableOutput,
   canonicalOutputPath,
-  ConfigError,
+  legacyRawOutputPaths,
+  legacyRawRecoveryPaths,
   LoadedConfig,
+  obsoleteKeysNote,
   repoRelative,
   resolveOutputPaths,
 } from '../config/load.js';
@@ -21,25 +23,12 @@ import {
 } from '../git/target.js';
 import { Adapter, UnsafeInvocationError } from '../adapters/types.js';
 import { getAdapter } from '../adapters/vendors.js';
-import { isVersionAtLeast } from '../adapters/version.js';
+import { isVersionAtLeast, probedVersion } from '../adapters/version.js';
 import { Semaphore } from '../util/semaphore.js';
 import { Lock, acquireLock, acquireLockAt } from '../util/lock.js';
 import { killAll, probe, runProcess } from '../run/spawn.js';
-import { Finding, relativizePaths, segment } from '../merge/segment.js';
-import {
-  MergeValidationError,
-  buildMergePrompt,
-  orderClusters,
-  parseClusterResponse,
-  singletons,
-  validateClusters,
-} from '../merge/cluster.js';
-import {
-  ReportContext,
-  RunRecord,
-  renderMerged,
-  renderRaw,
-} from '../output/render.js';
+import { relativizePaths } from '../output/relativize.js';
+import { ReportContext, RunRecord, renderReport } from '../output/render.js';
 import {
   cleanupTemps,
   commitOutputs,
@@ -51,6 +40,7 @@ import { copyToClipboard } from '../util/clipboard.js';
 import { PromptAborted, dim, select } from '../util/prompt.js';
 import { formatClock, formatElapsed, formatSize } from '../util/format.js';
 import { notifyFinished, ReviewOutcome } from '../run/notify.js';
+import { sanitizeTerminalInline } from '../util/ansi.js';
 
 /** What every whole-checkout run has to establish before anything else. */
 const WHOLE_CHECKOUT_SUBJECT =
@@ -107,6 +97,9 @@ export async function runGo(options: GoOptions): Promise<number> {
   const { repoRoot, loaded, version } = options;
   const config = loaded.config;
 
+  const obsolete = obsoleteKeysNote(loaded, repoRoot, displayPath(loaded.source, repoRoot));
+  if (obsolete) progress.dim(obsolete);
+
   // Resolve and validate this before creating any per-run directory. A
   // repository rooted at the home directory would otherwise contain the
   // supposedly external state used to isolate concurrent review lanes.
@@ -124,19 +117,13 @@ export async function runGo(options: GoOptions): Promise<number> {
   // crashed run's only copy of the previous report lives here until the next
   // run recovers it, and temp is not somewhere to keep the only copy.
   const scratch = path.join(stateDir, 'scratch');
-  let mergeDir: string | null = null;
   let ownsRunState = true;
 
   const cleanupRunState = async (): Promise<void> => {
     if (!ownsRunState) return;
     ownsRunState = false;
 
-    const pendingMergeDir = mergeDir;
-    mergeDir = null;
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
-    if (pendingMergeDir) {
-      await rm(pendingMergeDir, { recursive: true, force: true }).catch(() => {});
-    }
   };
 
   // No volatile shared state is touched until this succeeds. In particular,
@@ -157,6 +144,10 @@ export async function runGo(options: GoOptions): Promise<number> {
   };
 
   let stashed: Awaited<ReturnType<typeof stashExistingOutputs>> | null = null;
+  // A raw report left by a version before 0.4.0. Hidden while reviewers run,
+  // like the previous report, but always put back: this run replaces it with
+  // nothing, so discarding it would only delete the user's file.
+  let legacyStashed: Awaited<ReturnType<typeof stashExistingOutputs>> | null = null;
   let interrupted = false;
   const launchedReviewers = new Set<string>();
   let notificationOutcome: ReviewOutcome = 'failed';
@@ -180,11 +171,19 @@ export async function runGo(options: GoOptions): Promise<number> {
     killAll('SIGTERM');
   };
 
+  const restoreLegacyOutput = async (): Promise<void> => {
+    const pending = legacyStashed;
+    legacyStashed = null;
+
+    if (pending) reportStranded(await pending.restore());
+  };
+
   const restorePreviousOutput = async (): Promise<void> => {
     const pending = stashed;
     stashed = null;
 
     if (pending) reportStranded(await pending.restore());
+    await restoreLegacyOutput();
   };
 
   process.on('SIGINT', onInterrupt);
@@ -197,27 +196,22 @@ export async function runGo(options: GoOptions): Promise<number> {
     // somewhere else for locking or writes.
     assertUsableOutput(config.output, 'output', repoRoot);
     const outputPaths = resolveOutputPaths(repoRoot, config.output);
-
-    // The config validator can only compare the two paths as written, and
-    // `same.md` and `<repo>/same.md` are the same file spelled two ways.
-    // Terminal mode also stashes both paths for reviewer blindness, so this
-    // is an invalid configuration regardless of the final destination.
-    const mergedOutput = outputPaths.merged;
-    const rawOutput = outputPaths.raw;
-
-    if (pathKey(mergedOutput) === pathKey(rawOutput)) {
-      throw new ConfigError(
-        `output.merged and output.raw resolve to the same file:\n` +
-          `  ${mergedOutput}\n` +
-          `They are spelled differently in the config, but they are one ` +
-          `path. Point them at different files.`,
-      );
-    }
+    const legacyRaw = legacyRawOutputPaths(
+      repoRoot,
+      loaded.legacyRawOutput,
+      outputPaths.merged,
+    );
+    const ownOutputs = [outputPaths.merged, ...legacyRaw];
+    // Recovery may also restore an old raw report outside the repository.
+    const recoverable = [
+      ...ownOutputs,
+      ...legacyRawRecoveryPaths(repoRoot, loaded.legacyRawOutput, loaded.scope),
+    ];
 
     // A project-local config is a file that ships with a repository, so a
     // repository you merely cloned can choose where crbuddy writes. Obtain
     // consent before cleanup or crash recovery touches any such path.
-    const external = [outputPaths.merged, outputPaths.raw]
+    const external = [outputPaths.merged]
       .filter((absolute) => repoRelative(absolute, repoRoot) === null);
 
     if (loaded.scope === 'project' && external.length > 0) {
@@ -227,7 +221,11 @@ export async function runGo(options: GoOptions): Promise<number> {
           : 'This repository’s own config uses output paths outside the repository:',
       );
 
-      for (const file of [...new Set(external)]) progress.line(`  ${file}`);
+      // Escaped: this list is what the user consents to, and a cloned repo's
+      // config chose it. Control sequences could rewrite what it shows.
+      for (const file of [...new Set(external)]) {
+        progress.line(`  ${sanitizeTerminalInline(file)}`);
+      }
 
       progress.dim(
         config.output.destination === 'file'
@@ -255,31 +253,34 @@ export async function runGo(options: GoOptions): Promise<number> {
     // Hold the destination locks while checking whether existing files may
     // be replaced. Otherwise another repository sharing an output path can
     // change that answer between confirmation and commit.
-    outputLocks = await acquireOutputLocks(outputPaths);
+    outputLocks = await acquireOutputLocks(recoverable);
 
     // Recover anything a crashed run left in a holding directory before
     // deciding whether an existing report may be replaced. Otherwise the
     // refusal check sees an empty destination, recovery restores the report,
     // and this run overwrites it without the configured confirmation.
     // External project-config paths have already passed their separate gate.
+    // A crash stash from before 0.4.0 also holds the raw report, and a batch
+    // is restored whole or not at all, so that path must be allowed too.
     const recovered = [
       ...(await recoverStrandedOutputs(repoRoot, stateDir, {
-        allowedPaths: [outputPaths.merged, outputPaths.raw],
+        allowedPaths: recoverable,
       })),
       ...(await recoverStrandedOutputs(repoRoot, workDir, {
-        allowedPaths: [outputPaths.merged, outputPaths.raw],
+        allowedPaths: recoverable,
       })),
     ];
 
     if (recovered.length > 0) {
       progress.dim(
-        `Recovered ${recovered.join(', ')} left behind by an interrupted run.`,
+        `Recovered ${recovered.map(sanitizeTerminalInline).join(', ')} left behind ` +
+          'by an interrupted run.',
       );
     }
 
     // Nothing is replaced when the report only ever reaches the terminal.
     if (config.refuseIfOutputExists && config.output.destination === 'file') {
-      const existing = [outputPaths.merged, outputPaths.raw].filter((absolute) =>
+      const existing = [outputPaths.merged].filter((absolute) =>
         existsSync(absolute),
       );
 
@@ -295,7 +296,7 @@ export async function runGo(options: GoOptions): Promise<number> {
 
         const ok = await confirm(
           `These files already exist and will be replaced:\n` +
-            existing.map((file) => `  ${file}`).join('\n') +
+            existing.map((file) => `  ${sanitizeTerminalInline(file)}`).join('\n') +
             `\nContinue?`,
         );
 
@@ -306,22 +307,18 @@ export async function runGo(options: GoOptions): Promise<number> {
       }
     }
 
-    // `scratch` is where every panel lane spools `<id>.stdout`. It is removed
-    // before consolidation, and the consolidator later receives its own
-    // unique cwd outside this state tree.
+    // `scratch` is where every panel lane spools `<id>.stdout`.
     await rm(scratch, { recursive: true, force: true });
     await mkdir(scratch, { recursive: true });
 
-    await cleanupTemps(repoRoot, [outputPaths.merged, outputPaths.raw], {
-      allowedPaths: [outputPaths.merged, outputPaths.raw],
+    await cleanupTemps(repoRoot, ownOutputs, {
+      allowedPaths: ownOutputs,
     });
 
     // --- preflight -------------------------------------------------------
 
     const adapters = new Map<string, Adapter>();
     const vendors = new Set<string>(config.panel.map((entry) => entry.vendor));
-
-    if (config.merge.enabled) vendors.add(config.merge.vendor);
 
     for (const vendor of vendors) {
       adapters.set(vendor, getAdapter(vendor));
@@ -343,8 +340,7 @@ export async function runGo(options: GoOptions): Promise<number> {
         );
       }
 
-      const detected =
-        adapter.parseVersion(result.version ?? '') ?? (await detectVersion(adapter, scratch));
+      const detected = probedVersion(adapter, result);
 
       if (!detected) {
         throw new PreflightError(
@@ -383,7 +379,7 @@ export async function runGo(options: GoOptions): Promise<number> {
       // worktree, and an absolute path that DOES resolve inside still has
       // to be handed over repo-relative or it is silently not excluded -
       // which would feed the last run's report back into this one.
-      exclude: [outputPaths.merged, outputPaths.raw, `${WORK_DIR}/`]
+      exclude: [...ownOutputs, `${WORK_DIR}/`]
         .map((entry) => repoRelative(entry, repoRoot))
         .filter((entry): entry is string => entry !== null),
     };
@@ -454,10 +450,40 @@ export async function runGo(options: GoOptions): Promise<number> {
     stashed = await stashExistingOutputs(
       repoRoot,
       stateDir,
-      [outputPaths.merged, outputPaths.raw],
+      [outputPaths.merged],
       runId,
-      { allowedPaths: [outputPaths.merged, outputPaths.raw] },
+      { allowedPaths: [outputPaths.merged] },
     );
+
+    // Worked out again now that crash recovery may have put a file back: two
+    // spellings of one file on a case-folding volume can only be recognized
+    // as one while it exists, and stashing both would fail on the second.
+    const legacyPresent = legacyRawOutputPaths(
+      repoRoot,
+      loaded.legacyRawOutput,
+      outputPaths.merged,
+    ).filter((absolute) => legacyRaw.includes(absolute));
+
+    if (legacyPresent.some((absolute) => existsSync(absolute))) {
+      legacyStashed = await stashExistingOutputs(
+        repoRoot,
+        stateDir,
+        legacyPresent,
+        `${runId}-legacy`,
+        { allowedPaths: legacyRaw },
+      );
+
+      for (const absolute of legacyStashed.moved) {
+        // Escaped: the path comes from output.raw, which a cloned repo's
+        // config sets.
+        progress.dim(
+          `${sanitizeTerminalInline(repoRelative(absolute, repoRoot) ?? absolute)} ` +
+            'is a report from crbuddy ' +
+            'before 0.4.0, which no longer updates it. It is hidden from reviewers ' +
+            'and put back afterwards; delete it when convenient.',
+        );
+      }
+    }
 
     // --- panel -----------------------------------------------------------
 
@@ -470,6 +496,7 @@ export async function runGo(options: GoOptions): Promise<number> {
     );
 
     const names = displayNames(config.panel, adapters);
+    const foldsCase = repoFoldsCase(repoRoot);
     progress.startPulse(startedAt);
 
     const records = await Promise.all(
@@ -483,6 +510,7 @@ export async function runGo(options: GoOptions): Promise<number> {
             display: names.get(entry.id)!,
             target,
             repoRoot,
+            repoFoldsCase: foldsCase,
             scratch,
             timeoutMs: config.timeoutMs,
             onStart: () => { launchedReviewers.add(entry.id); },
@@ -497,19 +525,8 @@ export async function runGo(options: GoOptions): Promise<number> {
     );
 
     // The per-lane terminal animation is done, but VS Code's tab stays busy
-    // through consolidation and output commit.
+    // through output commit.
     progress.pausePulse();
-
-    let mergeIsolationError: string | null = null;
-
-    try {
-      // All panel results are in memory now. Delete their verbatim spool
-      // files before a general-purpose consolidator is allowed to start.
-      await rm(scratch, { recursive: true, force: true });
-    } catch (error) {
-      mergeIsolationError =
-        `could not clear panel scratch before consolidation: ${String(error)}`;
-    }
 
     if (interrupted) {
       await restorePreviousOutput();
@@ -518,10 +535,6 @@ export async function runGo(options: GoOptions): Promise<number> {
     }
 
     const succeeded = records.filter((record) => record.ok);
-    const rawPath =
-      config.output.destination === 'file'
-        ? reportRelativePath(repoRoot, outputPaths.merged, outputPaths.raw)
-        : null;
 
     const context: ReportContext = {
       version,
@@ -529,7 +542,6 @@ export async function runGo(options: GoOptions): Promise<number> {
       generated: new Date().toISOString(),
       target,
       runs: records,
-      mergeState: 'off',
       // Displayed, not absolute: a full path leaks the machine's directory
       // layout into a file people paste into issues.
       configSource: displayPath(loaded.source, repoRoot),
@@ -537,86 +549,24 @@ export async function runGo(options: GoOptions): Promise<number> {
       ...(wholeCheckout ? { wholeCheckout: true } : {}),
       ...(checkoutLaunchSnapshot ? { checkoutLaunchSnapshot } : {}),
       warnings,
-      // Only a real path when one is actually written; the consolidated
-      // report points at it, and pointing at a file that does not exist is
-      // worse than not mentioning it.
-      // Relative to the consolidated report itself, so the reference still
-      // resolves when the configured output files are outside the repository
-      // or in different directories. Omitted across filesystem roots, where
-      // no relative reference exists.
-      ...(rawPath ? { rawPath } : {}),
     };
 
-    if (succeeded.length === 0) {
+    // A review that did not complete can still have kept its output (a Claude
+    // review judged incomplete). That is the one case where a panel with no
+    // success still has something to hand over, so it is written, marked, and
+    // the run still exits as a total failure.
+    const kept = records.some((record) => !record.ok && record.output.trim() !== '');
+
+    if (succeeded.length === 0 && !kept) {
       await restorePreviousOutput();
       progress.dim('');
       progress.line('Every review failed. Previous output left in place.');
       return EXIT_TOTAL_FAILURE;
     }
 
-    // --- merge -----------------------------------------------------------
-
-    const findings: Finding[] = succeeded.flatMap((record) =>
-      // Absolute local paths are stripped to repo-relative first: they leak
-      // a machine's directory layout into a file people paste into issues.
-      segment(record.id, relativizePaths(record.output, repoRoot)),
-    );
-
-    let clusters = singletons(findings);
-
-    if (config.merge.enabled && findings.length > 1) {
-      progress.dim(`Consolidating ${findings.length} findings…`);
-
-      if (mergeIsolationError) {
-        context.mergeState = 'failed';
-        context.mergeReason = mergeIsolationError;
-        progress.line(`  Consolidation failed: ${context.mergeReason}`);
-      } else {
-        try {
-          mergeDir = await mkdtemp(path.join(tmpdir(), 'crbuddy-merge-'));
-          const merged = await runMerge({
-            adapter: adapters.get(config.merge.vendor)!,
-            supports: supports.get(config.merge.vendor)!,
-            model: config.merge.model,
-            ...(config.merge.effort ? { effort: config.merge.effort } : {}),
-            findings,
-            target,
-            repoRoot,
-            scratch: mergeDir,
-            timeoutMs: config.mergeTimeoutMs,
-          });
-
-          clusters = orderClusters(merged, findings);
-          context.mergeState = 'ok';
-        } catch (error) {
-          context.mergeState = 'failed';
-          context.mergeReason =
-            error instanceof MergeValidationError ? error.message : String(error);
-
-          progress.line(`  Consolidation failed: ${context.mergeReason}`);
-        }
-      }
-    }
-
     // --- write -----------------------------------------------------------
 
-    // Re-checked here, not just after the panel: a SIGINT during
-    // consolidation surfaces as a merge failure, and execution would
-    // otherwise carry straight on and replace the report anyway.
-    if (interrupted) {
-      await restorePreviousOutput();
-      progress.line('No output written.');
-      return 130;
-    }
-
-    // `output.merged` is ALWAYS the deliverable, whatever happened to
-    // consolidation. Anything else means the filename a user points an agent
-    // at sometimes does not exist — or worse, is left over from a previous
-    // run while the fresh reviews sit under a different name.
-    const deliverable =
-      context.mergeState === 'ok'
-        ? renderMerged(context, clusters, findings)
-        : renderRaw(context);
+    const deliverable = renderReport(context);
 
     if (config.output.destination === 'terminal') {
       // Restored, not discarded: this run wrote nothing, so a report left by
@@ -639,53 +589,36 @@ export async function runGo(options: GoOptions): Promise<number> {
       process.off('SIGINT', onInterrupt);
       process.off('SIGTERM', onInterrupt);
 
-      // Only the deliverable is rendered in this mode: the unmerged reviews
-      // are an audit trail worth keeping on disk, not worth doubling the
-      // scrollback for, so they are never built at all.
       printReport(deliverable);
       terminalReport = deliverable;
     } else {
-      const files =
-        context.mergeState === 'ok'
-          ? [
-              { relative: outputPaths.raw, content: renderRaw(context) },
-              { relative: outputPaths.merged, content: deliverable },
-            ]
-          : [{ relative: outputPaths.merged, content: deliverable }];
-
-      await commitOutputs(repoRoot, files, {
-        allowedPaths: [outputPaths.merged, outputPaths.raw],
-      });
+      await commitOutputs(
+        repoRoot,
+        [{ relative: outputPaths.merged, content: deliverable }],
+        { allowedPaths: [outputPaths.merged] },
+      );
       await stashed.discard();
       stashed = null;
+      await restoreLegacyOutput();
 
       progress.stopPulse();
       progress.dim('');
-      progress.line(
-        context.mergeState === 'ok'
-          ? `Wrote ${config.output.merged} and ${config.output.raw}.`
-          : `Wrote ${config.output.merged}.`,
-      );
-
-      // Two filenames that differ by one word need saying out loud once.
-      // Only when consolidation actually ran: otherwise there is one file
-      // and nothing to tell apart.
-      if (context.mergeState === 'ok') {
-        progress.dim(
-          `  ${config.output.merged} is the deliverable: duplicate findings grouped ` +
-            `and ordered by how many reviewers raised them. ${config.output.raw} is ` +
-            `every review verbatim, to check that grouping against.`,
-        );
-      }
+      progress.line(`Wrote ${sanitizeTerminalInline(config.output.merged)}.`);
 
       progress.bell();
     }
 
-    const partial =
-      succeeded.length < records.length || context.mergeState === 'failed';
-    notificationOutcome = partial ? 'partial' : 'complete';
-
-    exitCode = partial && options.strict ? EXIT_PARTIAL : EXIT_OK;
+    if (succeeded.length === 0) {
+      progress.line(
+        'No review completed; the report holds only output kept from reviews that did not.',
+      );
+      notificationOutcome = 'failed';
+      exitCode = EXIT_TOTAL_FAILURE;
+    } else {
+      const partial = succeeded.length < records.length;
+      notificationOutcome = partial ? 'partial' : 'complete';
+      exitCode = partial && options.strict ? EXIT_PARTIAL : EXIT_OK;
+    }
   } finally {
     progress.stopPulse();
     process.off('SIGINT', onInterrupt);
@@ -725,39 +658,42 @@ export function shouldReviewWholeCheckout(
   return emptyDiff && (attended || explicitlyRequested);
 }
 
-async function detectVersion(adapter: Adapter, scratch: string): Promise<string | null> {
-  const result = await runProcess({
-    command: adapter.command,
-    args: adapter.versionArgs(),
-    cwd: scratch,
-    timeoutMs: 15_000,
-    scratchDir: scratch,
-    id: `version-${adapter.name}`,
-  });
-
-  return adapter.parseVersion(`${result.stdout}\n${result.stderr}`);
-}
-
+/**
+ * Terminal labels, e.g. `Codex CLI (gpt-6-sol, high)`. Each is a function of
+ * the effort the adapter actually applied, which is only known once the
+ * invocation is built (Claude's native review fills in its default).
+ */
 function displayNames(
   panel: PanelEntry[],
   adapters: Map<string, Adapter>,
-): Map<string, string> {
+): Map<string, (effort: string | null) => string> {
   const base = new Map<string, string>();
   const counts = new Map<string, number>();
 
   for (const entry of panel) {
-    const label = adapters.get(entry.vendor)?.label ?? entry.vendor;
-    const name = `${label} (${entry.model})`;
+    const label = sanitizeTerminalInline(
+      adapters.get(entry.vendor)?.label ?? entry.vendor,
+    );
+    const model = sanitizeTerminalInline(entry.model);
+    const name = `${label} (${model})`;
 
     base.set(entry.id, name);
     counts.set(name, (counts.get(name) ?? 0) + 1);
   }
 
-  const names = new Map<string, string>();
+  const names = new Map<string, (effort: string | null) => string>();
 
   for (const entry of panel) {
     const name = base.get(entry.id)!;
-    names.set(entry.id, (counts.get(name) ?? 0) > 1 ? `${name} [${entry.id}]` : name);
+    const id = sanitizeTerminalInline(entry.id);
+    const suffix = (counts.get(name) ?? 0) > 1 ? ` [${id}]` : '';
+
+    names.set(entry.id, (effort) => {
+      const shown = effort
+        ? `${name.slice(0, -1)}, ${sanitizeTerminalInline(effort)})`
+        : name;
+      return `${shown}${suffix}`;
+    });
   }
 
   return names;
@@ -770,9 +706,11 @@ interface ExecuteArgs {
   adapter: Adapter;
   cliVersion: string | null;
   supports: (flag: string) => boolean;
-  display: string;
+  display: (effort: string | null) => string;
   target: ResolvedTarget;
   repoRoot: string;
+  /** Whether the repository's volume folds path case; fixed for the run. */
+  repoFoldsCase: boolean;
   scratch: string;
   timeoutMs: number;
   instructionsOverride?: string;
@@ -820,11 +758,22 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       ...(entry.effort ? { effort: entry.effort } : {}),
       ...(entry.vendorArgs ? { vendorArgs: entry.vendorArgs } : {}),
       repoRoot: args.repoRoot,
+      // Only Claude proves completion with an evidence file, written by its
+      // Stop hook into this run's scratch, which the adapter cannot see.
+      ...(adapter.name === 'claude'
+        ? {
+            completionEvidencePath: path.join(
+              args.scratch,
+              `${entry.id}.claude-completion.json`,
+            ),
+          }
+        : {}),
       supports: args.supports,
     });
   } catch (error) {
     if (error instanceof UnsafeInvocationError) {
-      progress.laneFinished(args.display);
+      const display = args.display(entry.effort ?? null);
+      progress.laneFinished(display);
 
       const outcome: RunRecord = {
         ...base,
@@ -835,7 +784,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
       };
 
       progress.line(
-        `  ${args.display} - FAILED: unsafe_invocation\n      ` +
+        `  ${display} - FAILED: unsafe_invocation\n      ` +
           `${firstLine(outcome.diagnostics)}`,
       );
 
@@ -845,12 +794,14 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     throw error;
   }
 
+  const display = args.display(invocation.appliedEffort);
+
   for (const warning of invocation.warnings ?? []) {
-    progress.line(`  ${args.display} - ${warning}`);
+    progress.line(`  ${display} - ${warning}`);
   }
 
-  progress.laneStarted(args.display);
-  progress.dim(`  ${args.display} - started`);
+  progress.laneStarted(display);
+  progress.dim(`  ${display} - started`);
 
   const result = await runProcess({
     command: invocation.command,
@@ -864,7 +815,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     onStart: args.onStart,
   });
 
-  progress.laneFinished(args.display);
+  progress.laneFinished(display);
 
   const record = {
     ...base,
@@ -872,14 +823,26 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     wallClockMs: result.wallClockMs,
   };
 
-  const report = (outcome: RunRecord): RunRecord => {
+  const report = (recorded: RunRecord): RunRecord => {
+    // Diagnostics are vendor stderr and text the reviewer wrote, such as a
+    // still-listed task's command line, headed for a report people share:
+    // strip the repository root from them as from the review itself.
+    const outcome = recorded.diagnostics
+      ? {
+          ...recorded,
+          diagnostics: relativizePaths(recorded.diagnostics, args.repoRoot, {
+            foldCase: args.repoFoldsCase,
+          }),
+        }
+      : recorded;
+
     if (outcome.ok) {
-      progress.dim(`  ${args.display} - done in ${formatElapsed(outcome.wallClockMs)}`);
+      progress.dim(`  ${display} - done in ${formatElapsed(outcome.wallClockMs)}`);
     } else {
       const detail = firstLine(outcome.diagnostics);
 
       progress.line(
-        `  ${args.display} - FAILED: ${outcome.reason}${detail ? `\n      ${detail}` : ''}`,
+        `  ${display} - FAILED: ${outcome.reason}${detail ? `\n      ${detail}` : ''}`,
       );
     }
 
@@ -910,78 +873,33 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
   }
 
   const body = adapter.finalOutput(result);
-  const completion = adapter.checkCompletion(result);
+  const completion = adapter.checkCompletion(result, invocation);
 
   if (!completion.ok) {
     return report({
       ...record,
       ok: false,
       reason: completion.reason ?? 'unknown',
-      output: '',
-      diagnostics: tail(result.stderr || result.stdout),
+      output: completion.keepOutput
+        ? relativizePaths(body, args.repoRoot, { foldCase: args.repoFoldsCase })
+        : '',
+      // A kept output is already in the report; do not repeat its tail.
+      diagnostics: [
+        completion.detail,
+        tail(completion.keepOutput ? result.stderr : result.stderr || result.stdout),
+      ].filter(Boolean).join('\n'),
     });
   }
 
-  const output = relativizePaths(body, args.repoRoot);
+  const output = relativizePaths(body, args.repoRoot, {
+    foldCase: args.repoFoldsCase,
+  });
 
   return report({
     ...record,
     ok: true,
     output,
   });
-}
-
-interface MergeArgs {
-  adapter: Adapter;
-  supports: (flag: string) => boolean;
-  model: string;
-  effort?: string;
-  findings: Finding[];
-  target: ResolvedTarget;
-  repoRoot: string;
-  scratch: string;
-  timeoutMs: number;
-}
-
-async function runMerge(args: MergeArgs) {
-  const invocation = args.adapter.build({
-    operation: {
-      kind: 'generic',
-      target: null,
-      instructions: buildMergePrompt(args.findings),
-    },
-    model: args.model,
-    ...(args.effort ? { effort: args.effort } : {}),
-    repoRoot: args.repoRoot,
-    supports: args.supports,
-  });
-
-  const result = await runProcess({
-    command: invocation.command,
-    args: invocation.args,
-    // Deliberately NOT the repository, and deliberately not the panel's
-    // scratch directory either. The consolidator's contract is that it sees
-    // findings and nothing else; the repo as cwd handed it the live tree,
-    // and the shared scratch dir handed it every lane's verbatim stdout.
-    cwd: args.scratch,
-    stdin: invocation.stdin,
-    env: invocation.env,
-    timeoutMs: args.timeoutMs,
-    scratchDir: args.scratch,
-    id: 'merge',
-  });
-
-  if (result.timedOut) throw new MergeValidationError('merge timed out');
-  if (result.spawnError) throw new MergeValidationError(result.spawnError);
-
-  const completion = args.adapter.checkCompletion(result);
-
-  if (!completion.ok) {
-    throw new MergeValidationError(completion.reason ?? 'merge run failed');
-  }
-
-  const parsed = parseClusterResponse(args.adapter.finalOutput(result));
-  return validateClusters(parsed, args.findings).clusters;
 }
 
 function tail(text: string, limit = 2000): string {
@@ -1028,7 +946,7 @@ function reportStranded(stranded: string[]): void {
 
   progress.line('Could not move the previous output back into place.');
 
-  for (const file of stranded) progress.line(`  it is still at ${file}`);
+  for (const file of stranded) progress.line(`  it is still at ${sanitizeTerminalInline(file)}`);
 }
 
 /**
@@ -1120,31 +1038,51 @@ export function repoStateDir(
   return path.join(canonicalStateRoot, key);
 }
 
+/**
+ * Whether the volume holding this repository treats path case as equal, for
+ * relativizing reviewer output. Probed by identity on every platform: a
+ * case-insensitive volume mounted under Linux (WSL's /mnt/c, for one) folds
+ * too. lstat, so a symlink spelled with other case is not taken for folding.
+ *
+ * Deliberately separate from filesystemFoldsCase, whose answer keys the
+ * state directory: changing it would strand existing checkouts' crash stashes.
+ */
+export function repoFoldsCase(repoRoot: string): boolean {
+  try {
+    const canonical = realpathSync.native(path.resolve(repoRoot));
+    const alternate = otherCaseSpelling(canonical);
+    if (alternate === null) return false;
+
+    const real = lstatSync(canonical);
+    const other = lstatSync(alternate);
+    return real.dev === other.dev && real.ino === other.ino;
+  } catch {
+    return false;
+  }
+}
+
+/** The path with its last letter's case flipped, or null if it has none. */
+function otherCaseSpelling(canonical: string): string | null {
+  for (let index = canonical.length - 1; index >= 0; index -= 1) {
+    const character = canonical[index]!;
+    const flipped = character === character.toLowerCase()
+      ? character.toUpperCase()
+      : character.toLowerCase();
+
+    if (/[a-zA-Z]/.test(character)) {
+      return `${canonical.slice(0, index)}${flipped}${canonical.slice(index + 1)}`;
+    }
+  }
+
+  return null;
+}
+
 /** Probe the actual volume instead of assuming every macOS volume folds. */
 function filesystemFoldsCase(canonical: string): boolean {
   if (process.platform !== 'win32' && process.platform !== 'darwin') return false;
 
-  let alternate = '';
-
-  for (let index = canonical.length - 1; index >= 0; index -= 1) {
-    const character = canonical[index]!;
-
-    if (/[a-z]/.test(character)) {
-      alternate =
-        `${canonical.slice(0, index)}${character.toUpperCase()}` +
-        canonical.slice(index + 1);
-      break;
-    }
-
-    if (/[A-Z]/.test(character)) {
-      alternate =
-        `${canonical.slice(0, index)}${character.toLowerCase()}` +
-        canonical.slice(index + 1);
-      break;
-    }
-  }
-
-  if (alternate === '') return false;
+  const alternate = otherCaseSpelling(canonical);
+  if (alternate === null) return false;
 
   try {
     return realpathSync.native(alternate) === canonical;
@@ -1161,10 +1099,8 @@ function filesystemFoldsCase(canonical: string): boolean {
  * Without this, run A can stash the previous report, run B write a fresh
  * one, and A's restore() put the stale copy back over it.
  *
- * One lock PER PATH, not one for the set. Two configs that share only the
- * merged report would hash to different keys and never contend, which is
- * the overlap that matters most. Sorted, so two runs always take a shared
- * pair in the same order and cannot deadlock on each other.
+ * One lock per path, sorted, so runs that share a path always take it in the
+ * same order and cannot deadlock on each other.
  *
  * Taken for every path regardless of where it sits: a file inside THIS repo
  * can be another repo's external output, so containment says nothing about
@@ -1173,11 +1109,13 @@ function filesystemFoldsCase(canonical: string): boolean {
  *
  * Kept in the user's crbuddy state rather than a predictable shared-temp
  * path that another local account could pre-create or redirect.
+ *
+ * `files` is every path this run moves, replaces or sweeps temp files beside,
+ * including a leftover pre-0.4 raw report: another repository may use one as
+ * its own output, and cleanup here would otherwise delete that run's staged
+ * report.
  */
-async function acquireOutputLocks(
-  output: { merged: string; raw: string },
-): Promise<Lock[]> {
-  const files = [output.merged, output.raw];
+async function acquireOutputLocks(files: string[]): Promise<Lock[]> {
 
   // Keyed by the same string that decides identity, so two spellings can
   // never collapse to one key while still counting as two locks to take.
@@ -1220,8 +1158,7 @@ async function releaseAll(locks: Lock[]): Promise<void> {
  * hand if the clipboard is unavailable.
  */
 function printReport(document: string): void {
-  // No leading blank line: a redirect must begin with the report itself,
-  // whether that is consolidated YAML frontmatter or an unconsolidated
+  // No leading blank line: a redirect must begin with the report's own
   // heading. Terminal spacing comes from progress output on stderr.
   process.stdout.write(`${document.trimEnd()}
 `);
@@ -1288,28 +1225,6 @@ function displayPath(file: string, repoRoot: string): string {
   return path.basename(normalized);
 }
 
-/**
- * A link from the consolidated report to its raw companion.
- *
- * Configured paths are resolved independently, so basename-only display can
- * point nowhere when the two outputs live in different directories. A path
- * relative to the consolidated report remains valid after both are written.
- * Different Windows drives have no relative spelling; omit the link there.
- */
-export function reportRelativePath(
-  repoRoot: string,
-  merged: string,
-  raw: string,
-): string | null {
-  const mergedFile = path.resolve(repoRoot, merged);
-  const rawFile = path.resolve(repoRoot, raw);
-  const relative = path.relative(path.dirname(mergedFile), rawFile);
-
-  if (relative === '' || path.isAbsolute(relative)) return null;
-
-  return relative.replace(/\\/g, '/');
-}
-
 /** First meaningful line of a CLI's error output, for the terminal. */
 function firstLine(text: string | undefined): string {
   if (!text) return '';
@@ -1320,7 +1235,10 @@ function firstLine(text: string | undefined): string {
     .find((entry) => entry !== '');
 
   if (!line) return '';
-  return line.length > 160 ? `${line.slice(0, 157)}\u2026` : line;
+
+  // Vendor output and model-written text: never raw into the terminal.
+  const safe = sanitizeTerminalInline(line);
+  return safe.length > 160 ? `${safe.slice(0, 157)}\u2026` : safe;
 }
 
 async function flagProbe(

@@ -9,9 +9,10 @@ import { PreflightError, runGo } from './commands/go.js';
 import { parseGoArguments } from './commands/go-options.js';
 import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
+import { runView } from './commands/view.js';
 import { configureClaudeBackgroundWait } from './run/claude-background-wait.js';
 
-const HELP = `crbuddy - fan one code review across several agent CLIs, then consolidate.
+const HELP = `crbuddy - fan one code review across several agent CLIs, then hand off every review.
 
 First run: use \`crb init\` to set up your code review panel, then \`crb go\`
 to run it.
@@ -19,6 +20,7 @@ to run it.
 Usage:
   crbuddy init                 Interactive setup. Writes a config.
   crbuddy config               Same as init; edits an existing config.
+  crbuddy view                 Show the effective config. Read-only.
   crbuddy go [instructions]    Run the panel. Blocking.
   crbuddy doctor               Report which vendor CLIs are usable, and why not.
 
@@ -26,7 +28,7 @@ Options for \`go\`:
   --force           Run even if the diff exceeds maxDiffBytes.
   --whole-checkout  Review the whole checkout when the target diff is empty;
                     required when running without a terminal.
-  --strict          Exit 2 when any run or the merge fails (default: exit 0).
+  --strict          Exit 2 when any run fails (default: exit 0).
 
 Other:
   --help, -h   This text.
@@ -36,8 +38,9 @@ The optional positional argument to \`go\` overrides the review instructions
 on every panel entry, for a one-off run without editing config.
 
 Exit codes:
-  0  panel completed (and merge, if enabled)
-  1  no usable review produced
+  0  panel completed
+  1  no review completed; the report may still hold output kept from a
+     review that did not finish, marked possibly incomplete
   2  partial success, only with --strict
 `;
 
@@ -73,6 +76,15 @@ async function main(argv: string[]): Promise<number> {
   // toolchains (brew, flutter, npm); `check` stays as an alias.
   if (command === 'doctor' || command === 'check') {
     return runDoctor();
+  }
+
+  if (command === 'view') {
+    if (rest.length > 0) {
+      console.error('crbuddy view takes no arguments.');
+      return 1;
+    }
+
+    return runView({ repoRoot });
   }
 
   if (command === 'init' || command === 'config') {

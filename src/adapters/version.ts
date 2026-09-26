@@ -20,3 +20,15 @@ export function compareVersions(left: string, right: string): number {
 export function isVersionAtLeast(detected: string, minimum: string): boolean {
   return compareVersions(detected, minimum) >= 0;
 }
+
+/**
+ * The version a probe found, read from everything the CLI printed. Setup,
+ * doctor and go all use this one reading, so they cannot disagree about
+ * whether a CLI is usable; the first line alone missed versions printed later.
+ */
+export function probedVersion(
+  adapter: { parseVersion(text: string): string | null },
+  result: { present: boolean; text?: string },
+): string | null {
+  return result.present ? adapter.parseVersion(result.text ?? '') : null;
+}

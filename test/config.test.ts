@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -6,6 +8,10 @@ import { test } from 'node:test';
 import {
   assertUsableOutput,
   ConfigError,
+  legacyRawOutput,
+  legacyRawOutputPaths,
+  obsoleteKeys,
+  obsoleteKeysNote,
   stripJsonComments,
   validate,
 } from '../src/config/load.js';
@@ -21,9 +27,7 @@ test('accepts a minimal config and fills defaults', () => {
   assert.equal(config.target, 'uncommitted');
   assert.equal(config.refuseIfOutputExists, false);
   assert.equal(config.timeoutMs, 60 * 60 * 1000);
-  assert.equal(config.mergeTimeoutMs, 60 * 60 * 1000);
   assert.equal(config.output.merged, 'CODE-REVIEW-HANDOFF.md');
-  assert.equal(config.merge.enabled, false);
   assert.equal(config.panel.length, 1);
 });
 
@@ -93,7 +97,7 @@ test('extends is reserved and refuses to load', () => {
 test('rejects the old positional output tuple with a useful message', () => {
   assert.throws(
     () => validate({ ...minimal, output: ['a.md', 'b.md'] }),
-    /merged.*raw|array/i,
+    /destination.*merged|array/i,
   );
 });
 
@@ -102,14 +106,14 @@ test('output paths may leave the repository', () => {
   // than relying on the diff exclusion to keep it out.
   const up = validate({
     ...minimal,
-    output: { merged: '../CODE-REVIEW-HANDOFF.md', raw: '../CODE-REVIEW-HANDOFF.raw.md' },
+    output: { merged: '../CODE-REVIEW-HANDOFF.md' },
   });
 
   assert.equal(up.output.merged, '../CODE-REVIEW-HANDOFF.md');
 
   const absolute = validate({
     ...minimal,
-    output: { merged: '/srv/reviews/x.md', raw: '/srv/reviews/x.raw.md' },
+    output: { merged: '/srv/reviews/x.md' },
   });
 
   assert.equal(absolute.output.merged, '/srv/reviews/x.md');
@@ -127,7 +131,7 @@ test('output destination defaults to a file and accepts the terminal', () => {
 test('terminal mode keeps the paths so switching back restores them', () => {
   const config = validate({
     ...minimal,
-    output: { destination: 'terminal', merged: '../report.md', raw: '../report.raw.md' },
+    output: { destination: 'terminal', merged: '../report.md' },
   });
 
   assert.equal(config.output.merged, '../report.md');
@@ -152,26 +156,116 @@ test('bad paths are still caught in terminal mode', () => {
   );
 });
 
-test('merged and raw must differ', () => {
-  assert.throws(
-    () => validate({ ...minimal, output: { merged: 'x.md', raw: 'x.md' } }),
-    /same file/,
+test('keys from the removed consolidation pass are ignored and reported', () => {
+  const legacy = {
+    ...minimal,
+    // Identical paths were an error while `raw` named a second file.
+    output: { merged: 'x.md', raw: 'x.md' },
+    merge: { enabled: true, vendor: 'claude', model: 'opus' },
+    mergeTimeoutMs: 5,
+  };
+
+  const config = validate(legacy);
+
+  assert.deepEqual(config.output, { destination: 'file', merged: 'x.md' });
+  assert.ok(!('merge' in config));
+  assert.ok(!('mergeTimeoutMs' in config));
+  assert.deepEqual(obsoleteKeys(legacy), ['merge', 'mergeTimeoutMs', 'output.raw']);
+  assert.deepEqual(obsoleteKeys(minimal), []);
+  assert.equal(legacyRawOutput(legacy), 'x.md');
+  assert.equal(legacyRawOutput(minimal), null);
+  assert.equal(legacyRawOutput({ output: { raw: 7 } }), null);
+  assert.equal(legacyRawOutput({ output: { raw: '  ' } }), null);
+});
+
+test('leftover raw reports are tracked only at usable paths inside the repository', async (t) => {
+  const repoRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-legacy-raw-')));
+  t.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const merged = path.join(repoRoot, 'CODE-REVIEW-HANDOFF.md');
+  const legacyDefault = path.join(repoRoot, 'CODE-REVIEW-HANDOFF.raw.md');
+
+  // The default name is always covered; a configured path is added to it.
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, undefined, merged), [legacyDefault]);
+  assert.deepEqual(
+    legacyRawOutputPaths(repoRoot, 'reviews/raw.md', merged),
+    [path.join(repoRoot, 'reviews', 'raw.md'), legacyDefault],
+  );
+
+  // Never the live report, never outside the repository, never git's or
+  // crbuddy's own state, and never a directory.
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, 'CODE-REVIEW-HANDOFF.md', merged), [legacyDefault]);
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, legacyDefault, legacyDefault), []);
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, '../outside.raw.md', merged), [legacyDefault]);
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, '.git/hooks/pre-commit', merged), [legacyDefault]);
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, '.crbuddy/raw.md', merged), [legacyDefault]);
+  await mkdir(path.join(repoRoot, 'a-directory'));
+  assert.deepEqual(legacyRawOutputPaths(repoRoot, 'a-directory', merged), [legacyDefault]);
+});
+
+test('the obsolete-keys note says what output.raw actually does', async (t) => {
+  const repoRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-obsolete-note-')));
+  t.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const note = (
+    keys: string[],
+    raw?: string,
+    scope: 'project' | 'global' = 'project',
+    root: string | null = repoRoot,
+  ) => obsoleteKeysNote(
+    { config: validate(minimal), scope, obsoleteKeys: keys, ...(raw ? { legacyRawOutput: raw } : {}) },
+    root,
+    'config.json',
+  );
+
+  // Setup before 0.4.0 wrote the default name into every config: crbuddy
+  // config drops it, and it is not what hides the file.
+  assert.equal(
+    note(['merge', 'output.raw'], 'CODE-REVIEW-HANDOFF.raw.md'),
+    'Ignoring merge, output.raw in config.json: consolidation was removed in 0.4.0. ' +
+      '`crbuddy config` rewrites the file without merge and output.raw.',
+  );
+  // A blank or non-string value names nothing.
+  assert.equal(
+    note(['output.raw']),
+    'Ignoring output.raw in config.json: consolidation was removed in 0.4.0. ' +
+      '`crbuddy config` rewrites the file without output.raw.',
+  );
+
+  const hidden = note(['output.raw'], 'reviews/raw.md') ?? '';
+  assert.match(hidden, /output\.raw stays: it keeps the old raw report at reviews\/raw\.md hidden from reviewers\./);
+  assert.doesNotMatch(hidden, /rewrites the file/);
+  assert.match(
+    note(['output.raw'], '../outside.raw.md', 'global') ?? '',
+    /stays only so a crash stash holding \.\.\/outside\.raw\.md can be recovered/,
+  );
+  assert.match(
+    note(['output.raw'], '../outside.raw.md') ?? '',
+    /output\.raw \(\.\.\/outside\.raw\.md\) does nothing; remove it\./,
+  );
+  assert.match(
+    note(['output.raw'], 'reviews/raw.md', 'global', null) ?? '',
+    /stays so crbuddy can still find an old raw report at reviews\/raw\.md/,
+  );
+  assert.equal(note([]), null);
+});
+
+test('one leftover raw report under two spellings is tracked once', async (t) => {
+  const repoRoot = await realpath(await mkdtemp(path.join(tmpdir(), 'crbuddy-legacy-case-')));
+  t.after(() => rm(repoRoot, { recursive: true, force: true }));
+  const merged = path.join(repoRoot, 'CODE-REVIEW-HANDOFF.md');
+  await writeFile(path.join(repoRoot, 'CODE-REVIEW-HANDOFF.raw.md'), 'old raw report');
+  const lower = path.join(repoRoot, 'code-review-handoff.raw.md');
+  const folds = existsSync(lower);
+
+  // Stashing one file under both spellings would move it, then fail.
+  if (!folds) await writeFile(lower, 'a different file on this volume');
+  assert.equal(
+    legacyRawOutputPaths(repoRoot, 'code-review-handoff.raw.md', merged).length,
+    folds ? 1 : 2,
   );
 });
 
 test('an empty panel is rejected', () => {
   assert.throws(() => validate({ panel: [] }), ConfigError);
-});
-
-test('enabled merge requires a vendor and model', () => {
-  assert.throws(() => validate({ ...minimal, merge: { enabled: true } }), /required/);
-
-  const ok = validate({
-    ...minimal,
-    merge: { enabled: true, vendor: 'claude', model: 'opus' },
-  });
-
-  assert.equal(ok.merge.effort, 'high');
 });
 
 test('a future configVersion is refused rather than guessed at', () => {
@@ -188,7 +282,7 @@ test('any vendor-native effort string is accepted', () => {
   // require a crbuddy release to become usable.
   for (const level of ['high', 'xhigh', 'max', 'none', 'something-new-in-2027']) {
     const config = validate({
-      panel: [{ vendor: 'codex', model: 'gpt-5.6-sol', effort: level }],
+      panel: [{ vendor: 'codex', model: 'gpt-6-sol', effort: level }],
     });
 
     assert.equal(config.panel[0]?.effort, level);
@@ -203,7 +297,7 @@ test('an empty effort string is still rejected', () => {
 });
 
 test('effort is optional and stays absent when unspecified', () => {
-  const config = validate({ panel: [{ vendor: 'gemini', model: 'gemini-2.5-pro' }] });
+  const config = validate({ panel: [{ vendor: 'gemini', model: 'gemini-3.1-pro-preview' }] });
   assert.equal(config.panel[0]?.effort, undefined);
 });
 
@@ -225,18 +319,11 @@ test('output paths cannot point into .git or .crbuddy', () => {
   // git's own state would destroy the repository.
   for (const bad of ['.git/config', '.crbuddy/config.json', '.git', 'x/../.git/HEAD']) {
     assert.throws(
-      () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
+      () => validate({ ...minimal, output: { merged: bad } }),
       /must not write inside|must name a file/,
       `expected ${bad} to be rejected`,
     );
   }
-});
-
-test('output paths that normalize to the same file are rejected', () => {
-  assert.throws(
-    () => validate({ ...minimal, output: { merged: 'a.md', raw: './x/../a.md' } }),
-    /same file/,
-  );
 });
 
 test('reserved directories are rejected from outside the repo too', () => {
@@ -244,7 +331,7 @@ test('reserved directories are rejected from outside the repo too', () => {
   // root would miss these.
   for (const bad of ['../.git/HEAD', '/srv/repo/.git/config', '../x/.crbuddy/config.json']) {
     assert.throws(
-      () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
+      () => validate({ ...minimal, output: { merged: bad } }),
       /must not write inside/,
       `expected ${bad} to be rejected`,
     );
@@ -256,7 +343,7 @@ test('a reserved ancestor above the repository does not reject its outputs', () 
 
   assert.doesNotThrow(() =>
     assertUsableOutput(
-      { merged: 'review.md', raw: 'review.raw.md' },
+      { merged: 'review.md' },
       'output',
       nestedRepo,
     ),
@@ -266,7 +353,7 @@ test('a reserved ancestor above the repository does not reject its outputs', () 
 test('an output path that names no file is rejected', () => {
   for (const bad of ['..', '.', '../']) {
     assert.throws(
-      () => validate({ ...minimal, output: { merged: bad, raw: 'ok.md' } }),
+      () => validate({ ...minimal, output: { merged: bad } }),
       /must name a file/,
       `expected ${bad} to be rejected`,
     );

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -40,6 +40,7 @@ async function fixture(t: TestContext) {
   const printedFile = path.join(root, 'printed');
   const postStartedFile = path.join(root, 'post-started.json');
   const launchedFile = path.join(root, 'launched');
+  const seenFile = path.join(root, 'seen.json');
   const fakeCli = path.join(root, 'reviewer.cjs');
   const preload = path.join(root, 'preload.mjs');
   await mkdir(path.dirname(configFile), { recursive: true });
@@ -55,11 +56,9 @@ async function fixture(t: TestContext) {
 
   const config = {
     configVersion: 1,
-    output: { destination: 'file', merged: 'review.md', raw: 'review.raw.md' },
+    output: { destination: 'file', merged: 'review.md' },
     target: 'uncommitted',
     timeoutMs: 5_000,
-    mergeTimeoutMs: 5_000,
-    merge: { enabled: false, vendor: 'codex', model: 'merge-fail' },
     panel: [{ id: 'one', vendor: 'codex', model: 'ok' }],
   };
   const saveConfig = () => writeFile(configFile, JSON.stringify(config));
@@ -69,6 +68,7 @@ async function fixture(t: TestContext) {
   await writeFile(fakeCli, `
     const fs = require('node:fs');
     const model = process.argv[2];
+    fs.writeFileSync(${JSON.stringify(seenFile)}, JSON.stringify(fs.readdirSync('.')));
     fs.writeFileSync(${JSON.stringify(launchedFile)}, model);
     if (process.env.CRB_TEST_COMMIT_FAILURE) fs.mkdirSync('review.md');
     const finish = () => {
@@ -95,6 +95,19 @@ async function fixture(t: TestContext) {
     codexAdapter.versionArgs = () => ['-e', 'console.log("codex-cli 0.153.4")'];
     codexAdapter.helpArgs = () => ['-e', 'console.log("--sandbox --ephemeral --color -c")'];
     if (process.env.CRB_TEST_PREFLIGHT) codexAdapter.command = 'crbuddy-no-such-cli';
+    // Stands in for a Claude review judged incomplete: failed, output kept.
+    const originalCheck = codexAdapter.checkCompletion;
+    codexAdapter.checkCompletion = function(result, invocation) {
+      if (process.env.CRB_TEST_INCOMPLETE && result.stdout.includes('First defect')) {
+        return {
+          ok: false,
+          reason: 'incomplete_review',
+          detail: 'Test: still listed {"command":"cd ' + process.cwd() + ' && npm test ' + process.cwd() + '/src/app.ts"}.',
+          keepOutput: true,
+        };
+      }
+      return originalCheck.call(this, result, invocation);
+    };
     const originalBuild = codexAdapter.build;
     codexAdapter.build = function(request) {
       const invocation = originalBuild.call(this, request);
@@ -220,7 +233,7 @@ async function fixture(t: TestContext) {
     return { ...result, posts, menu };
   }
 
-  return { root, repo, userDir, config, configFile, settingsFile, launchedFile, saveConfig, run };
+  return { root, repo, userDir, config, configFile, settingsFile, launchedFile, seenFile, saveConfig, run };
 }
 
 test('successful launched go sends exactly one small POST using global preferences', async (t) => {
@@ -241,6 +254,24 @@ test('successful launched go sends exactly one small POST using global preferenc
   });
   assert.doesNotMatch(result.stdout + result.stderr, /crbuddy-test-secret-topic/);
   assert.doesNotMatch(await readFile(path.join(f.repo, 'review.md'), 'utf8'), /crbuddy-test-secret-topic/);
+});
+
+test('the applied effort is shown in terminal progress and in the report', async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.configFile, JSON.stringify({
+    ...f.config,
+    panel: [
+      { id: 'one', vendor: 'codex', model: 'ok', effort: 'high' },
+      { id: 'two', vendor: 'codex', model: 'ok' },
+    ],
+  }));
+  const result = await f.run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /Codex CLI \(ok, high\) \[one\] - started/);
+  assert.match(result.stderr, /Codex CLI \(ok\) \[two\] - started/);
+  const report = await readFile(path.join(f.repo, 'review.md'), 'utf8');
+  assert.match(report, /## one - codex \/ ok, effort high\n/);
+  assert.match(report, /## two - codex \/ ok\n/);
 });
 
 test('all launched reviewers failing sends one failed notification and preserves exit 1', async (t) => {
@@ -279,20 +310,187 @@ test('a missing reviewer executable does not suppress another launched reviewer 
   assert.equal(result.posts[0]!.body, 'sample-repo: review complete (partial)');
 });
 
-test('partial reviewers and failed consolidation keep default and strict exits', async (t) => {
-  for (const mergeFailure of [false, true]) {
+test('partial reviewers keep default and strict exits', async (t) => {
+  const f = await fixture(t);
+  f.config.panel.push({ id: 'two', vendor: 'codex', model: 'fail' });
+  await f.saveConfig();
+  for (const strict of [false, true]) {
+    const result = await f.run(strict ? ['go', '--strict'] : ['go']);
+    assert.equal(result.code, strict ? 2 : 0, result.stderr);
+    assert.equal(result.posts.length, 1);
+    assert.equal(result.posts[0]!.body, 'sample-repo: review complete (partial)');
+  }
+});
+
+test('a config with consolidation keys still reviews and says they are ignored', async (t) => {
+  const f = await fixture(t);
+  await writeFile(f.configFile, JSON.stringify({
+    ...f.config,
+    output: { ...f.config.output, raw: 'review.raw.md' },
+    mergeTimeoutMs: 5_000,
+    merge: { enabled: true, vendor: 'codex', model: 'ok' },
+  }));
+  const result = await f.run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /Ignoring merge, mergeTimeoutMs, output\.raw in /);
+  assert.match(result.stderr, /rewrites the file without merge and mergeTimeoutMs\./);
+  assert.match(result.stderr, /output\.raw stays: it keeps the old raw report at review\.raw\.md hidden/);
+  assert.equal(result.posts.length, 1);
+  assert.ok(existsSync(path.join(f.repo, 'review.md')));
+  assert.ok(!existsSync(path.join(f.repo, 'review.raw.md')));
+});
+
+test('a raw report left by crbuddy before 0.4.0 is hidden, excluded and put back', async (t) => {
+  const f = await fixture(t);
+  const legacyDefault = path.join(f.repo, 'CODE-REVIEW-HANDOFF.raw.md');
+  const legacyConfigured = path.join(f.repo, 'custom.raw.md');
+
+  for (const destination of ['file', 'terminal']) {
+    await writeFile(f.configFile, JSON.stringify({
+      ...f.config,
+      output: { ...f.config.output, destination, raw: 'custom.raw.md' },
+    }));
+    await writeFile(legacyDefault, 'old default raw findings\n');
+    await writeFile(legacyConfigured, 'old configured raw findings\n');
+
+    const result = await f.run();
+    assert.equal(result.code, 0, result.stderr);
+
+    const seen: string[] = JSON.parse(await readFile(f.seenFile, 'utf8'));
+    assert.ok(seen.includes('code.txt'), destination);
+    assert.ok(!seen.includes('CODE-REVIEW-HANDOFF.raw.md'), destination);
+    assert.ok(!seen.includes('custom.raw.md'), destination);
+    // Out of the diff too: the one real change is all that is under review.
+    assert.match(result.stderr, /Reviewing 1 file\(s\)/);
+    assert.match(result.stderr, /custom\.raw\.md is a report from crbuddy before 0\.4\.0/);
+
+    assert.equal(await readFile(legacyDefault, 'utf8'), 'old default raw findings\n');
+    assert.equal(await readFile(legacyConfigured, 'utf8'), 'old configured raw findings\n');
+  }
+});
+
+test('a crash stash from before 0.4.0 that holds the raw report is recovered whole', async (t) => {
+  const f = await fixture(t);
+  const repo = await realpath(f.repo);
+  const batch = path.join(repo, '.crbuddy', 'previous', 'old-run');
+  await mkdir(batch, { recursive: true });
+  await writeFile(path.join(batch, '0.stashed'), 'previous report\n');
+  await writeFile(path.join(batch, '1.stashed'), 'previous raw report\n');
+  await writeFile(path.join(batch, 'manifest.json'), JSON.stringify([
+    { stored: '0.stashed', relative: path.join(repo, 'review.md') },
+    { stored: '1.stashed', relative: path.join(repo, 'CODE-REVIEW-HANDOFF.raw.md') },
+  ]));
+
+  const result = await f.run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(
+    result.stderr,
+    /Recovered .*review\.md, .*CODE-REVIEW-HANDOFF\.raw\.md left behind by an interrupted run/,
+  );
+  assert.ok(!existsSync(batch));
+
+  // This run replaces the recovered report and keeps the raw one hidden.
+  assert.match(await readFile(path.join(repo, 'review.md'), 'utf8'), /First defect/);
+  assert.equal(
+    await readFile(path.join(repo, 'CODE-REVIEW-HANDOFF.raw.md'), 'utf8'),
+    'previous raw report\n',
+  );
+  const seen: string[] = JSON.parse(await readFile(f.seenFile, 'utf8'));
+  assert.ok(!seen.includes('CODE-REVIEW-HANDOFF.raw.md'));
+});
+
+test('a pre-0.4 crash stash with an outside raw report is recovered only for a global config', async (t) => {
+  for (const scope of ['global', 'project'] as const) {
     const f = await fixture(t);
-    if (mergeFailure) f.config.merge.enabled = true;
-    else f.config.panel.push({ id: 'two', vendor: 'codex', model: 'fail' });
-    await f.saveConfig();
-    for (const strict of [false, true]) {
-      const result = await f.run(strict ? ['go', '--strict'] : ['go']);
-      assert.equal(result.code, strict ? 2 : 0, result.stderr);
-      assert.equal(result.posts.length, 1);
-      assert.equal(result.posts[0]!.body, 'sample-repo: review complete (partial)');
-      if (mergeFailure) assert.match(result.stderr, /Consolidation failed/);
+    const repo = await realpath(f.repo);
+    const outside = path.join(await realpath(f.root), 'outside.raw.md');
+    const config = JSON.stringify({ ...f.config, output: { ...f.config.output, raw: outside } });
+    if (scope === 'global') {
+      await rm(f.configFile);
+      await writeFile(path.join(f.userDir, '.crbuddy', 'config.json'), config);
+    } else {
+      await writeFile(f.configFile, config);
+    }
+
+    const batch = path.join(repo, '.crbuddy', 'previous', 'old-run');
+    await mkdir(batch, { recursive: true });
+    await writeFile(path.join(batch, '0.stashed'), 'previous report\n');
+    await writeFile(path.join(batch, '1.stashed'), 'previous raw report\n');
+    await writeFile(path.join(batch, 'manifest.json'), JSON.stringify([
+      { stored: '0.stashed', relative: path.join(repo, 'review.md') },
+      { stored: '1.stashed', relative: outside },
+    ]));
+
+    const result = await f.run();
+    assert.equal(result.code, 0, result.stderr);
+
+    if (scope === 'global') {
+      assert.match(result.stderr, /Recovered .*review\.md, .*outside\.raw\.md left behind/);
+      assert.ok(!existsSync(batch));
+      assert.equal(await readFile(outside, 'utf8'), 'previous raw report\n');
+    } else {
+      // Restoring outside the repository from a cloned repo's config would
+      // need consent, so the whole batch is left where it is.
+      assert.doesNotMatch(result.stderr, /Recovered/);
+      assert.ok(existsSync(path.join(batch, '1.stashed')));
+      assert.ok(!existsSync(outside));
     }
   }
+});
+
+test('a panel whose only output is a kept incomplete review still writes it', async (t) => {
+  const f = await fixture(t);
+  const report = path.join(f.repo, 'review.md');
+  await writeFile(report, 'previous report\n');
+
+  const result = await f.run(['go'], { CRB_TEST_INCOMPLETE: '1' });
+
+  // Still a total failure, but the finished text is handed over, marked.
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /FAILED: incomplete_review/);
+  assert.match(result.stderr, /No review completed; the report holds only output kept/);
+  const written = await readFile(report, 'utf8');
+  assert.match(written, /failed: incomplete_review - its output is kept below, possibly incomplete/);
+  assert.match(written, /## First defect/);
+  // The still-listed task's command names the repository; the report must not.
+  assert.match(written, /still listed \{"command":"cd  && npm test src\/app\.ts"\}/);
+  assert.ok(!written.includes(await realpath(f.repo)), 'no absolute repo path in the report');
+  assert.equal(result.posts.length, 1);
+  assert.match(result.posts[0]!.body, /failed/);
+});
+
+test('a leftover raw report path cannot carry terminal control sequences', {
+  // Windows forbids control characters in file names, so the fixture cannot exist.
+  skip: process.platform === 'win32' ? 'control characters are not valid in Windows file names' : false,
+}, async (t) => {
+  const f = await fixture(t);
+  const name = 'old\u001b]52;c;cHduZWQ=\u0007raw.md';
+  await writeFile(f.configFile, JSON.stringify({
+    ...f.config,
+    output: { ...f.config.output, raw: name },
+  }));
+  await writeFile(path.join(f.repo, name), 'old raw findings\n');
+
+  const result = await f.run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /oldraw\.md is a report from crbuddy before 0\.4\.0/);
+  assert.ok(!result.stderr.includes('\u001b'), 'no escape character reaches the terminal');
+});
+
+test('config paths in the consent list cannot carry terminal control sequences', async (t) => {
+  const f = await fixture(t);
+  const spoof = path.join(f.root, 'outside\u001b[2K\u001b[1Gharmless', 'review.md');
+  await writeFile(f.configFile, JSON.stringify({
+    ...f.config,
+    output: { ...f.config.output, merged: spoof },
+  }));
+
+  const result = await f.run();
+  // Unattended, so the outside path is refused - after it has been listed.
+  assert.equal(result.code, 1);
+  // The sequences are removed whole, so what is listed is plain text.
+  assert.match(result.stderr, /outsideharmless[\\/]review\.md/);
+  assert.ok(!result.stderr.includes('\u001b'), 'no escape character reaches the terminal');
 });
 
 test('missing, disabled and malformed global settings do not prevent a review or send a POST', async (t) => {
@@ -354,32 +552,25 @@ test('setup, help, version, diagnostics and argument/config errors never notify'
   assert.equal(existsSync(f.launchedFile), false);
 });
 
-test('graceful first SIGINT during reviewers or consolidation suppresses the push', async (t) => {
-  for (const merge of [false, true]) {
-    const f = await fixture(t);
-    const model = merge ? 'merge-slow' : 'slow';
-    if (merge) {
-      f.config.merge.enabled = true;
-      f.config.merge.model = model;
-    } else f.config.panel[0]!.model = model;
-    await f.saveConfig();
-    await writeFile(path.join(f.repo, 'review.md'), 'previous report');
-    const result = await f.run(['go'], { CRB_TEST_INTERRUPT: model });
-    assert.equal(result.code, 130, result.stderr);
-    assert.match(result.stderr, /Interrupted/);
-    assert.deepEqual(result.posts, []);
-    assert.equal(await readFile(path.join(f.repo, 'review.md'), 'utf8'), 'previous report');
-  }
+test('graceful first SIGINT during reviewers suppresses the push', async (t) => {
+  const f = await fixture(t);
+  f.config.panel[0]!.model = 'slow';
+  await f.saveConfig();
+  await writeFile(path.join(f.repo, 'review.md'), 'previous report');
+  const result = await f.run(['go'], { CRB_TEST_INTERRUPT: 'slow' });
+  assert.equal(result.code, 130, result.stderr);
+  assert.match(result.stderr, /Interrupted/);
+  assert.deepEqual(result.posts, []);
+  assert.equal(await readFile(path.join(f.repo, 'review.md'), 'utf8'), 'previous report');
 });
 
 test('terminal success and partial outcomes notify after printing and before clipboard input', async (t) => {
-  for (const outcome of ['complete', 'reviewer-partial', 'merge-partial']) {
+  for (const outcome of ['complete', 'reviewer-partial']) {
     const f = await fixture(t);
     f.config.output.destination = 'terminal';
     if (outcome === 'reviewer-partial') {
       f.config.panel.push({ id: 'two', vendor: 'codex', model: 'fail' });
     }
-    if (outcome === 'merge-partial') f.config.merge.enabled = true;
     await f.saveConfig();
 
     for (const strict of [false, true]) {
@@ -537,8 +728,8 @@ test('piped init appends notification answers, config Enter retains them, and No
   await rm(f.configFile);
   await rm(f.settingsFile);
   // Existing review answers: vendor, model, effort, instructions, more,
-  // destination, consolidation, location, target. Notification answers follow.
-  const reviewAnswers = ['', '', '', 'n', 'n', '', 'n', '', ''];
+  // destination, location, target. Notification answers follow.
+  const reviewAnswers = ['', '', '', 'n', 'n', '', '', ''];
   const first = await f.run(['init', '--global'], {},
     [...reviewAnswers, 'y', '', 'https://example.invalid/crbuddy-invalid-secret-topic', endpoint, ''].join('\n'));
   assert.equal(first.code, 0, first.stdout + first.stderr);
@@ -546,12 +737,12 @@ test('piped init appends notification answers, config Enter retains them, and No
   assert.deepEqual(first.posts, []);
   assert.deepEqual(JSON.parse(await readFile(f.settingsFile, 'utf8')), enabled);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
-  assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, 'gpt-5.6-sol');
+  assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, 'gpt-6-sol');
   assert.doesNotMatch(await readFile(globalConfig, 'utf8'), /notifications|ntfy/);
 
-  // Editing retains the panel, adds none, keeps file output and no merge,
-  // then accepts location and target. Three empty notification answers keep ntfy.
-  const editAnswers = ['', 'n', '', '', '', ''];
+  // Editing retains the panel, adds none, keeps file output, then accepts
+  // location and target. Three empty notification answers keep ntfy.
+  const editAnswers = ['', 'n', '', '', ''];
   const edit = await f.run(['config', '--global'], {}, [...editAnswers, '', '', '', ''].join('\n'));
   assert.equal(edit.code, 0, edit.stdout + edit.stderr);
   assert.match(edit.stdout, /Notify you.*\[Y\/n\]/);
@@ -583,7 +774,7 @@ test('piped setup EOF at the new questions cancels without partially saving eith
   const f = await fixture(t);
   await rm(f.configFile);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
-  const reviewAnswers = ['', '', '', 'n', 'n', '', 'n', '', '1'];
+  const reviewAnswers = ['', '', '', 'n', 'n', '', '', '1'];
   for (const notifications of [false, true]) {
     if (notifications) await writeFile(f.settingsFile, JSON.stringify(enabled));
     else await rm(f.settingsFile, { force: true });
@@ -599,59 +790,22 @@ test('piped setup EOF at the new questions cancels without partially saving eith
   }
 });
 
-test('piped Codex model numbers match the documented Astra and Sol choices', async (t) => {
+test('piped Codex model numbers match the documented choices, with Other last', async (t) => {
   const f = await fixture(t);
   await rm(f.configFile);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
-  for (const [answer, model] of [['1', 'gpt-6-astra'], ['2', 'gpt-5.6-sol']]) {
+  for (const [answers, model] of [
+    [['1'], 'gpt-6-astra'],
+    [['2'], 'gpt-6-sol'],
+    [['3'], 'gpt-6-luna'],
+    [['4', 'my-custom-model'], 'my-custom-model'],
+  ] as const) {
     await rm(globalConfig, { force: true });
     const result = await f.run(['init', '--global'], {},
-      ['', answer, '', 'n', 'n', '', 'n', '', '', 'n'].join('\n'));
+      ['', ...answers, '', 'n', 'n', '', '', '', 'n'].join('\n'));
     assert.equal(result.code, 0, result.stdout + result.stderr);
     assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, model);
     assert.deepEqual(result.posts, []);
   }
 });
 
-test('piped consolidation defaults work after a vendor change or re-enabling without an extra model answer', async (t) => {
-  const f = await fixture(t);
-  for (const previous of [
-    { enabled: true, vendor: 'claude', model: 'opus' },
-    { enabled: false, vendor: '', model: '' },
-  ]) {
-    f.config.merge = previous;
-    await f.saveConfig();
-    // Keep panel, add none, file output, enable consolidation, keep location;
-    // accept vendor/model/effort and target; decline gitignore and notifications.
-    const answers = ['', 'n', '', 'y', '', '', '', '', '', 'n', 'n'];
-    const result = await f.run(['config', '--project'], {}, answers.join('\n'));
-    assert.equal(result.code, 0, result.stdout + result.stderr);
-    assert.doesNotMatch(result.stdout, /Model id/);
-    assert.deepEqual(JSON.parse(await readFile(f.configFile, 'utf8')).merge, {
-      enabled: true, vendor: 'codex', model: 'gpt-5.6-sol', effort: 'high',
-    });
-    assert.deepEqual(result.posts, []);
-  }
-});
-
-test('piped custom consolidation models preserve answer order and keep Other at its existing number', async (t) => {
-  const f = await fixture(t);
-  for (const [previous, answer, typed, model] of [
-    ['my-custom-id', '', [], 'my-custom-id'],
-    ['my-custom-id', '5', ['replacement-model'], 'replacement-model'],
-    [' \t ', '5', ['', 'replacement-model'], 'replacement-model'],
-  ] as const) {
-    f.config.merge = { enabled: previous.trim() !== '', vendor: 'codex', model: previous };
-    await f.saveConfig();
-    // Keep panel, add none, file output, enable consolidation, keep location/vendor.
-    // After the model answer(s), choose medium effort and a named branch target.
-    const answers = ['', 'n', '', 'y', '', '', answer, ...typed, '3', '2', 'review-base', 'n', 'n'];
-    const result = await f.run(['config', '--project'], {}, answers.join('\n'));
-    assert.equal(result.code, 0, result.stdout + result.stderr);
-    const written = JSON.parse(await readFile(f.configFile, 'utf8'));
-    assert.deepEqual(written.merge, { enabled: true, vendor: 'codex', model, effort: 'medium' });
-    assert.deepEqual(written.target, { base: 'review-base' });
-    if (answer === '') assert.doesNotMatch(result.stdout, /Model id/);
-    assert.deepEqual(result.posts, []);
-  }
-});

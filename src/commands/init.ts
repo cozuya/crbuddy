@@ -8,7 +8,7 @@ import {
   Config,
   DEFAULTS,
   DEFAULT_OUTPUT,
-  MergeConfig,
+  LEGACY_RAW_OUTPUT,
   OutputConfig,
   OutputDestination,
   PanelEntry,
@@ -19,15 +19,17 @@ import {
   assertUsableOutput,
   homeConfigPath,
   projectConfigPath,
-  readAndValidate,
+  readConfigFile,
   repoRelative,
   slug,
 } from '../config/load.js';
 import { ADAPTERS, getAdapter } from '../adapters/vendors.js';
+import { isVersionAtLeast, probedVersion } from '../adapters/version.js';
 import { probe } from '../run/spawn.js';
 import { Adapter } from '../adapters/types.js';
 import { PromptAborted } from '../util/prompt.js';
 import { WizardUI, createWizardUI } from '../util/wizard-prompt.js';
+import { sanitizeTerminalInline, stripTerminalControls } from '../util/ansi.js';
 import {
   GlobalSettings,
   isNtfyEndpoint,
@@ -144,12 +146,14 @@ async function wizard(
       : homeConfigPath();
 
   let existing: Config | null = null;
+  let existingLegacyRaw: string | null = null;
 
   if (existsSync(targetFile)) {
     ui.message(`Editing the existing config at ${targetFile}.`);
 
     try {
-      existing = await readAndValidate(targetFile);
+      ({ config: existing, legacyRawOutput: existingLegacyRaw } =
+        await readConfigFile(targetFile));
     } catch (error) {
       ui.message(`Could not parse it: ${String(error)}`, 'error');
 
@@ -165,12 +169,34 @@ async function wizard(
     }
   }
 
+  let initialSavedReviewInstructions = existing?.savedReviewInstructions;
+
+  if (ui.interactive && initialSavedReviewInstructions) {
+    ui.note(
+      formatSavedReviewInstructions(initialSavedReviewInstructions),
+      'Saved review instructions',
+    );
+
+    const keepSaved = await ui.confirm(
+      'Keep these saved review instructions for reuse?',
+      true,
+    );
+
+    if (!keepSaved) initialSavedReviewInstructions = undefined;
+  }
+
   const detections = await ui.spinner(
     'Checking vendor CLIs',
     detect,
     'Vendor CLIs checked',
   );
   const available = detections.filter((d) => d.present).map((d) => d.adapter);
+  const unusable = new Map(
+    detections.flatMap((d) => {
+      const problem = versionProblem(d);
+      return problem ? [[d.adapter, problem] as const] : [];
+    }),
+  );
 
   ui.note(detections.map(formatDetection).join('\n'), 'Vendor CLIs');
 
@@ -183,32 +209,40 @@ async function wizard(
     return 1;
   }
 
+  // A panel of only these would be refused by every `crbuddy go`, so there
+  // is nothing worth saving yet.
+  if (available.every((adapter) => unusable.has(adapter))) {
+    ui.cancel(
+      'Every installed vendor CLI is too old for crbuddy, or its version cannot\n' +
+        'be read (marked above). Update at least one, then run setup again.',
+    );
+    return 1;
+  }
+
   ui.message(
     'Detection checks presence only; crbuddy does not check whether CLIs are logged in.',
   );
 
-  const panel = await buildPanel(ui, available, existing?.panel ?? []);
-  const { merge, output } = await buildMerge(
+  const { panel, savedReviewInstructions } = await buildPanel(
     ui,
     available,
-    existing?.merge,
-    existing?.output,
-    options.repoRoot,
-    scope,
+    unusable,
+    existing?.panel ?? [],
+    initialSavedReviewInstructions,
   );
+  const output = await buildOutput(ui, existing?.output, options.repoRoot, scope);
   const reviewTarget = await buildTarget(ui, existing?.target);
 
   const config: Config = {
     configVersion: CONFIG_VERSION,
     output,
     target: reviewTarget,
+    ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
     refuseIfOutputExists:
       existing?.refuseIfOutputExists ?? DEFAULTS.refuseIfOutputExists,
     timeoutMs: existing?.timeoutMs ?? DEFAULTS.timeoutMs,
-    mergeTimeoutMs: existing?.mergeTimeoutMs ?? DEFAULTS.mergeTimeoutMs,
     maxConcurrent: existing?.maxConcurrent ?? DEFAULTS.maxConcurrent,
     maxDiffBytes: existing?.maxDiffBytes ?? DEFAULTS.maxDiffBytes,
-    merge,
     panel,
   };
 
@@ -232,8 +266,11 @@ async function wizard(
     return 1;
   }
 
+  const keptRaw = keptLegacyRawOutput(ui, existingLegacyRaw);
+  const saved = keptRaw ? { ...config, output: { ...config.output, raw: keptRaw } } : config;
+
   await mkdir(path.dirname(targetFile), { recursive: true });
-  await writeFile(targetFile, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  await writeFile(targetFile, `${JSON.stringify(saved, null, 2)}\n`, 'utf8');
   let settingsSaved = true;
   try {
     await saveGlobalSettings(settings, settingsFile);
@@ -330,7 +367,7 @@ async function planGitignore(
   // created, so it is always worth ignoring.
   const reports =
     config.output.destination === 'file'
-      ? [config.output.merged, config.output.raw]
+      ? [config.output.merged]
       : [];
 
   // Mapped, not filtered: an absolute path can still resolve inside the
@@ -407,7 +444,7 @@ async function detectAdapters(signal?: AbortSignal): Promise<Detection[]> {
     results.push({
       adapter,
       present: result.present,
-      version: result.present ? adapter.parseVersion(result.output ?? '') : null,
+      version: probedVersion(adapter, result),
       ...(result.error ? { error: result.error } : {}),
     });
   }
@@ -415,14 +452,57 @@ async function detectAdapters(signal?: AbortSignal): Promise<Detection[]> {
   return results;
 }
 
+/**
+ * A custom pre-0.4 `output.raw` survives every rewrite. The key is how
+ * `crbuddy go` finds a raw report at that path to hide it from reviewers and
+ * to recover it after a crash, and whether one is left - in this repository,
+ * another, or a crash stash - cannot be settled from here. So only the user
+ * removes it. The default name needs no key: it is always covered.
+ */
+function keptLegacyRawOutput(ui: WizardUI, raw: string | null): string | null {
+  if (!raw || raw === LEGACY_RAW_OUTPUT) return null;
+
+  ui.message(
+    `Kept output.raw (${sanitizeTerminalInline(raw)}): crbuddy before 0.4.0 wrote raw ` +
+      'reports there, and crbuddy keeps such a file hidden from reviewers, and ' +
+      'recovers it after a crash, only while this key names it. Remove the key ' +
+      'yourself once no such report is left.',
+    'warn',
+  );
+
+  return raw;
+}
+
+type VersionProblem = 'too old' | 'unreadable';
+
+/**
+ * Why `crbuddy go` is certain to refuse this installed CLI, which aborts the
+ * whole panel: too old, or a version it cannot read and will not guess at.
+ * The version comes from the same reading of the probe that go uses.
+ */
+function versionProblem(detection: Detection): VersionProblem | null {
+  if (!detection.present) return null;
+  if (detection.version === null) return 'unreadable';
+  return isVersionAtLeast(detection.version, detection.adapter.minVersion)
+    ? null
+    : 'too old';
+}
+
 function formatDetection(detection: Detection): string {
-  const mark = detection.present ? '\u2713' : '\u00b7';
+  const problem = versionProblem(detection);
+  const mark = !detection.present ? '\u00b7' : problem ? '\u2717' : '\u2713';
   const version = detection.present
     ? detection.version ?? 'installed; version unknown'
     : 'unavailable';
+  const why =
+    problem === 'too old'
+      ? ` - too old; crbuddy needs ${detection.adapter.minVersion} or newer`
+      : problem === 'unreadable'
+        ? ' - crbuddy cannot read its version and will not guess'
+        : '';
   const summary =
     `${mark} ${detection.adapter.label}  ${version} ` +
-    `(${detection.adapter.command})`;
+    `(${detection.adapter.command})${why}`;
 
   return detection.error ? `${summary}\n  ${detection.error}` : summary;
 }
@@ -441,9 +521,9 @@ function formatReviewer(entry: PanelEntry): string {
   }
 
   return [
-    vendorLabel,
-    modelLabel,
-    entry.effort,
+    sanitizeTerminalInline(vendorLabel),
+    sanitizeTerminalInline(modelLabel),
+    entry.effort ? sanitizeTerminalInline(entry.effort) : undefined,
     entry.instructions ? 'custom instructions' : undefined,
   ]
     .filter((part): part is string => Boolean(part))
@@ -454,7 +534,42 @@ function formatPanel(panel: PanelEntry[]): string {
   return panel.map(formatReviewer).join('\n');
 }
 
-function formatConfigSummary(
+const SAVED_REVIEW_PREVIEW_WIDTH = 80;
+
+export function formatSavedReviewInstructions(instructions: string): string {
+  const logicalLines = stripTerminalControls(
+    instructions.replace(/\r\n?/g, '\n'),
+  ).split('\n');
+
+  while (logicalLines.length > 0 && logicalLines[0]?.trim() === '') {
+    logicalLines.shift();
+  }
+  while (logicalLines.length > 0 && logicalLines.at(-1)?.trim() === '') {
+    logicalLines.pop();
+  }
+
+  const first = logicalLines[0]?.trim().replace(/[\t ]+/g, ' ') ?? '';
+  const firstCharacters = Array.from(first);
+  const preview =
+    firstCharacters.length > SAVED_REVIEW_PREVIEW_WIDTH
+      ? `${firstCharacters
+          .slice(0, SAVED_REVIEW_PREVIEW_WIDTH - 1)
+          .join('')
+          .trimEnd()}…`
+      : first;
+
+  const approximateLines = logicalLines.reduce((sum, line) => {
+    const width = Array.from(line.replace(/\t/g, '    ').trimEnd()).length;
+    return sum + Math.max(1, Math.ceil(width / SAVED_REVIEW_PREVIEW_WIDTH));
+  }, 0);
+  const more = Math.max(0, approximateLines - 1);
+
+  return more > 0
+    ? `${preview} (and ~${more} more line${more === 1 ? '' : 's'})`
+    : preview;
+}
+
+export function formatConfigSummary(
   scope: 'global' | 'project',
   targetFile: string,
   config: Config,
@@ -462,42 +577,42 @@ function formatConfigSummary(
 ): string {
   const lines = [
     `Config: ${scope === 'project' ? 'This repository' : 'Global'}`,
-    `Path: ${targetFile}`,
+    `Path: ${sanitizeTerminalInline(targetFile)}`,
     '',
     'Reviewers:',
     ...config.panel.map((entry) => `  ${formatReviewer(entry)}`),
     '',
   ];
 
-  if (config.merge.enabled) {
-    const merger: PanelEntry = {
-      id: 'summary',
-      vendor: config.merge.vendor,
-      model: config.merge.model,
-      ...(config.merge.effort ? { effort: config.merge.effort } : {}),
-    };
-    lines.push(`Consolidation: Enabled \u00b7 ${formatReviewer(merger)}`);
-  } else {
-    lines.push('Consolidation: Disabled');
+  if (config.savedReviewInstructions) {
+    lines.push(
+      `Saved review instructions: ${formatSavedReviewInstructions(
+        config.savedReviewInstructions,
+      )}`,
+      '',
+    );
   }
 
   lines.push(
     `Target: ${
       config.target === 'uncommitted'
         ? 'Uncommitted changes'
-        : `Current branch vs ${config.target.base}`
+        : `Current branch vs ${sanitizeTerminalInline(config.target.base)}`
     }`,
   );
 
   if (config.output.destination === 'terminal') {
     lines.push('Output: Terminal');
   } else {
-    lines.push(`Output: ${config.output.merged}`);
-    if (config.merge.enabled) lines.push(`Raw audit: ${config.output.raw}`);
+    lines.push(`Output: ${sanitizeTerminalInline(config.output.merged)}`);
   }
 
   if (gitignorePlan) {
-    lines.push(`.gitignore: Add ${gitignorePlan.missing.join(', ')}`);
+    lines.push(
+      `.gitignore: Add ${gitignorePlan.missing
+        .map(sanitizeTerminalInline)
+        .join(', ')}`,
+    );
   }
 
   return lines.join('\n');
@@ -505,12 +620,7 @@ function formatConfigSummary(
 
 const OTHER = '\u0000other';
 
-async function pickModel(
-  ui: WizardUI,
-  adapter: Adapter,
-  current?: string,
-): Promise<string> {
-  const savedModel = current?.trim() ? current : undefined;
+async function pickModel(ui: WizardUI, adapter: Adapter): Promise<string> {
   const choices = adapter.models.map((model) => ({
     label: model.label,
     value: model.id,
@@ -523,15 +633,7 @@ async function pickModel(
     hint: `any id \`${adapter.command}\` accepts, passed through unchecked`,
   });
 
-  const preferred = savedModel ?? adapter.defaultModel;
-  let index = adapter.models.findIndex((model) => model.id === preferred);
-
-  if (index < 0 && savedModel) {
-    // Enter keeps a custom ID without another prompt. Append it so existing
-    // numbered choices, including Other, keep their positions in piped setup.
-    index = choices.length;
-    choices.push({ label: savedModel, value: savedModel, hint: 'current model' });
-  }
+  const index = adapter.models.findIndex((model) => model.id === adapter.defaultModel);
 
   const chosen = await ui.select(
     `Model for ${adapter.label}`,
@@ -546,7 +648,7 @@ async function pickModel(
         ` or check the vendor's docs for current ids.`,
     );
 
-    return ui.text('Model id', savedModel ?? '');
+    return ui.text('Model id', '');
   }
 
   return chosen;
@@ -556,7 +658,6 @@ async function pickEffort(
   ui: WizardUI,
   adapter: Adapter,
   model: string,
-  current?: string,
 ): Promise<string | undefined> {
   const efforts =
     adapter.models.find((entry) => entry.id === model)?.efforts ?? adapter.efforts;
@@ -575,7 +676,7 @@ async function pickEffort(
     hint: `any value \`${adapter.command}\` accepts, passed through unchecked`,
   });
 
-  const preferred = current ?? adapter.defaultEffort ?? efforts[efforts.length - 1]!;
+  const preferred = adapter.defaultEffort ?? efforts[efforts.length - 1]!;
   const index = efforts.indexOf(preferred);
 
   const chosen = await ui.select(
@@ -584,15 +685,166 @@ async function pickEffort(
     index >= 0 ? index : 0,
   );
 
-  return chosen === OTHER ? ui.text('Effort value', current ?? '') : chosen;
+  return chosen === OTHER ? ui.text('Effort value', '') : chosen;
+}
+
+type ReviewInstructionMode = 'default' | 'saved' | 'custom';
+
+interface PanelBuildResult {
+  panel: PanelEntry[];
+  savedReviewInstructions?: string;
+}
+
+function sameReviewInstructions(left: string, right: string | undefined): boolean {
+  if (right === undefined) return false;
+  const normalize = (value: string): string => value.replace(/\r\n?/g, '\n');
+  return normalize(left) === normalize(right);
+}
+
+async function enterCustomReviewInstructions(
+  ui: WizardUI,
+  savedReviewInstructions: string | undefined,
+): Promise<{ instructions: string; savedReviewInstructions?: string }> {
+  const instructions = await ui.multiline('Review instructions');
+
+  if (instructions.trim() === '' || sameReviewInstructions(instructions, savedReviewInstructions)) {
+    return { instructions, ...(savedReviewInstructions ? { savedReviewInstructions } : {}) };
+  }
+
+  const save = await ui.confirm(
+    savedReviewInstructions
+      ? 'Replace the saved review instructions with these?'
+      : 'Save these review instructions for reuse?',
+    true,
+  );
+
+  return {
+    instructions,
+    ...((save ? instructions : savedReviewInstructions)
+      ? { savedReviewInstructions: save ? instructions : savedReviewInstructions }
+      : {}),
+  };
+}
+
+async function chooseReviewInstructions(
+  ui: WizardUI,
+  adapter: Adapter,
+  savedReviewInstructions: string | undefined,
+): Promise<{ instructions?: string; savedReviewInstructions?: string }> {
+  // Piped setup has a documented fixed answer order. Saved-instruction
+  // management is therefore interactive-only: scripted setup sees the
+  // same default-vs-custom questions it saw before this feature existed.
+  if (!ui.interactive) {
+    if (!adapter.nativeReview) {
+      ui.message(
+        `${adapter.label} does not expose a supported headless native code-review ` +
+          'operation, so this lane needs explicit review instructions.',
+        'warn',
+      );
+      const instructions = await ui.multiline('Review instructions');
+      return {
+        instructions,
+        ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
+      };
+    }
+
+    const custom = await ui.confirm(
+      `Give this reviewer custom instructions? ` +
+        `(default: ${adapter.nativeReviewCommand ?? 'the vendor’s own review'})`,
+      false,
+    );
+
+    if (!custom) {
+      return savedReviewInstructions ? { savedReviewInstructions } : {};
+    }
+
+    const instructions = await ui.multiline('Review instructions');
+    return {
+      instructions,
+      ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
+    };
+  }
+
+  if (!adapter.nativeReview) {
+    ui.message(
+      `${adapter.label} does not expose a supported headless native code-review ` +
+        'operation, so this lane needs explicit review instructions.',
+      'warn',
+    );
+
+    if (!savedReviewInstructions) {
+      return enterCustomReviewInstructions(ui, undefined);
+    }
+
+    const mode = await ui.select<'saved' | 'custom'>(
+      `Review instructions for ${adapter.label}`,
+      [
+        {
+          label: 'Use saved custom instructions',
+          value: 'saved',
+          hint: formatSavedReviewInstructions(savedReviewInstructions),
+        },
+        { label: 'Enter custom instructions', value: 'custom' },
+      ],
+      0,
+    );
+
+    if (mode === 'saved') {
+      return { instructions: savedReviewInstructions, savedReviewInstructions };
+    }
+
+    return enterCustomReviewInstructions(ui, savedReviewInstructions);
+  }
+
+  if (!savedReviewInstructions) {
+    const custom = await ui.confirm(
+      `Give this reviewer custom instructions? ` +
+        `(default: ${adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'})`,
+      false,
+    );
+
+    return custom
+      ? enterCustomReviewInstructions(ui, undefined)
+      : {};
+  }
+
+  const mode = await ui.select<ReviewInstructionMode>(
+    `Review instructions for ${adapter.label}`,
+    [
+      {
+        label: 'Use default instructions',
+        value: 'default',
+        hint: adapter.nativeReviewCommand ?? 'the vendor\u2019s own review',
+      },
+      {
+        label: 'Use saved custom instructions',
+        value: 'saved',
+        hint: formatSavedReviewInstructions(savedReviewInstructions),
+      },
+      { label: 'Enter custom instructions', value: 'custom' },
+    ],
+    0,
+  );
+
+  if (mode === 'default') {
+    return { savedReviewInstructions };
+  }
+  if (mode === 'saved') {
+    return { instructions: savedReviewInstructions, savedReviewInstructions };
+  }
+
+  return enterCustomReviewInstructions(ui, savedReviewInstructions);
 }
 
 async function buildPanel(
   ui: WizardUI,
   available: Adapter[],
+  unusable: ReadonlyMap<Adapter, VersionProblem>,
   existing: PanelEntry[],
-): Promise<PanelEntry[]> {
+  initialSavedReviewInstructions?: string,
+): Promise<PanelBuildResult> {
   const panel: PanelEntry[] = [];
+  let savedReviewInstructions = initialSavedReviewInstructions;
 
   if (existing.length > 0) {
     ui.note(formatPanel(existing), 'Current panel');
@@ -617,11 +869,22 @@ async function buildPanel(
   );
 
   for (;;) {
+    // A panel is the point of crbuddy, so Enter keeps adding reviewers until
+    // every installed CLI has one, then stops. Defaulting to an unused CLI
+    // means accepting every default yields one reviewer per vendor. A CLI
+    // `crbuddy go` would refuse (too old, or its version unreadable) is never
+    // a default: go would refuse the whole panel, so adding it stays deliberate.
+    const unused = available.findIndex(
+      (candidate) =>
+        !unusable.has(candidate) &&
+        !panel.some((entry) => entry.vendor === candidate.name),
+    );
+
     if (panel.length > 0) {
       const more = await ui.confirm(
         `${panel.length} reviewer${panel.length === 1 ? '' : 's'} configured. ` +
           `Add another?`,
-        false,
+        unused >= 0,
       );
 
       if (!more) break;
@@ -629,30 +892,27 @@ async function buildPanel(
 
     const adapter = await ui.select(
       'Add a reviewer',
-      available.map((candidate) => ({ label: candidate.label, value: candidate })),
-      0,
+      available.map((candidate) => ({
+        label: candidate.label,
+        value: candidate,
+        ...(unusable.get(candidate) === 'too old'
+          ? { hint: `too old; update ${candidate.command} before crbuddy go` }
+          : unusable.get(candidate) === 'unreadable'
+            ? { hint: 'version unreadable; crbuddy go will refuse it' }
+            : {}),
+      })),
+      unused >= 0 ? unused : 0,
     );
 
     const model = await pickModel(ui, adapter);
     const effort = await pickEffort(ui, adapter, model);
-
-    let instructions: string | undefined;
-
-    if (!adapter.nativeReview) {
-      ui.message(
-        `${adapter.label} does not expose a supported headless native code-review ` +
-          'operation, so this lane needs explicit review instructions.',
-        'warn',
-      );
-      instructions = await ui.multiline('Review instructions');
-    } else {
-      const custom = await ui.confirm(
-        `Give this reviewer custom instructions? ` +
-          `(default: ${adapter.nativeReviewCommand ?? 'the vendor\u2019s own review'})`,
-        false,
-      );
-      instructions = custom ? await ui.multiline('Review instructions') : undefined;
-    }
+    const instructionChoice = await chooseReviewInstructions(
+      ui,
+      adapter,
+      savedReviewInstructions,
+    );
+    const instructions = instructionChoice.instructions;
+    savedReviewInstructions = instructionChoice.savedReviewInstructions;
 
     const seen = new Set(panel.map((entry) => entry.id));
     const base = slug(`${adapter.name}-${model}`);
@@ -678,24 +938,23 @@ async function buildPanel(
     throw new Error('A panel needs at least one run.');
   }
 
-  return panel;
+  return {
+    panel,
+    ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
+  };
 }
 
 /**
- * The consolidation answer and the destination are asked together because
- * they describe the same artifact, but the destination is asked either way:
- * `output.merged` is written whatever the answer is — holding the unmerged
- * reviews when consolidation is off — so skipping the question there would
+ * The destination is asked on every run of the wizard: `output.merged` is
+ * where each file-mode review is written, so skipping the question would
  * silently pin those runs to the repository root.
  */
-async function buildMerge(
+async function buildOutput(
   ui: WizardUI,
-  available: Adapter[],
-  existing: MergeConfig | undefined,
   existingOutput: OutputConfig | undefined,
   repoRoot: string | null,
   scope: 'global' | 'project',
-): Promise<{ merge: MergeConfig; output: OutputConfig }> {
+): Promise<OutputConfig> {
   const destination = await ui.select<OutputDestination>(
     'Where should the output go?',
     [
@@ -713,15 +972,7 @@ async function buildMerge(
     (existingOutput ?? DEFAULT_OUTPUT).destination === 'terminal' ? 1 : 0,
   );
 
-  const enabled = await ui.confirm(
-    'When done, run a consolidation pass to group duplicate findings? ' +
-      (destination === 'terminal'
-        ? '(the report is printed either way)'
-        : '(the report is written either way)'),
-    existing?.enabled ?? true,
-  );
-
-  // Only "file" has anywhere to put it. The paths are still carried in the
+  // Only "file" has anywhere to put it. The path is still carried in the
   // config so switching back to "file" later restores the last choice.
   const output =
     destination === 'terminal'
@@ -730,47 +981,23 @@ async function buildMerge(
           { ...(existingOutput ?? DEFAULT_OUTPUT), destination: 'terminal' as const },
           repoRoot,
         )
-      : await pickOutputLocation(ui, existingOutput, repoRoot, enabled);
+      : await pickOutputLocation(ui, existingOutput, repoRoot);
 
   if (
     scope === 'project' &&
     repoRoot &&
-    [output.merged, output.raw].some(
-      (candidate) => repoRelative(candidate, repoRoot) === null,
-    )
+    repoRelative(output.merged, repoRoot) === null
   ) {
     ui.message(
-      'Because this repository config names output paths outside the repository, ' +
-        '`crbuddy go` will ask you to approve those paths on every interactive run ' +
-        'and will refuse them when unattended. Use a global config if you want ' +
+      'Because this repository config names an output path outside the repository, ' +
+        '`crbuddy go` will ask you to approve that path on every interactive run ' +
+        'and will refuse it when unattended. Use a global config if you want ' +
         'external output without that per-run confirmation.',
       'warn',
     );
   }
 
-  if (!enabled) {
-    return { merge: { enabled: false, vendor: '', model: '' }, output };
-  }
-
-  const currentIndex = available.findIndex(
-    (candidate) => candidate.name === existing?.vendor,
-  );
-
-  const adapter = await ui.select(
-    'Which CLI should consolidate?',
-    available.map((candidate) => ({ label: candidate.label, value: candidate })),
-    currentIndex >= 0 ? currentIndex : 0,
-  );
-
-  // Model and effort IDs belong to the vendor that saved them.
-  const current = existing?.vendor === adapter.name ? existing : undefined;
-  const model = await pickModel(ui, adapter, current?.model);
-  const effort = await pickEffort(ui, adapter, model, current?.effort);
-
-  const merge: MergeConfig = { enabled: true, vendor: adapter.name, model };
-  if (effort) merge.effort = effort;
-
-  return { merge, output };
+  return output;
 }
 
 /**
@@ -783,7 +1010,6 @@ async function pickOutputLocation(
   ui: WizardUI,
   existing: OutputConfig | undefined,
   repoRoot: string | null,
-  consolidating: boolean,
 ): Promise<OutputConfig> {
   const current = existing ?? DEFAULT_OUTPUT;
   const currentDir = path.dirname(current.merged).replace(/\\/g, '/');
@@ -854,8 +1080,6 @@ async function pickOutputLocation(
       );
     }
 
-    if (consolidating) ui.message(`Raw reviews will be written to ${candidate.raw}`);
-
     return candidate;
   }
 }
@@ -883,31 +1107,16 @@ function usableOrDefault(
 
 /**
  * Only the directory is chosen here, so a config that already names its
- * files keeps those names. Rebuilding both paths from the defaults would
- * silently rename a hand-edited `output.merged` the moment someone re-ran
+ * file keeps that name. Rebuilding the path from the default would silently
+ * rename a hand-edited `output.merged` the moment someone re-ran
  * `crbuddy config` and accepted the location it was already using.
  */
 export function inDirectory(directory: string, existing?: OutputConfig): OutputConfig {
   const merged = path.basename(existing?.merged ?? DEFAULT_OUTPUT.merged);
-  let raw = path.basename(existing?.raw ?? DEFAULT_OUTPUT.raw);
 
-  // Two directories can hold two files of the same name; collapsing them
-  // into one directory would make them one file, and the wizard would
-  // write a config that `crbuddy go` then refuses to load.
-  if (raw === merged) {
-    const extension = path.extname(merged);
-    raw = `${merged.slice(0, merged.length - extension.length)}.raw${extension}`;
-  }
+  if (directory === '.') return { destination: 'file', merged };
 
-  if (directory === '.') return { destination: 'file', merged, raw };
-
-  const clean = directory.replace(/\/+$/, '');
-
-  return {
-    destination: 'file',
-    merged: `${clean}/${merged}`,
-    raw: `${clean}/${raw}`,
-  };
+  return { destination: 'file', merged: `${directory.replace(/\/+$/, '')}/${merged}` };
 }
 
 /**

@@ -275,10 +275,6 @@ export async function stashExistingOutputs(
 /**
  * Stage on the DESTINATION filesystem, not the OS temp dir: a
  * cross-filesystem rename is not atomic and may not be a rename at all.
- *
- * Two renames are not one transaction, so the raw file lands first and the
- * merged file — written second — names the raw file's runId. A mismatch is
- * therefore detectable rather than silent.
  */
 export async function commitOutputs(
   repoRoot: string,
@@ -314,9 +310,9 @@ export async function commitOutputs(
     }
   } catch (error) {
     // Roll back the renames that already landed, so the destination returns
-    // to its pre-commit state. Otherwise a half-committed pair is left
+    // to its pre-commit state. Otherwise a half-committed set is left
     // behind and the caller's restore() renames the OLD file over a NEW one
-    // — losing the old copy and leaving merged/raw from different runs.
+    // — losing the old copy and leaving files from different runs.
     for (const entry of written.reverse()) {
       await rename(entry.final, entry.temp).catch(() => {});
     }

@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
+
 import {
   Adapter,
   CompletionCheck,
@@ -69,11 +73,15 @@ const BLOCKED_VENDOR_ARGS: Readonly<Record<string, ReadonlySet<string>>> = {
     '--system-prompt-file',
     '--append-system-prompt',
     '--append-system-prompt-file',
-    // crbuddy validates Claude's terminal marker in plain-text stdout.
-    // Structured output changes that contract, whether selected as an
-    // envelope format or requested through a JSON schema.
+    // crbuddy captures Claude's final payload as plain text. Structured
+    // output changes that contract, whether selected as an envelope format
+    // or requested through a JSON schema.
     '--output-format',
     '--json-schema',
+    // These modes disable hook execution, which would make every Claude lane
+    // consume usage and then fail completion-evidence validation.
+    '--bare',
+    '--safe-mode',
   ]),
   codex: blockedVendorArgs([
     '--config',
@@ -131,6 +139,149 @@ function vendorArgFlag(arg: string): string {
       : flag;
 }
 
+function environmentFlagEnabled(value: string | undefined): boolean {
+  return /^(?:1|true|yes|on)$/i.test(value?.trim() ?? '');
+}
+
+export function claudeHookDisablingEnvironmentVariable(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  return (
+    ['CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_SAFE_MODE'].find((name) =>
+      environmentFlagEnabled(env[name]),
+    ) ?? null
+  );
+}
+
+function assertClaudeHooksEnabledByEnvironment(): void {
+  const disabledBy = claudeHookDisablingEnvironmentVariable();
+
+  if (disabledBy) {
+    throw new UnsafeInvocationError(
+      `${disabledBy} disables Claude hooks, but crbuddy requires its per-run ` +
+        `Stop hook to verify completion. Unset ${disabledBy} before running Claude ` +
+        `through crbuddy.`,
+    );
+  }
+}
+
+/**
+ * Claude Code settings files that can set `disableAllHooks`, most specific
+ * first, which is also their precedence. Managed policy is not read: crbuddy
+ * cannot override it, and a policy that blocks the Stop hook already fails
+ * closed as missing completion evidence.
+ */
+function claudeSettingsFiles(repoRoot: string | null, env: NodeJS.ProcessEnv): string[] {
+  const userDir = claudeConfigDir(repoRoot, env) ?? path.join(homedir(), '.claude');
+  const project = repoRoot
+    ? [
+        path.join(repoRoot, '.claude', 'settings.local.json'),
+        path.join(repoRoot, '.claude', 'settings.json'),
+      ]
+    : [];
+
+  return [...project, path.join(userDir, 'settings.json')];
+}
+
+/**
+ * CLAUDE_CONFIG_DIR as the Claude reviewer will read it. A relative value is
+ * resolved from the repository root, the reviewer's working directory, not
+ * from wherever crbuddy was started.
+ */
+function claudeConfigDir(repoRoot: string | null, env: NodeJS.ProcessEnv): string | null {
+  const configured = env.CLAUDE_CONFIG_DIR?.trim();
+  return configured ? path.resolve(repoRoot ?? process.cwd(), configured) : null;
+}
+
+/**
+ * The settings file whose `"disableAllHooks": true` is in effect, if any. As
+ * in Claude Code, the most specific file that sets the key decides, so a
+ * project's `false` wins over a user-level `true`.
+ */
+export function claudeHookDisablingSettingsFile(
+  repoRoot: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  for (const file of claudeSettingsFiles(repoRoot, env)) {
+    let value: unknown;
+
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      value = typeof parsed === 'object' && parsed !== null
+        ? (parsed as Record<string, unknown>).disableAllHooks
+        : undefined;
+    } catch {
+      continue;
+    }
+
+    if (typeof value === 'boolean') return value ? file : null;
+  }
+
+  return null;
+}
+
+/**
+ * Never an absolute path: the message can land in a shared report. Relative
+ * to the repository, then to CLAUDE_CONFIG_DIR, then to the home directory.
+ */
+function displaySettingsPath(
+  file: string,
+  repoRoot: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const configDir = claudeConfigDir(repoRoot, env);
+  const bases: Array<[string | null | undefined, string]> = [
+    [repoRoot, ''],
+    [configDir, '$CLAUDE_CONFIG_DIR/'],
+    [homedir(), '~/'],
+  ];
+
+  for (const [base, prefix] of bases) {
+    if (!base) continue;
+
+    const relative = path.relative(base, file);
+
+    if (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+      return `${prefix}${relative.split(path.sep).join('/')}`;
+    }
+  }
+
+  return path.basename(file);
+}
+
+/** Why Claude hooks would be off for a run in this repository, if they would. */
+export function claudeHooksDisabledReason(
+  repoRoot: string | null,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const variable = claudeHookDisablingEnvironmentVariable(env);
+  if (variable) return `${variable} disables Claude hooks`;
+
+  const file = claudeHookDisablingSettingsFile(repoRoot, env);
+  if (file) return `${displaySettingsPath(file, repoRoot, env)} sets "disableAllHooks": true`;
+
+  return null;
+}
+
+/**
+ * Refuse rather than override. Forcing `disableAllHooks: false` from the
+ * command line would switch back on every hook the user turned off, including
+ * hooks a cloned repository ships, just to install crbuddy's own.
+ */
+function assertClaudeHooksEnabledBySettings(repoRoot: string): void {
+  const file = claudeHookDisablingSettingsFile(repoRoot);
+
+  if (file) {
+    throw new UnsafeInvocationError(
+      `${displaySettingsPath(file, repoRoot)} sets "disableAllHooks": true, which also ` +
+        `turns off the per-run Stop hook crbuddy needs to verify that a Claude review ` +
+        `finished. crbuddy will not override it, because that would re-enable every hook ` +
+        `you disabled. Remove the setting to use Claude reviewers here, or take the ` +
+        `Claude entries out of this panel.`,
+    );
+  }
+}
+
 /**
  * Best-effort guardrail for known vendor flags that can change permissions,
  * configuration sources, loaded capabilities, or the review root. This is
@@ -157,32 +308,137 @@ function assertSafeVendorArgs(vendor: string, args: string[] | undefined): void 
 
 export const CLAUDE_COMPLETION_MARKER = '<!-- crbuddy:review-complete -->';
 
-const CLAUDE_COMPLETION_INSTRUCTION =
-  'crbuddy completion protocol: Do not end your top-level response while any ' +
-  'background agents, subagents, or delegated tasks are still running. Once all ' +
-  'delegated work is complete and you have produced the final payload for the ' +
-  `current task, append exactly ${CLAUDE_COMPLETION_MARKER} on its own line. ` +
-  'This marker is protocol framing, not part of the task payload: if the task ' +
-  'requires an exact format such as JSON-only output, produce that payload first ' +
-  'and then the marker. Emit the marker exactly once, only as the final ' +
-  'non-whitespace content.';
+/**
+ * Claude Code's Stop hook receives its own authoritative background-task
+ * registry. Use that lifecycle signal instead of trying to infer "done" from
+ * prose. The hook only records each Stop event: print mode already pauses for
+ * background work, and crbuddy removes that wait ceiling at launch. Blocking
+ * Stop here would force extra model turns and can loop while tasks are running.
+ */
+const CLAUDE_STOP_EVIDENCE_SCRIPT = [
+  "const fs=require('node:fs');",
+  "const file=process.argv[1];",
+  "let input='';",
+  "process.stdin.setEncoding('utf8');",
+  "process.stdin.on('data',c=>input+=c);",
+  "process.stdin.on('end',()=>{",
+  // Up to five entries, each cut to its short scalar fields: enough to say
+  // what was still in flight when a review is judged incomplete.
+  "const brief=l=>Array.isArray(l)?l.slice(0,5).map(e=>{const o={};if(e&&typeof e==='object')for(const[k,v]of Object.entries(e)){if(typeof v==='string')o[k]=v.slice(0,80);else if(typeof v==='number'||typeof v==='boolean')o[k]=v;}return o;}):null;",
+  "let stops=1;try{stops=(JSON.parse(fs.readFileSync(file,'utf8')).stops|0)+1;}catch{}",
+  "let data={registryAvailable:false,backgroundTasks:null,sessionCrons:null,stops};",
+  "try{const event=JSON.parse(input);const bg=event.background_tasks;const crons=event.session_crons;data={registryAvailable:Array.isArray(bg)&&Array.isArray(crons),backgroundTasks:Array.isArray(bg)?bg.length:null,sessionCrons:Array.isArray(crons)?crons.length:null,stops,tasks:brief(bg),crons:brief(crons)};}catch{}",
+  "try{fs.writeFileSync(file,JSON.stringify(data));}catch{}",
+  "});",
+].join('');
 
-function stripClaudeCompletionMarker(output: string): string {
-  const trimmed = output.trimEnd();
+type ClaudeEvidenceEntry = Record<string, string | number | boolean>;
 
-  if (!hasTrailingClaudeCompletionMarkerLine(trimmed)) return output;
-
-  const markerStart = trimmed.lastIndexOf(CLAUDE_COMPLETION_MARKER);
-  return trimmed.slice(0, markerStart).trimEnd();
+interface ClaudeCompletionEvidence {
+  registryAvailable: boolean;
+  backgroundTasks: number | null;
+  sessionCrons: number | null;
+  /** Stop events seen in the run; every other field is from the last one. */
+  stops?: number;
+  /** Short fields of the background tasks and crons still listed. */
+  tasks?: ClaudeEvidenceEntry[];
+  crons?: ClaudeEvidenceEntry[];
 }
 
-function hasTrailingClaudeCompletionMarkerLine(output: string): boolean {
-  const lastLine = output
-    .trimEnd()
-    .split(/\r\n|\r|\n/)
-    .at(-1);
+const evidenceEntries = (value: unknown): ClaudeEvidenceEntry[] | undefined =>
+  Array.isArray(value)
+    ? value.filter((entry): entry is ClaudeEvidenceEntry =>
+        typeof entry === 'object' && entry !== null && !Array.isArray(entry))
+    : undefined;
 
-  return lastLine?.trim() === CLAUDE_COMPLETION_MARKER;
+/** What the last Stop still listed, so an incomplete review can be traced. */
+function describePending(evidence: ClaudeCompletionEvidence): string {
+  const counts: Array<[number, string]> = [
+    [evidence.backgroundTasks ?? 0, 'background task'],
+    [evidence.sessionCrons ?? 0, 'session cron'],
+  ];
+  const counted = counts
+    .filter(([count]) => count > 0)
+    .map(([count, noun]) => `${count} ${noun}${count === 1 ? '' : 's'}`);
+  const listed = [...(evidence.tasks ?? []), ...(evidence.crons ?? [])]
+    .map((entry) => JSON.stringify(entry))
+    .join(', ');
+
+  return (
+    `Claude's last Stop${evidence.stops ? ` (of ${evidence.stops} in this run)` : ''} ` +
+    `still listed ${counted.join(' and ')}${listed ? `: ${listed}` : ''}.`
+  );
+}
+
+function claudeCompletionSettings(evidencePath: string): string {
+  return JSON.stringify({
+    // `disableAllHooks` is deliberately left alone; build() refuses instead
+    // (see assertClaudeHooksEnabledBySettings). Anything that still blocks
+    // this hook, such as managed policy, fails closed as missing evidence.
+    hooks: {
+      Stop: [
+        {
+          hooks: [
+            {
+              // Exec form: Claude Code runs `command` with `args` directly, no
+              // shell, so a node path with spaces needs no quoting. Every
+              // Claude lane depends on it; if `args` were ever ignored, each
+              // would fail as completion_evidence_missing, never pass quietly.
+              type: 'command',
+              command: process.execPath,
+              args: ['-e', CLAUDE_STOP_EVIDENCE_SCRIPT, evidencePath],
+            },
+          ],
+        },
+      ],
+    },
+  });
+}
+
+function readClaudeCompletionEvidence(
+  evidencePath: string | undefined,
+): ClaudeCompletionEvidence | null {
+  if (!evidencePath) return null;
+
+  try {
+    const raw = JSON.parse(readFileSync(evidencePath, 'utf8')) as Partial<ClaudeCompletionEvidence>;
+    if (
+      typeof raw.registryAvailable !== 'boolean' ||
+      (raw.backgroundTasks !== null && typeof raw.backgroundTasks !== 'number') ||
+      (raw.sessionCrons !== null && typeof raw.sessionCrons !== 'number')
+    ) {
+      return null;
+    }
+
+    const tasks = evidenceEntries(raw.tasks);
+    const crons = evidenceEntries(raw.crons);
+
+    return {
+      registryAvailable: raw.registryAvailable,
+      backgroundTasks: raw.backgroundTasks ?? null,
+      sessionCrons: raw.sessionCrons ?? null,
+      ...(typeof raw.stops === 'number' ? { stops: raw.stops } : {}),
+      ...(tasks ? { tasks } : {}),
+      ...(crons ? { crons } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Kept deliberately (see the "legacy completion marker" test). The marker is
+ * no longer requested, but a trailing copy is still protocol, not review
+ * text. Only an exact final line is ever removed.
+ */
+function stripClaudeCompletionMarker(output: string): string {
+  const trimmed = output.trimEnd();
+  const lines = trimmed.split(/\r\n|\r|\n/);
+
+  if (lines.at(-1)?.trim() !== CLAUDE_COMPLETION_MARKER) return output;
+
+  lines.pop();
+  return lines.join('\n').trimEnd();
 }
 
 /** Claude Code: invoke the native `/code-review` skill through print mode. */
@@ -192,7 +448,11 @@ export const claudeAdapter: Adapter = {
   command: 'claude',
   nativeReview: true,
   nativeReviewCommand: '/code-review',
-  minVersion: '2.1.223',
+  // The oldest release the Stop-hook completion guard has actually been run
+  // on: exec-form `command` + `args`, and the `background_tasks` /
+  // `session_crons` payload (which arrived in 2.1.145). Lower it only after
+  // running a Claude lane on the older release.
+  minVersion: '2.1.282',
 
   models: [
     { id: 'fable', label: 'Fable', hint: 'frontier tier' },
@@ -204,7 +464,7 @@ export const claudeAdapter: Adapter = {
 
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'high',
-  listsStampedFor: '2.1.239',
+  listsStampedFor: '2.1.282',
 
   versionArgs() {
     return ['--version'];
@@ -233,15 +493,6 @@ export const claudeAdapter: Adapter = {
 
     args.push(permission, 'plan');
 
-    const completionPrompt = requireSafetyFlag(
-      request,
-      ['--append-system-prompt'],
-      'the Claude completion protocol',
-      this.command,
-    );
-
-    args.push(completionPrompt, CLAUDE_COMPLETION_INSTRUCTION);
-
     const noSession = firstSupported(request, [
       '--no-session-persistence',
       '--no-save-session',
@@ -254,6 +505,22 @@ export const claudeAdapter: Adapter = {
         `${this.label} has no session-persistence flag; review sessions will ` +
           `appear in its history.`,
       );
+    }
+
+    if (request.completionEvidencePath) {
+      assertClaudeHooksEnabledByEnvironment();
+      assertClaudeHooksEnabledBySettings(request.repoRoot);
+
+      const settingsFlag = requireSafetyFlag(
+        request,
+        ['--settings'],
+        'the Claude Stop-hook completion guard',
+        this.command,
+      );
+
+      // `--settings` accepts inline JSON. Hook entries merge with user/project
+      // hooks, so crbuddy adds this lifecycle observer without replacing them.
+      args.push(settingsFlag, claudeCompletionSettings(request.completionEvidencePath));
     }
 
     if (request.vendorArgs) {
@@ -294,6 +561,9 @@ export const claudeAdapter: Adapter = {
         command: this.command,
         args,
         appliedEffort: reviewEffort,
+        ...(request.completionEvidencePath
+          ? { completionEvidencePath: request.completionEvidencePath }
+          : {}),
         ...(warnings.length > 0 ? { warnings } : {}),
       };
     }
@@ -324,6 +594,9 @@ export const claudeAdapter: Adapter = {
       args,
       stdin: prompt,
       appliedEffort,
+      ...(request.completionEvidencePath
+        ? { completionEvidencePath: request.completionEvidencePath }
+        : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
   },
@@ -332,23 +605,35 @@ export const claudeAdapter: Adapter = {
     return stripClaudeCompletionMarker(result.stdout);
   },
 
-  checkCompletion(result): CompletionCheck {
-    const base = defaultCompletion({ ...result, body: result.stdout });
+  // Completion is the Stop hook's evidence that no background work is left,
+  // not anything in the text: once that holds, any nonempty final output is
+  // the review, even a short one. Guessing from prose is what this replaced.
+  checkCompletion(result, invocation): CompletionCheck {
+    const review = stripClaudeCompletionMarker(result.stdout).trim();
+    const base = defaultCompletion({ ...result, body: review });
     if (!base.ok) return base;
 
-    const body = result.stdout.trimEnd();
-    if (!hasTrailingClaudeCompletionMarkerLine(body)) {
-      return { ok: false, reason: 'incomplete_review' };
+    const evidencePath = invocation?.completionEvidencePath;
+    if (!evidencePath) {
+      return { ok: false, reason: 'completion_evidence_missing' };
     }
 
-    const review = stripClaudeCompletionMarker(body).trim();
-    if (review === '') return { ok: false, reason: 'empty' };
-
-    // A second marker immediately before the terminal one is framing, not
-    // review content. Earlier marker text is allowed so a review can discuss
-    // this protocol without invalidating itself.
-    if (hasTrailingClaudeCompletionMarkerLine(review)) {
-      return { ok: false, reason: 'incomplete_review' };
+    const evidence = readClaudeCompletionEvidence(evidencePath);
+    if (!evidence) {
+      return { ok: false, reason: 'completion_evidence_missing' };
+    }
+    if (!evidence.registryAvailable) {
+      return { ok: false, reason: 'completion_registry_unavailable' };
+    }
+    if (evidence.backgroundTasks !== 0 || evidence.sessionCrons !== 0) {
+      // Kept, not dropped: a finished review has been judged incomplete this
+      // way, and discarding it lost every finding in it. The report marks it.
+      return {
+        ok: false,
+        reason: 'incomplete_review',
+        detail: describePending(evidence),
+        keepOutput: true,
+      };
     }
 
     return { ok: true };
@@ -366,15 +651,16 @@ export const codexAdapter: Adapter = {
 
   models: [
     { id: 'gpt-6-astra', label: 'GPT-6 Astra', hint: 'frontier' },
-    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', hint: 'flagship' },
-    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', hint: 'balanced workhorse' },
-    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', hint: 'fast and cheap' },
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', hint: 'workhorse' },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna', hint: 'fast and cheap' },
   ],
-  defaultModel: 'gpt-5.6-sol',
+  defaultModel: 'gpt-6-sol',
 
-  efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+  // `ultra` is omitted: Codex runs it as a costly subagent fan-out rather
+  // than a plain reasoning level. Config still passes it through verbatim.
+  efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'high',
-  listsStampedFor: '0.153.4',
+  listsStampedFor: '0.155.0',
 
   versionArgs() {
     return ['--version'];
@@ -506,10 +792,10 @@ export const geminiAdapter: Adapter = {
   minVersion: '0.1.0',
 
   models: [
-    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', hint: 'deep reasoning' },
-    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', hint: 'fast' },
+    { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (preview)', hint: 'deep reasoning' },
+    { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', hint: 'fast' },
   ],
-  defaultModel: 'gemini-2.5-pro',
+  defaultModel: 'gemini-3.1-pro-preview',
 
   efforts: [],
   defaultEffort: null,

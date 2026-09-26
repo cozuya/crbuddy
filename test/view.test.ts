@@ -1,0 +1,244 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+
+import { runView } from '../src/commands/view.js';
+import { projectConfigPath } from '../src/config/load.js';
+import {
+  CONFIG_VERSION,
+  Config,
+  DEFAULTS,
+  DEFAULT_OUTPUT,
+} from '../src/config/schema.js';
+import type { WizardUI } from '../src/util/wizard-prompt.js';
+
+function config(model: string, scopeTarget: 'uncommitted' | { base: string }): Config {
+  return {
+    configVersion: CONFIG_VERSION,
+    output: { ...DEFAULT_OUTPUT, destination: 'terminal' },
+    target: scopeTarget,
+    refuseIfOutputExists: DEFAULTS.refuseIfOutputExists,
+    timeoutMs: DEFAULTS.timeoutMs,
+    maxConcurrent: DEFAULTS.maxConcurrent,
+    maxDiffBytes: DEFAULTS.maxDiffBytes,
+    panel: [
+      {
+        id: `codex-${model}`,
+        vendor: 'codex',
+        model,
+        effort: 'high',
+      },
+    ],
+  };
+}
+
+function recordingUi(): { ui: WizardUI; notes: Array<{ title?: string; message: string }> } {
+  const notes: Array<{ title?: string; message: string }> = [];
+  const unused = async (): Promise<never> => {
+    throw new Error('view must not prompt');
+  };
+
+  const ui = {
+    interactive: false,
+    intro() {},
+    outro() {},
+    cancel() {},
+    note(message: string, title?: string) {
+      notes.push({ message, ...(title ? { title } : {}) });
+    },
+    message() {},
+    spinner: unused,
+    select: unused,
+    confirm: unused,
+    text: unused,
+    multiline: unused,
+  } as unknown as WizardUI;
+
+  return { ui, notes };
+}
+
+async function writeJson(file: string, value: unknown): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+test('view prefers the repository config and shows global notifications', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-local-'));
+
+  try {
+    const repoRoot = path.join(root, 'repo');
+    const globalFile = path.join(root, 'global.json');
+    const settingsFile = path.join(root, 'settings.json');
+    await mkdir(repoRoot, { recursive: true });
+    await writeJson(globalFile, config('gpt-6-astra', 'uncommitted'));
+    await writeJson(
+      projectConfigPath(repoRoot),
+      config('gpt-6-sol', { base: 'main' }),
+    );
+    await writeJson(settingsFile, {
+      notifications: {
+        provider: 'ntfy',
+        endpoint: 'https://ntfy.sh/crbuddy-view-test',
+      },
+    });
+
+    const { ui, notes } = recordingUi();
+    assert.equal(
+      await runView(
+        { repoRoot },
+        { ui, globalConfigFile: globalFile, settingsFile },
+      ),
+      0,
+    );
+
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0]?.title, 'Configuration');
+    assert.match(notes[0]?.message ?? '', /Config: This repository/);
+    assert.match(notes[0]?.message ?? '', /GPT-6 Sol · high/);
+    assert.doesNotMatch(notes[0]?.message ?? '', /GPT-6 Astra/);
+    assert.match(notes[0]?.message ?? '', /Target: Current branch vs main/);
+    assert.match(notes[0]?.message ?? '', /Output: Terminal/);
+    assert.match(notes[0]?.message ?? '', /Notifications \(global\): ntfy/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('view shows the same obsolete-keys note as go', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-obsolete-'));
+
+  try {
+    const repoRoot = path.join(root, 'repo');
+    const globalFile = path.join(root, 'global.json');
+    await mkdir(repoRoot, { recursive: true });
+    await writeJson(globalFile, {
+      ...config('gpt-6-astra', 'uncommitted'),
+      output: { ...DEFAULT_OUTPUT, destination: 'terminal', raw: 'CODE-REVIEW-HANDOFF.raw.md' },
+      mergeTimeoutMs: 5_000,
+    });
+
+    const { ui, notes } = recordingUi();
+    await runView(
+      { repoRoot },
+      { ui, globalConfigFile: globalFile, settingsFile: path.join(root, 'missing.json') },
+    );
+
+    assert.match(
+      notes[0]?.message ?? '',
+      /Ignoring mergeTimeoutMs, output\.raw in this config: consolidation was removed in 0\.4\.0\. `crbuddy config` rewrites the file without mergeTimeoutMs and output\.raw\./,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('view falls back to the global config', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-global-'));
+
+  try {
+    const repoRoot = path.join(root, 'repo');
+    const globalFile = path.join(root, 'global.json');
+    const settingsFile = path.join(root, 'missing-settings.json');
+    await mkdir(repoRoot, { recursive: true });
+    await writeJson(globalFile, config('gpt-6-astra', 'uncommitted'));
+
+    const { ui, notes } = recordingUi();
+    assert.equal(
+      await runView(
+        { repoRoot },
+        { ui, globalConfigFile: globalFile, settingsFile },
+      ),
+      0,
+    );
+
+    assert.match(notes[0]?.message ?? '', /Config: Global/);
+    assert.match(notes[0]?.message ?? '', /GPT-6 Astra · high/);
+    assert.match(notes[0]?.message ?? '', /Target: Uncommitted changes/);
+    assert.match(notes[0]?.message ?? '', /Notifications \(global\): Off/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('view applies the same repo-root output validation as go', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-output-validation-'));
+
+  try {
+    const repoRoot = path.join(root, 'repo');
+    await mkdir(repoRoot, { recursive: true });
+    await mkdir(path.join(repoRoot, 'reports'));
+    const broken = config('gpt-6-astra', 'uncommitted');
+    broken.output = {
+      destination: 'file',
+      merged: 'reports',
+    };
+    await writeJson(projectConfigPath(repoRoot), broken);
+
+    const { ui } = recordingUi();
+    await assert.rejects(
+      () =>
+        runView(
+          { repoRoot },
+          { ui, settingsFile: path.join(root, 'missing-settings.json') },
+        ),
+      /must name a file, not a directory/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('view strips terminal controls and line injection from config fields', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-sanitize-'));
+
+  try {
+    const repoRoot = path.join(root, 'repo');
+    await mkdir(repoRoot, { recursive: true });
+    const malicious = config('evil\x1b]0;owned\x07\x1b[31m\nspoofed', {
+      base: 'main\x1b[2J\nFAKE STATUS',
+    });
+    await writeJson(projectConfigPath(repoRoot), malicious);
+
+    const { ui, notes } = recordingUi();
+    await runView(
+      { repoRoot },
+      { ui, settingsFile: path.join(root, 'missing-settings.json') },
+    );
+
+    const message = notes[0]?.message ?? '';
+    assert.doesNotMatch(message, /\x1b|owned/);
+    assert.doesNotMatch(message, /\nspoofed|\nFAKE STATUS/);
+    assert.match(message, /evil spoofed/);
+    assert.match(message, /Current branch vs main FAKE STATUS/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('view reports when no review config exists', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-view-none-'));
+
+  try {
+    const { ui, notes } = recordingUi();
+    assert.equal(
+      await runView(
+        { repoRoot: null },
+        {
+          ui,
+          globalConfigFile: path.join(root, 'missing-config.json'),
+          settingsFile: path.join(root, 'missing-settings.json'),
+        },
+      ),
+      0,
+    );
+
+    assert.equal(
+      notes[0]?.message,
+      'Config: None\nNotifications (global): Off',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

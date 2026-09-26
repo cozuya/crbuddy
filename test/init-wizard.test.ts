@@ -6,7 +6,6 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { claudeAdapter, codexAdapter } from '../src/adapters/vendors.js';
-import type { Adapter } from '../src/adapters/types.js';
 import {
   effectiveInitScope,
   runInit,
@@ -18,6 +17,7 @@ import {
   DEFAULTS,
   DEFAULT_OUTPUT,
   type Config,
+  type PanelEntry,
 } from '../src/config/schema.js';
 import { PromptAborted, type Choice } from '../src/util/prompt.js';
 import type { MessageKind, WizardUI } from '../src/util/wizard-prompt.js';
@@ -68,28 +68,21 @@ test('equivalent wizard answers produce the unchanged config schema', async (t) 
     target: 'uncommitted',
     refuseIfOutputExists: DEFAULTS.refuseIfOutputExists,
     timeoutMs: DEFAULTS.timeoutMs,
-    mergeTimeoutMs: DEFAULTS.mergeTimeoutMs,
     maxConcurrent: DEFAULTS.maxConcurrent,
     maxDiffBytes: DEFAULTS.maxDiffBytes,
-    merge: {
-      enabled: true,
-      vendor: 'codex',
-      model: 'gpt-5.6-sol',
-      effort: 'high',
-    },
     panel: [
       {
-        id: 'codex-gpt-5-6-sol',
+        id: 'codex-gpt-6-sol',
         vendor: 'codex',
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         effort: 'high',
       },
     ],
   });
 
   const summary = ui.notes.find((entry) => entry.title === 'Configuration');
-  assert.match(summary?.message ?? '', /Codex CLI \u00b7 GPT-5\.6 Sol \u00b7 high/);
-  assert.doesNotMatch(summary?.message ?? '', /codex-gpt-5-6-sol/);
+  assert.match(summary?.message ?? '', /Codex CLI \u00b7 GPT-6 Sol \u00b7 high/);
+  assert.doesNotMatch(summary?.message ?? '', /codex-gpt-6-sol/);
 });
 
 test('project config warns that external output needs consent on every run', async (t) => {
@@ -105,11 +98,11 @@ test('project config warns that external output needs consent on every run', asy
   assert.equal(code, 0);
   assert.match(
     ui.messages.map((entry) => entry.message).join('\n'),
-    /approve those paths on every interactive run.*refuse them when unattended/s,
+    /approve that path on every interactive run.*refuse it when unattended/s,
   );
 });
 
-test('editing an existing config preserves accepted values', async (t) => {
+test('editing an existing config preserves accepted values and drops consolidation keys', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
   const configPath = path.join(repo, '.crbuddy', 'config.json');
@@ -118,33 +111,34 @@ test('editing an existing config preserves accepted values', async (t) => {
     output: {
       destination: 'terminal',
       merged: 'REVIEW.md',
-      raw: 'REVIEW.raw.md',
     },
     target: { base: 'develop' },
     refuseIfOutputExists: true,
     timeoutMs: 123_000,
-    mergeTimeoutMs: 45_000,
     maxConcurrent: 2,
     maxDiffBytes: 987_654,
-    merge: {
-      enabled: true,
-      vendor: 'codex',
-      model: 'gpt-5.6-terra',
-      effort: 'max',
-    },
     panel: [
       {
         id: 'careful-review',
         vendor: 'codex',
-        model: 'gpt-5.6-terra',
+        model: 'gpt-6-luna',
         effort: 'xhigh',
         instructions: 'Focus on correctness.',
       },
     ],
   };
 
+  // As an earlier version wrote it: the wizard saves it back without the
+  // consolidation keys, keeping only the custom output.raw.
+  const legacy = {
+    ...existing,
+    output: { ...existing.output, raw: 'REVIEW.raw.md' },
+    mergeTimeoutMs: 45_000,
+    merge: { enabled: true, vendor: 'codex', model: 'gpt-6-luna', effort: 'max' },
+  };
+
   await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
+  await writeFile(configPath, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8');
 
   const code = await runInit(
     { repoRoot: repo, scope: 'project' },
@@ -152,6 +146,62 @@ test('editing an existing config preserves accepted values', async (t) => {
   );
 
   assert.equal(code, 0);
+  assert.deepEqual(
+    JSON.parse(await readFile(configPath, 'utf8')),
+    { ...existing, output: { ...existing.output, raw: 'REVIEW.raw.md' } },
+  );
+});
+
+test('editing keeps a custom pre-0.4 output.raw until it is removed by hand', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-edit-legacy-raw-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const configPath = path.join(repo, '.crbuddy', 'config.json');
+  const report = path.join(repo, 'reviews', 'raw.md');
+  const existing: Config = {
+    configVersion: CONFIG_VERSION,
+    output: { destination: 'terminal', merged: 'REVIEW.md' },
+    target: 'uncommitted',
+    refuseIfOutputExists: false,
+    timeoutMs: DEFAULTS.timeoutMs,
+    maxConcurrent: DEFAULTS.maxConcurrent,
+    maxDiffBytes: DEFAULTS.maxDiffBytes,
+    panel: [{ id: 'codex-gpt-6-luna', vendor: 'codex', model: 'gpt-6-luna', effort: 'xhigh' }],
+  };
+  const withRaw = { ...existing, output: { ...existing.output, raw: 'reviews/raw.md' } };
+
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await mkdir(path.dirname(report), { recursive: true });
+  await writeFile(configPath, JSON.stringify(withRaw), 'utf8');
+  await writeFile(report, 'old raw report', 'utf8');
+
+  const edit = async () => {
+    const ui = new DefaultingUI();
+    const code = await runInit(
+      { repoRoot: repo, scope: 'project' },
+      { ui, detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
+    );
+    assert.equal(code, 0);
+    return ui;
+  };
+
+  // `crbuddy go` can only keep hiding that report while the key names it,
+  // and whether one is left elsewhere cannot be settled from here.
+  for (const reportPresent of [true, false]) {
+    if (!reportPresent) await rm(report);
+    const ui = await edit();
+    assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), withRaw);
+    assert.match(
+      ui.messages.map((entry) => entry.message).join('\n'),
+      /Kept output\.raw \(reviews\/raw\.md\).*Remove the key yourself/s,
+    );
+  }
+
+  // The default name needs no key: it is always covered.
+  await writeFile(configPath, JSON.stringify({
+    ...existing,
+    output: { ...existing.output, raw: 'CODE-REVIEW-HANDOFF.raw.md' },
+  }), 'utf8');
+  await edit();
   assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), existing);
 });
 
@@ -166,20 +216,17 @@ test('editing replaces an output filename that is an existing directory', async 
     output: {
       destination: 'terminal',
       merged: 'reports',
-      raw: 'REVIEW.raw.md',
     },
     target: 'uncommitted',
     refuseIfOutputExists: false,
     timeoutMs: DEFAULTS.timeoutMs,
-    mergeTimeoutMs: DEFAULTS.mergeTimeoutMs,
     maxConcurrent: DEFAULTS.maxConcurrent,
     maxDiffBytes: DEFAULTS.maxDiffBytes,
-    merge: { enabled: false, vendor: '', model: '' },
     panel: [
       {
-        id: 'codex-gpt-5-6-sol',
+        id: 'codex-gpt-6-sol',
         vendor: 'codex',
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-sol',
         effort: 'high',
       },
     ],
@@ -220,14 +267,14 @@ test('late cancellation writes neither config nor planned .gitignore changes', a
   assert.match(ui.cancelled.at(-1) ?? '', /No config was written/);
 });
 
-test('the Codex model wizard offers Other and retains existing arbitrary model IDs', async (t) => {
+test('the Codex model wizard offers Other for arbitrary model IDs', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-model-other-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
   class CustomModelUI extends DefaultingUI {
     override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
       if (question === 'Model for Codex CLI') {
         assert.equal(choices[0]?.label, 'GPT-6 Astra');
-        assert.equal(choices[initialIndex]?.value, 'gpt-5.6-sol');
+        assert.equal(choices[initialIndex]?.value, 'gpt-6-sol');
         const other = choices.find((choice) => choice.label === 'Other…');
         assert.ok(other && !other.disabled);
         return other.value;
@@ -249,130 +296,138 @@ test('the Codex model wizard offers Other and retains existing arbitrary model I
   assert.equal(code, 0);
   const config = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
   assert.equal(config.panel[0].model, 'future-custom-model');
-  assert.equal(config.merge.model, 'future-custom-model');
-  let modelPrompts = 0;
-  class KeepCustomModelUI extends DefaultingUI {
-    override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
-      if (question === 'Model for Codex CLI') {
-        modelPrompts++;
-        assert.equal(choices[initialIndex]?.value, 'future-custom-model');
-      }
-      return super.select(question, choices, initialIndex);
-    }
-    override async text(question: string, fallback = ''): Promise<string> {
-      assert.notEqual(question, 'Model id', 'retaining a custom model must not consume another answer');
-      return super.text(question, fallback);
+});
+
+test('accepting every default adds one reviewer per installed CLI, then stops', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-defaults-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const addAnotherDefaults: boolean[] = [];
+  class RecordingUI extends DefaultingUI {
+    override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+      if (question.endsWith('Add another?')) addAnotherDefaults.push(defaultYes);
+      return super.confirm(question, defaultYes);
     }
   }
-  assert.equal(await runInit(
+  const code = await runInit(
     { repoRoot: repo, scope: 'project' },
     {
-      ui: new KeepCustomModelUI(),
-      detect: async () => [detection],
+      ui: new RecordingUI(),
+      detect: async () => [claudeAdapter, codexAdapter].map((adapter) => (
+        { adapter, present: true, version: adapter.minVersion }
+      )),
       settingsFile: path.join(repo, 'settings.json'),
     },
-  ), 0);
-  assert.equal(modelPrompts, 1);
-  assert.deepEqual(JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8')), config);
+  );
+  assert.equal(code, 0);
+  assert.deepEqual(addAnotherDefaults, [true, false]);
+  const saved = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
+  assert.deepEqual(
+    saved.panel.map((entry: PanelEntry) => [entry.vendor, entry.model]),
+    [['claude', claudeAdapter.defaultModel], ['codex', codexAdapter.defaultModel]],
+  );
 });
 
-test('changing consolidation vendors selects the new vendor defaults without a custom-model prompt', async (t) => {
-  for (const [previous, selected] of [[codexAdapter, claudeAdapter], [claudeAdapter, codexAdapter]] as const) {
-    for (const previousAvailable of [true, false]) {
-      const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-merge-vendor-'));
-      t.after(() => rm(repo, { recursive: true, force: true }));
-      const configPath = path.join(repo, '.crbuddy', 'config.json');
-      const config: Config = {
-        ...DEFAULTS,
-        output: { ...DEFAULT_OUTPUT },
-        merge: { enabled: true, vendor: previous.name, model: previous.defaultModel, effort: 'max' },
-        panel: [{ id: 'reviewer', vendor: selected.name, model: selected.defaultModel }],
-      };
-      await mkdir(path.dirname(configPath));
-      await writeFile(configPath, JSON.stringify(config));
-      let modelPrompts = 0;
-      class ChangeVendorUI extends DefaultingUI {
-        override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
-          if (question === 'Which CLI should consolidate?') {
-            const choice = choices.find((entry) => (entry.value as Adapter).name === selected.name);
-            assert.ok(choice);
-            return choice.value;
-          }
-          if (question === `Model for ${selected.label}`) {
-            modelPrompts++;
-            assert.equal(choices[initialIndex]?.value, selected.defaultModel);
-          }
-          return super.select(question, choices, initialIndex);
-        }
-        override async text(question: string, fallback = ''): Promise<string> {
-          assert.notEqual(question, 'Model id', 'switching vendors must not add a custom-model answer');
-          return super.text(question, fallback);
-        }
-      }
-      const adapters = previousAvailable ? [previous, selected] : [selected];
-      const code = await runInit(
-        { repoRoot: repo, scope: 'project' },
-        {
-          ui: new ChangeVendorUI(),
-          detect: async () => adapters.map((adapter) => ({ adapter, present: true, version: adapter.minVersion })),
-          settingsFile: path.join(repo, 'settings.json'),
-        },
-      );
-      assert.equal(code, 0);
-      assert.equal(modelPrompts, 1);
-      assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), {
-        ...config,
-        merge: { enabled: true, vendor: selected.name, model: selected.defaultModel, effort: selected.defaultEffort },
-      });
+test('a CLI too old for crbuddy go is flagged and never added by default', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-outdated-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const addAnotherDefaults: boolean[] = [];
+  const reviewerHints: Array<string | undefined> = [];
+  class RecordingUI extends DefaultingUI {
+    override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+      if (question.endsWith('Add another?')) addAnotherDefaults.push(defaultYes);
+      return super.confirm(question, defaultYes);
+    }
+    override async select<T>(
+      question: string,
+      choices: Array<Choice<T>>,
+      initialIndex = 0,
+    ): Promise<T> {
+      if (question === 'Add a reviewer') reviewerHints.push(...choices.map((choice) => choice.hint));
+      return super.select(question, choices, initialIndex);
     }
   }
+  const ui = new RecordingUI();
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    {
+      ui,
+      detect: async () => [
+        { adapter: claudeAdapter, present: true, version: '2.0.0' },
+        { adapter: codexAdapter, present: true, version: codexAdapter.minVersion },
+      ],
+      settingsFile: path.join(repo, 'settings.json'),
+    },
+  );
+  assert.equal(code, 0);
+  // Codex is the only usable CLI: it is the first default, and none follows.
+  assert.deepEqual(addAnotherDefaults, [false]);
+  const saved = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.panel.map((entry: PanelEntry) => entry.vendor), ['codex']);
+  // Still offered, for someone about to update it.
+  assert.deepEqual(reviewerHints, ['too old; update claude before crbuddy go', undefined]);
+  const vendors = ui.notes.find((entry) => entry.title === 'Vendor CLIs')?.message ?? '';
+  assert.ok(
+    vendors.includes(
+      `✗ Claude Code  2.0.0 (claude) - too old; crbuddy needs ${claudeAdapter.minVersion} or newer`,
+    ),
+    vendors,
+  );
+  assert.ok(vendors.includes(`✓ Codex CLI  ${codexAdapter.minVersion} (codex)`), vendors);
 });
 
-test('re-enabling consolidation with an empty or whitespace-only model defaults to Sol', async (t) => {
-  // Both the wizard's disabled shape and a retained vendor with no model are valid.
-  for (const [vendor, model] of [
-    ['', ''], ['codex', ''], ['codex', '   '], ['codex', '\t \r\n'],
-  ] as const) {
-    const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-merge-enable-'));
-    t.after(() => rm(repo, { recursive: true, force: true }));
-    const configPath = path.join(repo, '.crbuddy', 'config.json');
-    const config: Config = {
-      ...DEFAULTS,
-      output: { ...DEFAULT_OUTPUT },
-      merge: { enabled: false, vendor, model },
-      panel: [{ id: 'reviewer', vendor: 'codex', model: 'gpt-5.6-sol' }],
-    };
-    await mkdir(path.dirname(configPath));
-    await writeFile(configPath, JSON.stringify(config));
-    assert.equal((await readAndValidate(configPath)).merge.model, model);
-    let modelPrompts = 0;
-    class EnableMergeUI extends DefaultingUI {
-      override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
-        return question.startsWith('When done, run a consolidation pass')
-          ? true : super.confirm(question, defaultYes);
-      }
-      override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
-        if (question === 'Model for Codex CLI') {
-          modelPrompts++;
-          assert.equal(choices[0]?.value, 'gpt-6-astra');
-          assert.equal(choices[initialIndex]?.value, 'gpt-5.6-sol');
-        }
-        return super.select(question, choices, initialIndex);
-      }
-      override async text(question: string, fallback = ''): Promise<string> {
-        assert.notEqual(question, 'Model id', 'a blank saved model must use the vendor default');
-        return super.text(question, fallback);
-      }
+test('a CLI whose version cannot be read is flagged and never added by default', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-unreadable-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const reviewerHints: Array<string | undefined> = [];
+  class RecordingUI extends DefaultingUI {
+    override async select<T>(
+      question: string,
+      choices: Array<Choice<T>>,
+      initialIndex = 0,
+    ): Promise<T> {
+      if (question === 'Add a reviewer') reviewerHints.push(...choices.map((choice) => choice.hint));
+      return super.select(question, choices, initialIndex);
     }
-    assert.equal(await runInit(
-      { repoRoot: repo, scope: 'project' },
-      { ui: new EnableMergeUI(), detect: async () => [detection], settingsFile: path.join(repo, 'settings.json') },
-    ), 0);
-    assert.equal(modelPrompts, 1);
-    assert.deepEqual((await readAndValidate(configPath)).merge, {
-      enabled: true, vendor: 'codex', model: 'gpt-5.6-sol', effort: 'high',
-    });
   }
+  const ui = new RecordingUI();
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    {
+      ui,
+      detect: async () => [
+        { adapter: claudeAdapter, present: true, version: null },
+        { adapter: codexAdapter, present: true, version: codexAdapter.minVersion },
+      ],
+      settingsFile: path.join(repo, 'settings.json'),
+    },
+  );
+  assert.equal(code, 0);
+  // crbuddy go will not guess at an unreadable version, so it is no default.
+  const saved = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.panel.map((entry: PanelEntry) => entry.vendor), ['codex']);
+  assert.deepEqual(reviewerHints, ['version unreadable; crbuddy go will refuse it', undefined]);
+  const vendors = ui.notes.find((entry) => entry.title === 'Vendor CLIs')?.message ?? '';
+  assert.ok(
+    vendors.includes('\u2717 Claude Code  installed; version unknown (claude) - crbuddy cannot read its version and will not guess'),
+    vendors,
+  );
+});
+
+test('setup stops when every installed CLI is too old for crbuddy go', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-all-outdated-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const ui = new DefaultingUI();
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    {
+      ui,
+      detect: async () => [{ adapter: claudeAdapter, present: true, version: '2.0.0' }],
+      settingsFile: path.join(repo, 'settings.json'),
+    },
+  );
+  assert.equal(code, 1);
+  assert.match(ui.cancelled.join('\n'), /Every installed vendor CLI is too old for crbuddy, or its version cannot/);
+  assert.ok(!existsSync(path.join(repo, '.crbuddy', 'config.json')));
 });
 
 class DefaultingUI implements WizardUI {
