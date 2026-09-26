@@ -22,9 +22,16 @@ export function stripTerminalControls(input: string): string {
     .replace(OTHER_CONTROLS, '');
 }
 
+// Invisible characters that reorder or hide text: bidi embeddings, overrides
+// and isolates, the Arabic letter mark, zero-width characters and marks, word
+// joiners, and the BOM. A right-to-left override can make a path in a consent
+// prompt display as something other than what it is.
+const FORMAT_CONTROLS = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+
 /** Safe one-line rendering for config-controlled terminal summaries. */
 export function sanitizeTerminalInline(input: string): string {
   return stripTerminalControls(input)
+    .replace(FORMAT_CONTROLS, '')
     .replace(/\r\n?|\n/g, ' ')
     .replace(/[\t ]+/g, ' ')
     .trim();
