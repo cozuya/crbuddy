@@ -305,7 +305,7 @@ canonical destinations approved during preflight and refuses path redirection.
 ### Exit codes
 
 - `0` - usable report produced; partial success also exits 0 by default
-- `1` - no usable review produced / fatal startup failure
+- `1` - no review completed / fatal startup failure; a report is still written when a failed review kept its output (see output handling)
 - `2` - partial success when `--strict` is requested
 
 ---

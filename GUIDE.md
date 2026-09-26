@@ -471,7 +471,7 @@ nothing in crbuddy parses markdown back out of it.
 | | |
 |---|---|
 | `0` | Usable report produced; partial success also exits 0 by default |
-| `1` | No usable review produced |
+| `1` | No review completed. The previous report is left in place, unless a review that did not finish kept its output: then the report is replaced and holds that output, marked possibly incomplete |
 | `2` | Partial success - only with `--strict` |
 
 Use `--strict` in a hook where a failed lane should break the command chain.

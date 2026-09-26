@@ -39,7 +39,8 @@ on every panel entry, for a one-off run without editing config.
 
 Exit codes:
   0  panel completed
-  1  no usable review produced
+  1  no review completed; the report may still hold output kept from a
+     review that did not finish, marked possibly incomplete
   2  partial success, only with --strict
 `;
 
