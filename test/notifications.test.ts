@@ -425,6 +425,22 @@ test('a pre-0.4 crash stash with an outside raw report is recovered only for a g
   }
 });
 
+
+test('a leftover raw report path cannot carry terminal control sequences', async (t) => {
+  const f = await fixture(t);
+  const name = 'old\u001b]52;c;cHduZWQ=\u0007raw.md';
+  await writeFile(f.configFile, JSON.stringify({
+    ...f.config,
+    output: { ...f.config.output, raw: name },
+  }));
+  await writeFile(path.join(f.repo, name), 'old raw findings\n');
+
+  const result = await f.run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /oldraw\.md is a report from crbuddy before 0\.4\.0/);
+  assert.ok(!result.stderr.includes('\u001b'), 'no escape character reaches the terminal');
+});
+
 test('config paths in the consent list cannot carry terminal control sequences', async (t) => {
   const f = await fixture(t);
   const spoof = path.join(f.root, 'outside\u001b[2K\u001b[1Gharmless', 'review.md');

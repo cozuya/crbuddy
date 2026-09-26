@@ -475,8 +475,11 @@ export async function runGo(options: GoOptions): Promise<number> {
       );
 
       for (const absolute of legacyStashed.moved) {
+        // Escaped: the path comes from output.raw, which a cloned repo's
+        // config sets.
         progress.dim(
-          `${repoRelative(absolute, repoRoot) ?? absolute} is a report from crbuddy ` +
+          `${sanitizeTerminalInline(repoRelative(absolute, repoRoot) ?? absolute)} ` +
+            'is a report from crbuddy ' +
             'before 0.4.0, which no longer updates it. It is hidden from reviewers ' +
             'and put back afterwards; delete it when convenient.',
         );
