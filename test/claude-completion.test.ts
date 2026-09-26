@@ -93,6 +93,20 @@ test('the most specific Claude settings file that sets disableAllHooks decides',
   assert.equal(claudeHookDisablingSettingsFile(f.repoRoot, f.env), f.user);
 });
 
+test('a relative CLAUDE_CONFIG_DIR is read from the repository root, where Claude runs', (t) => {
+  const f = settingsFixture(t);
+  const relative = path.join(f.repoRoot, 'team-claude', 'settings.json');
+  mkdirSync(path.dirname(relative), { recursive: true });
+  f.write(relative, { disableAllHooks: true });
+
+  // Not from wherever crbuddy happens to be running.
+  assert.notEqual(process.cwd(), f.repoRoot);
+  assert.equal(
+    claudeHookDisablingSettingsFile(f.repoRoot, { CLAUDE_CONFIG_DIR: 'team-claude' }),
+    relative,
+  );
+});
+
 test('doctor names whatever disables Claude hooks, environment first', (t) => {
   const f = settingsFixture(t);
   assert.equal(claudeHooksDisabledReason(f.repoRoot, f.env), null);

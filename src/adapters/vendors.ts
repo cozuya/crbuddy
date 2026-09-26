@@ -172,7 +172,7 @@ function assertClaudeHooksEnabledByEnvironment(): void {
  * closed as missing completion evidence.
  */
 function claudeSettingsFiles(repoRoot: string | null, env: NodeJS.ProcessEnv): string[] {
-  const userDir = env.CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), '.claude');
+  const userDir = claudeConfigDir(repoRoot, env) ?? path.join(homedir(), '.claude');
   const project = repoRoot
     ? [
         path.join(repoRoot, '.claude', 'settings.local.json'),
@@ -181,6 +181,16 @@ function claudeSettingsFiles(repoRoot: string | null, env: NodeJS.ProcessEnv): s
     : [];
 
   return [...project, path.join(userDir, 'settings.json')];
+}
+
+/**
+ * CLAUDE_CONFIG_DIR as the Claude reviewer will read it. A relative value is
+ * resolved from the repository root, the reviewer's working directory, not
+ * from wherever crbuddy was started.
+ */
+function claudeConfigDir(repoRoot: string | null, env: NodeJS.ProcessEnv): string | null {
+  const configured = env.CLAUDE_CONFIG_DIR?.trim();
+  return configured ? path.resolve(repoRoot ?? process.cwd(), configured) : null;
 }
 
 /**
@@ -219,7 +229,7 @@ function displaySettingsPath(
   repoRoot: string | null,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  const configDir = env.CLAUDE_CONFIG_DIR?.trim();
+  const configDir = claudeConfigDir(repoRoot, env);
   const bases: Array<[string | null | undefined, string]> = [
     [repoRoot, ''],
     [configDir, '$CLAUDE_CONFIG_DIR/'],
