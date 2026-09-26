@@ -28,12 +28,12 @@
     "node": ">=20.12.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "build": "node scripts/clean.mjs dist && tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "postinstall": "node scripts/postinstall.mjs",
     "prepare": "npm run build",
     "test": "npm run build:test && node scripts/test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build:test": "tsc -p tsconfig.test.json",
+    "build:test": "node scripts/clean.mjs dist-test && tsc -p tsconfig.test.json",
     "prepublishOnly": "npm test && npm run typecheck"
   },
   "keywords": [
