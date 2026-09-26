@@ -121,13 +121,10 @@ export function renderReport(context: ReportContext): string {
       );
 
       if (run.diagnostics) {
-        parts.push(
-          diagnosticsLabel(run),
-          '```text',
-          run.diagnostics.trim(),
-          '```',
-          '',
-        );
+        const diagnostics = run.diagnostics.trim();
+        const fence = fenceFor(diagnostics);
+
+        parts.push(diagnosticsLabel(run), `${fence}text`, diagnostics, fence, '');
       }
 
       if (run.output.trim()) {
@@ -143,6 +140,16 @@ export function renderReport(context: ReportContext): string {
   }
 
   return parts.join('\n');
+}
+
+/**
+ * A fence longer than any backtick run in the text. Diagnostics are the tail
+ * of a reviewer's own markdown, and a ``` inside a fixed three-backtick fence
+ * ended the block early, spilling the rest of the report out of it.
+ */
+function fenceFor(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((run) => run[0].length));
+  return '`'.repeat(Math.max(3, longest + 1));
 }
 
 function diagnosticsLabel(run: RunRecord): string {

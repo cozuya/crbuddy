@@ -81,6 +81,27 @@ test('a review judged incomplete keeps its output, clearly marked', () => {
   assert.doesNotMatch(failed, /possibly incomplete/);
 });
 
+test('diagnostics containing a code fence cannot close their own block', () => {
+  const failed: RunRecord = {
+    ...run,
+    ok: false,
+    reason: 'exit_2',
+    output: '',
+    diagnostics: '## Finding\n```ts\nconst x = 1;\n```\nMore review text.',
+  };
+  const report = renderReport(context({ runs: [failed] }));
+
+  assert.match(
+    report,
+    /````text\n## Finding\n```ts\nconst x = 1;\n```\nMore review text\.\n````\n/,
+  );
+  // Plain diagnostics keep the ordinary three-backtick fence.
+  assert.match(
+    renderReport(context({ runs: [{ ...failed, diagnostics: 'plain tail' }] })),
+    /\n```text\nplain tail\n```\n/,
+  );
+});
+
 test('every vendor accepts a whole-checkout run, including one with no native review', () => {
   // Gemini refuses `kind: 'review'` outright, so this is the only mode in
   // which it can take part at all.
