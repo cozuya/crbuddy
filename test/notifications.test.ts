@@ -489,7 +489,7 @@ test('config paths in the consent list cannot carry terminal control sequences',
   // Unattended, so the outside path is refused - after it has been listed.
   assert.equal(result.code, 1);
   // The sequences are removed whole, so what is listed is plain text.
-  assert.match(result.stderr, /outsideharmless\/review\.md/);
+  assert.match(result.stderr, /outsideharmless[\\/]review\.md/);
   assert.ok(!result.stderr.includes('\u001b'), 'no escape character reaches the terminal');
 });
 
