@@ -630,6 +630,10 @@ export function legacyRawRecoveryPaths(
  * Deliberately exact, unlike the output-lock key (go.ts pathKey), which folds
  * case on every macOS volume: over-merging is harmless for a lock, but here it
  * would drop a real, distinct file from the set that is hidden.
+ *
+ * One accepted miss: on a case-sensitive volume, two hard links whose names
+ * differ only by case share an inode, so they match here and only one is
+ * hidden. That takes a setup built on purpose, not one an old version made.
  */
 function sameOutputFile(a: string, b: string): boolean {
   if (a === b) return true;
