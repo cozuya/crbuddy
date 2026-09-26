@@ -99,7 +99,12 @@ async function fixture(t: TestContext) {
     const originalCheck = codexAdapter.checkCompletion;
     codexAdapter.checkCompletion = function(result, invocation) {
       if (process.env.CRB_TEST_INCOMPLETE && result.stdout.includes('First defect')) {
-        return { ok: false, reason: 'incomplete_review', detail: 'Test: 1 background task still listed.', keepOutput: true };
+        return {
+          ok: false,
+          reason: 'incomplete_review',
+          detail: 'Test: still listed {"command":"cd ' + process.cwd() + ' && npm test ' + process.cwd() + '/src/app.ts"}.',
+          keepOutput: true,
+        };
       }
       return originalCheck.call(this, result, invocation);
     };
@@ -447,6 +452,9 @@ test('a panel whose only output is a kept incomplete review still writes it', as
   const written = await readFile(report, 'utf8');
   assert.match(written, /failed: incomplete_review - its output is kept below, possibly incomplete/);
   assert.match(written, /## First defect/);
+  // The still-listed task's command names the repository; the report must not.
+  assert.match(written, /still listed \{"command":"cd  && npm test src\/app\.ts"\}/);
+  assert.ok(!written.includes(await realpath(f.repo)), 'no absolute repo path in the report');
   assert.equal(result.posts.length, 1);
   assert.match(result.posts[0]!.body, /failed/);
 });

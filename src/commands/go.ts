@@ -823,7 +823,19 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     wallClockMs: result.wallClockMs,
   };
 
-  const report = (outcome: RunRecord): RunRecord => {
+  const report = (recorded: RunRecord): RunRecord => {
+    // Diagnostics are vendor stderr and text the reviewer wrote, such as a
+    // still-listed task's command line, headed for a report people share:
+    // strip the repository root from them as from the review itself.
+    const outcome = recorded.diagnostics
+      ? {
+          ...recorded,
+          diagnostics: relativizePaths(recorded.diagnostics, args.repoRoot, {
+            foldCase: args.repoFoldsCase,
+          }),
+        }
+      : recorded;
+
     if (outcome.ok) {
       progress.dim(`  ${display} - done in ${formatElapsed(outcome.wallClockMs)}`);
     } else {
