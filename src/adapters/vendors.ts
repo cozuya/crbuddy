@@ -448,9 +448,11 @@ export const claudeAdapter: Adapter = {
   command: 'claude',
   nativeReview: true,
   nativeReviewCommand: '/code-review',
-  // Stop-hook `background_tasks` / `session_crons` arrived in Claude Code
-  // 2.1.145, so the existing native-review floor already covers them.
-  minVersion: '2.1.223',
+  // The oldest release the Stop-hook completion guard has actually been run
+  // on: exec-form `command` + `args`, and the `background_tasks` /
+  // `session_crons` payload (which arrived in 2.1.145). Lower it only after
+  // running a Claude lane on the older release.
+  minVersion: '2.1.282',
 
   models: [
     { id: 'fable', label: 'Fable', hint: 'frontier tier' },
@@ -462,7 +464,7 @@ export const claudeAdapter: Adapter = {
 
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'high',
-  listsStampedFor: '2.1.280',
+  listsStampedFor: '2.1.282',
 
   versionArgs() {
     return ['--version'];
