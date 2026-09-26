@@ -459,7 +459,10 @@ test('a panel whose only output is a kept incomplete review still writes it', as
   assert.match(result.posts[0]!.body, /failed/);
 });
 
-test('a leftover raw report path cannot carry terminal control sequences', async (t) => {
+test('a leftover raw report path cannot carry terminal control sequences', {
+  // Windows forbids control characters in file names, so the fixture cannot exist.
+  skip: process.platform === 'win32' ? 'control characters are not valid in Windows file names' : false,
+}, async (t) => {
   const f = await fixture(t);
   const name = 'old\u001b]52;c;cHduZWQ=\u0007raw.md';
   await writeFile(f.configFile, JSON.stringify({
