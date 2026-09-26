@@ -276,7 +276,7 @@ Delivery never changes the review's output or exit code.
 
 Previous output files must not become review input or break reviewer blindness.
 
-Before reviewers start, existing output files are moved out of the review universe. On success they are replaced; on total failure they are restored. The `.crbuddy/` work area is excluded from the target.
+Before reviewers start, existing output files are moved out of the review universe. On success they are replaced; on total failure they are restored, unless a failed review kept its output (a Claude review judged incomplete), in which case the report is still written, marked as possibly incomplete, and the run still exits as a total failure. The `.crbuddy/` work area is excluded from the target.
 
 Volatile state normally lives under `~/.crbuddy/state/`. After resolving
 symlinks, crbuddy refuses a repository that contains that state root; otherwise

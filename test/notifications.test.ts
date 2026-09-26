@@ -95,6 +95,14 @@ async function fixture(t: TestContext) {
     codexAdapter.versionArgs = () => ['-e', 'console.log("codex-cli 0.153.4")'];
     codexAdapter.helpArgs = () => ['-e', 'console.log("--sandbox --ephemeral --color -c")'];
     if (process.env.CRB_TEST_PREFLIGHT) codexAdapter.command = 'crbuddy-no-such-cli';
+    // Stands in for a Claude review judged incomplete: failed, output kept.
+    const originalCheck = codexAdapter.checkCompletion;
+    codexAdapter.checkCompletion = function(result, invocation) {
+      if (process.env.CRB_TEST_INCOMPLETE && result.stdout.includes('First defect')) {
+        return { ok: false, reason: 'incomplete_review', detail: 'Test: 1 background task still listed.', keepOutput: true };
+      }
+      return originalCheck.call(this, result, invocation);
+    };
     const originalBuild = codexAdapter.build;
     codexAdapter.build = function(request) {
       const invocation = originalBuild.call(this, request);
@@ -425,6 +433,23 @@ test('a pre-0.4 crash stash with an outside raw report is recovered only for a g
   }
 });
 
+test('a panel whose only output is a kept incomplete review still writes it', async (t) => {
+  const f = await fixture(t);
+  const report = path.join(f.repo, 'review.md');
+  await writeFile(report, 'previous report\n');
+
+  const result = await f.run(['go'], { CRB_TEST_INCOMPLETE: '1' });
+
+  // Still a total failure, but the finished text is handed over, marked.
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /FAILED: incomplete_review/);
+  assert.match(result.stderr, /No review completed; the report holds only output kept/);
+  const written = await readFile(report, 'utf8');
+  assert.match(written, /failed: incomplete_review - its output is kept below, possibly incomplete/);
+  assert.match(written, /## First defect/);
+  assert.equal(result.posts.length, 1);
+  assert.match(result.posts[0]!.body, /failed/);
+});
 
 test('a leftover raw report path cannot carry terminal control sequences', async (t) => {
   const f = await fixture(t);

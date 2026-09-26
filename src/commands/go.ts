@@ -552,7 +552,13 @@ export async function runGo(options: GoOptions): Promise<number> {
       warnings,
     };
 
-    if (succeeded.length === 0) {
+    // A review that did not complete can still have kept its output (a Claude
+    // review judged incomplete). That is the one case where a panel with no
+    // success still has something to hand over, so it is written, marked, and
+    // the run still exits as a total failure.
+    const kept = records.some((record) => !record.ok && record.output.trim() !== '');
+
+    if (succeeded.length === 0 && !kept) {
       await restorePreviousOutput();
       progress.dim('');
       progress.line('Every review failed. Previous output left in place.');
@@ -603,10 +609,17 @@ export async function runGo(options: GoOptions): Promise<number> {
       progress.bell();
     }
 
-    const partial = succeeded.length < records.length;
-    notificationOutcome = partial ? 'partial' : 'complete';
-
-    exitCode = partial && options.strict ? EXIT_PARTIAL : EXIT_OK;
+    if (succeeded.length === 0) {
+      progress.line(
+        'No review completed; the report holds only output kept from reviews that did not.',
+      );
+      notificationOutcome = 'failed';
+      exitCode = EXIT_TOTAL_FAILURE;
+    } else {
+      const partial = succeeded.length < records.length;
+      notificationOutcome = partial ? 'partial' : 'complete';
+      exitCode = partial && options.strict ? EXIT_PARTIAL : EXIT_OK;
+    }
   } finally {
     progress.stopPulse();
     process.off('SIGINT', onInterrupt);
