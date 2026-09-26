@@ -375,6 +375,44 @@ test('a CLI too old for crbuddy go is flagged and never added by default', async
   assert.ok(vendors.includes(`✓ Codex CLI  ${codexAdapter.minVersion} (codex)`), vendors);
 });
 
+test('a CLI whose version cannot be read is flagged and never added by default', async (t) => {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-unreadable-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const reviewerHints: Array<string | undefined> = [];
+  class RecordingUI extends DefaultingUI {
+    override async select<T>(
+      question: string,
+      choices: Array<Choice<T>>,
+      initialIndex = 0,
+    ): Promise<T> {
+      if (question === 'Add a reviewer') reviewerHints.push(...choices.map((choice) => choice.hint));
+      return super.select(question, choices, initialIndex);
+    }
+  }
+  const ui = new RecordingUI();
+  const code = await runInit(
+    { repoRoot: repo, scope: 'project' },
+    {
+      ui,
+      detect: async () => [
+        { adapter: claudeAdapter, present: true, version: null },
+        { adapter: codexAdapter, present: true, version: codexAdapter.minVersion },
+      ],
+      settingsFile: path.join(repo, 'settings.json'),
+    },
+  );
+  assert.equal(code, 0);
+  // crbuddy go will not guess at an unreadable version, so it is no default.
+  const saved = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
+  assert.deepEqual(saved.panel.map((entry: PanelEntry) => entry.vendor), ['codex']);
+  assert.deepEqual(reviewerHints, ['version unreadable; crbuddy go will refuse it', undefined]);
+  const vendors = ui.notes.find((entry) => entry.title === 'Vendor CLIs')?.message ?? '';
+  assert.ok(
+    vendors.includes('\u2717 Claude Code  installed; version unknown (claude) - crbuddy cannot read its version and will not guess'),
+    vendors,
+  );
+});
+
 test('setup stops when every installed CLI is too old for crbuddy go', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-all-outdated-'));
   t.after(() => rm(repo, { recursive: true, force: true }));
@@ -388,7 +426,7 @@ test('setup stops when every installed CLI is too old for crbuddy go', async (t)
     },
   );
   assert.equal(code, 1);
-  assert.match(ui.cancelled.join('\n'), /Every installed vendor CLI is older than crbuddy supports/);
+  assert.match(ui.cancelled.join('\n'), /Every installed vendor CLI is too old for crbuddy, or its version cannot/);
   assert.ok(!existsSync(path.join(repo, '.crbuddy', 'config.json')));
 });
 

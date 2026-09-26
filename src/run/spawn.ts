@@ -290,11 +290,12 @@ async function readText(file: string): Promise<string> {
 
 export interface ProbeResult {
   present: boolean;
-  version: string | null;
   /** Why it is not usable, when it is not. */
   error?: string;
   /** Raw first-line output, kept for diagnostics. */
   output?: string;
+  /** Everything it printed, stdout then stderr: what a version is read from. */
+  text?: string;
 }
 
 /**
@@ -336,7 +337,9 @@ async function runProbe(
     cwd: scratch,
     timeoutMs: 20_000,
     scratchDir: scratch,
-    id: `probe-${command}-${process.pid}`,
+    // A file name: an absolute command path must not become subdirectories,
+    // which lost all output and hid the version.
+    id: `probe-${path.basename(command).replace(/[^\w.-]/g, '_')}-${process.pid}`,
     signal,
   });
 
@@ -345,7 +348,6 @@ async function runProbe(
   if (result.spawnError) {
     return {
       present: false,
-      version: null,
       error: notFoundHint(command, result.spawnError),
     };
   }
@@ -353,7 +355,6 @@ async function runProbe(
   if (result.timedOut) {
     return {
       present: false,
-      version: null,
       error: `\`${command} ${args.join(' ')}\` did not return within 20s.`,
     };
   }
@@ -361,8 +362,8 @@ async function runProbe(
   // Executed at all means present. A non-zero exit is recorded, not fatal.
   return {
     present: true,
-    version: null,
     output: output.split('\n')[0] ?? '',
+    text: output,
     ...(result.code !== 0
       ? { error: `exited ${result.code}: ${output.slice(0, 160)}` }
       : {}),

@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { ADAPTERS, claudeHooksDisabledReason } from '../adapters/vendors.js';
 import { isNewerThanStamp } from '../adapters/effort.js';
-import { isVersionAtLeast } from '../adapters/version.js';
+import { isVersionAtLeast, probedVersion } from '../adapters/version.js';
 import { probe, runProcess } from '../run/spawn.js';
 import { findRepoRoot } from '../git/target.js';
 
@@ -85,7 +85,7 @@ export async function runDoctor(): Promise<number> {
 
     for (const adapter of ADAPTERS) {
       const result = await probe(adapter.command, adapter.versionArgs());
-      const version = result.present ? adapter.parseVersion(result.output ?? '') : null;
+      const version = probedVersion(adapter, result);
       const versionOk = version !== null && isVersionAtLeast(version, adapter.minVersion);
       const help = result.present ? await readHelp(adapter, scratch) : null;
       const checks = FLAG_CHECKS[adapter.name] ?? [];

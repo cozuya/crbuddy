@@ -23,7 +23,7 @@ import {
 } from '../git/target.js';
 import { Adapter, UnsafeInvocationError } from '../adapters/types.js';
 import { getAdapter } from '../adapters/vendors.js';
-import { isVersionAtLeast } from '../adapters/version.js';
+import { isVersionAtLeast, probedVersion } from '../adapters/version.js';
 import { Semaphore } from '../util/semaphore.js';
 import { Lock, acquireLock, acquireLockAt } from '../util/lock.js';
 import { killAll, probe, runProcess } from '../run/spawn.js';
@@ -340,8 +340,7 @@ export async function runGo(options: GoOptions): Promise<number> {
         );
       }
 
-      const detected =
-        adapter.parseVersion(result.version ?? '') ?? (await detectVersion(adapter, scratch));
+      const detected = probedVersion(adapter, result);
 
       if (!detected) {
         throw new PreflightError(
@@ -657,19 +656,6 @@ export function shouldReviewWholeCheckout(
   explicitlyRequested: boolean,
 ): boolean {
   return emptyDiff && (attended || explicitlyRequested);
-}
-
-async function detectVersion(adapter: Adapter, scratch: string): Promise<string | null> {
-  const result = await runProcess({
-    command: adapter.command,
-    args: adapter.versionArgs(),
-    cwd: scratch,
-    timeoutMs: 15_000,
-    scratchDir: scratch,
-    id: `version-${adapter.name}`,
-  });
-
-  return adapter.parseVersion(`${result.stdout}\n${result.stderr}`);
 }
 
 /**
