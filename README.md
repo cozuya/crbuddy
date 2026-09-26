@@ -6,6 +6,8 @@ crbuddy runs code reviews across multiple coding-agent CLIs in parallel, keeps t
 
 If Claude Code wrote your change and you want Codex and Gemini to review it independently - or Codex wrote it and you want a second opinion from Claude Code - crbuddy turns that cross-model review workflow into one command.
 
+https://github.com/user-attachments/assets/eb9683ae-9733-42ab-b720-503630adaed8
+
 ## Quick start
 
 ```bash
