@@ -659,7 +659,7 @@ export function shouldReviewWholeCheckout(
 }
 
 /**
- * Terminal labels, e.g. `Codex CLI (gpt-6-sol, high)`. Each is a function of
+ * Terminal labels, e.g. `Codex CLI (gpt-6.1-sol, high)`. Each is a function of
  * the effort the adapter actually applied, which is only known once the
  * invocation is built (Claude's native review fills in its default).
  */

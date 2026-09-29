@@ -651,16 +651,16 @@ export const codexAdapter: Adapter = {
 
   models: [
     { id: 'gpt-6-astra', label: 'GPT-6 Astra', hint: 'frontier' },
-    { id: 'gpt-6-sol', label: 'GPT-6 Sol', hint: 'workhorse' },
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', hint: 'workhorse' },
     { id: 'gpt-6-luna', label: 'GPT-6 Luna', hint: 'fast and cheap' },
   ],
-  defaultModel: 'gpt-6-sol',
+  defaultModel: 'gpt-6.1-sol',
 
   // `ultra` is omitted: Codex runs it as a costly subagent fan-out rather
   // than a plain reasoning level. Config still passes it through verbatim.
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   defaultEffort: 'high',
-  listsStampedFor: '0.155.0',
+  listsStampedFor: '0.159.0',
 
   versionArgs() {
     return ['--version'];

@@ -72,17 +72,17 @@ test('equivalent wizard answers produce the unchanged config schema', async (t) 
     maxDiffBytes: DEFAULTS.maxDiffBytes,
     panel: [
       {
-        id: 'codex-gpt-6-sol',
+        id: 'codex-gpt-6-1-sol',
         vendor: 'codex',
-        model: 'gpt-6-sol',
+        model: 'gpt-6.1-sol',
         effort: 'high',
       },
     ],
   });
 
   const summary = ui.notes.find((entry) => entry.title === 'Configuration');
-  assert.match(summary?.message ?? '', /Codex CLI \u00b7 GPT-6 Sol \u00b7 high/);
-  assert.doesNotMatch(summary?.message ?? '', /codex-gpt-6-sol/);
+  assert.match(summary?.message ?? '', /Codex CLI \u00b7 GPT-6\.1 Sol \u00b7 high/);
+  assert.doesNotMatch(summary?.message ?? '', /codex-gpt-6-1-sol/);
 });
 
 test('project config warns that external output needs consent on every run', async (t) => {
@@ -121,7 +121,7 @@ test('editing an existing config preserves accepted values and drops consolidati
       {
         id: 'careful-review',
         vendor: 'codex',
-        model: 'gpt-6-luna',
+        model: 'gpt-6-sol', // Keep an existing model even when it is no longer listed.
         effort: 'xhigh',
         instructions: 'Focus on correctness.',
       },
@@ -224,9 +224,9 @@ test('editing replaces an output filename that is an existing directory', async 
     maxDiffBytes: DEFAULTS.maxDiffBytes,
     panel: [
       {
-        id: 'codex-gpt-6-sol',
+        id: 'codex-gpt-6-1-sol',
         vendor: 'codex',
-        model: 'gpt-6-sol',
+        model: 'gpt-6.1-sol',
         effort: 'high',
       },
     ],
@@ -274,7 +274,7 @@ test('the Codex model wizard offers Other for arbitrary model IDs', async (t) =>
     override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
       if (question === 'Model for Codex CLI') {
         assert.equal(choices[0]?.label, 'GPT-6 Astra');
-        assert.equal(choices[initialIndex]?.value, 'gpt-6-sol');
+        assert.equal(choices[initialIndex]?.value, 'gpt-6.1-sol');
         const other = choices.find((choice) => choice.label === 'Other…');
         assert.ok(other && !other.disabled);
         return other.value;

@@ -282,7 +282,7 @@ test('any vendor-native effort string is accepted', () => {
   // require a crbuddy release to become usable.
   for (const level of ['high', 'xhigh', 'max', 'none', 'something-new-in-2027']) {
     const config = validate({
-      panel: [{ vendor: 'codex', model: 'gpt-6-sol', effort: level }],
+      panel: [{ vendor: 'codex', model: 'gpt-6.1-sol', effort: level }],
     });
 
     assert.equal(config.panel[0]?.effort, level);

@@ -140,7 +140,7 @@ test('a whole-checkout run carries no range and no diff subcommand', () => {
 test('the instructions reach the reviewer intact, without diff framing', () => {
   const invocation = codexAdapter.build({
     operation: { kind: 'generic', target: null, instructions },
-    model: 'gpt-6-sol',
+    model: 'gpt-6.1-sol',
     repoRoot: '/repo',
     supports,
   });

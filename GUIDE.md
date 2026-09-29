@@ -161,7 +161,7 @@ A copyable configuration is shipped in
 
   "panel": [
     { "vendor": "claude", "model": "opus", "effort": "max" },
-    { "vendor": "codex", "model": "gpt-6-sol", "effort": "xhigh" },
+    { "vendor": "codex", "model": "gpt-6.1-sol", "effort": "xhigh" },
     {
       "id": "security",
       "vendor": "gemini",
@@ -261,11 +261,12 @@ security boundary or proof that an unknown flag is inert.
 
 ### Models and effort
 
-The Codex model picker offers GPT-6 Astra, Sol and Luna. GPT-6 Sol is the
-default, and “Other…” still accepts arbitrary model IDs. The GPT-6 models must
-be supported by your installed Codex CLI and account; listing them does not
-raise crbuddy's minimum Codex CLI version. GPT-5.6 models are no longer listed,
-but a config that names one still runs: model IDs are passed through unchecked.
+The Codex model picker offers GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna.
+GPT-6.1 Sol is the default workhorse, and “Other…” still accepts arbitrary model
+IDs. GPT-6.1 Sol requires Codex CLI 0.153.0 or newer and account access;
+listing it does not raise crbuddy's minimum Codex CLI version. GPT-6 Sol and
+GPT-5.6 models are no longer listed, but configs that name them still pass
+those exact IDs to Codex. `gpt-6-sol` does not automatically select GPT-6.1 Sol.
 
 The Gemini picker offers Gemini 3.1 Pro (preview, the default) and Gemini 3.5
 Flash. Gemini 2.5 models are no longer listed.
@@ -279,12 +280,12 @@ if you are about to update it. If every installed CLI is like that, setup stops
 and asks you to update one first. Setup, `crbuddy doctor` and `crbuddy go` all
 read the version the same way, from everything `--version` prints.
 
-For piped setup, Codex model numbers are `1` GPT-6 Astra, `2` GPT-6 Sol,
+For piped setup, Codex model numbers are `1` GPT-6 Astra, `2` GPT-6.1 Sol,
 `3` GPT-6 Luna, `4` Other; update scripts that used the v0.3.x positions
 (`2` GPT-5.6 Sol, `5` Other). Codex effort
 numbers are `1` low through `5` max, `6` Other: `none` was dropped because no
 current Codex model accepts it. The model picker always defaults to the CLI's
-default model (GPT-6 Sol for Codex), so an empty model answer picks it even
+default model (GPT-6.1 Sol for Codex), so an empty model answer picks it even
 when you are editing a reviewer that used another model. Answer Yes to "Keep
 these reviewers?" to keep the existing panel as it is; to re-enter a custom
 model, select Other, which asks for its model ID.

@@ -10,7 +10,7 @@
   "maxDiffBytes": 2000000,
   "panel": [
     { "vendor": "claude", "model": "opus", "effort": "max" },
-    { "vendor": "codex", "model": "gpt-6-sol", "effort": "xhigh" },
+    { "vendor": "codex", "model": "gpt-6.1-sol", "effort": "xhigh" },
     {
       "vendor": "gemini",
       "model": "gemini-3.1-pro-preview",

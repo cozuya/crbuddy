@@ -737,7 +737,7 @@ test('piped init appends notification answers, config Enter retains them, and No
   assert.deepEqual(first.posts, []);
   assert.deepEqual(JSON.parse(await readFile(f.settingsFile, 'utf8')), enabled);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
-  assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, 'gpt-6-sol');
+  assert.equal(JSON.parse(await readFile(globalConfig, 'utf8')).panel[0].model, 'gpt-6.1-sol');
   assert.doesNotMatch(await readFile(globalConfig, 'utf8'), /notifications|ntfy/);
 
   // Editing retains the panel, adds none, keeps file output, then accepts
@@ -790,14 +790,16 @@ test('piped setup EOF at the new questions cancels without partially saving eith
   }
 });
 
-test('piped Codex model numbers match the documented choices, with Other last', async (t) => {
+test('piped Codex defaults and model numbers match the docs, with Other last', async (t) => {
   const f = await fixture(t);
   await rm(f.configFile);
   const globalConfig = path.join(f.userDir, '.crbuddy', 'config.json');
   for (const [answers, model] of [
+    [[''], 'gpt-6.1-sol'],
     [['1'], 'gpt-6-astra'],
-    [['2'], 'gpt-6-sol'],
+    [['2'], 'gpt-6.1-sol'],
     [['3'], 'gpt-6-luna'],
+    [['4', 'gpt-6-sol'], 'gpt-6-sol'],
     [['4', 'my-custom-model'], 'my-custom-model'],
   ] as const) {
     await rm(globalConfig, { force: true });
