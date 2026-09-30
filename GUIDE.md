@@ -263,10 +263,40 @@ security boundary or proof that an unknown flag is inert.
 
 The Codex model picker offers GPT-6 Astra, GPT-6.1 Sol and GPT-6 Luna.
 GPT-6.1 Sol is the default workhorse, and “Other…” still accepts arbitrary model
-IDs. GPT-6.1 Sol requires Codex CLI 0.153.0 or newer and account access;
-listing it does not raise crbuddy's minimum Codex CLI version. GPT-6 Sol and
-GPT-5.6 models are no longer listed, but configs that name them still pass
-those exact IDs to Codex. `gpt-6-sol` does not automatically select GPT-6.1 Sol.
+IDs. GPT-6 Sol and GPT-5.6 models are no longer listed, but configs that name
+them still pass those exact IDs to Codex. `gpt-6-sol` does not automatically
+select GPT-6.1 Sol.
+
+**GPT-6.1 Sol needs Codex CLI 0.159.2 or newer.** Codex 0.158.0 was seen
+rejecting it (`HTTP 400: The 'gpt-6.1-sol' model is not supported when using
+Codex with a ChatGPT account.`) and 0.159.2 was seen running it. 0.159.2 is
+crbuddy's tested baseline, not a minimum OpenAI has published; the earliest
+release that works was not established, so crbuddy refuses everything below
+0.159.2, however Codex is signed in. The requirement covers the exact ID
+`gpt-6.1-sol` only. Every other Codex model, `gpt-6-sol` included, keeps the
+general Codex CLI minimum (0.130.0). Account access still applies.
+
+crbuddy checks the version of the `codex` it will actually run: the first one
+on the PATH that `crbuddy go` sees. When that one is older, `crbuddy go` refuses
+each `gpt-6.1-sol` reviewer before starting it (`FAILED:
+cli_too_old_for_model`, with the version found and what to do) and runs the
+rest of the panel as usual. Setup and `crbuddy doctor` mark the model, and still
+count that Codex as usable for every other model.
+
+Updating crbuddy does not update Codex. Upgrade Codex in the environment where
+crbuddy runs; for an npm installation:
+
+```bash
+npm install -g @openai/codex@0.159.2
+```
+
+Or put a newer Codex first on PATH for one run:
+
+```bash
+npx --yes --package=@openai/codex@0.159.2 -c 'crb go'
+```
+
+Or select `gpt-6-sol` for that reviewer instead.
 
 The Gemini picker offers Gemini 3.1 Pro (preview, the default) and Gemini 3.5
 Flash. Gemini 2.5 models are no longer listed.
@@ -355,7 +385,8 @@ vendor configuration safe to load.
 **Flags and versions are detected, not assumed.** Vendor CLI behavior churns
 between releases. Preflight checks each adapter's minimum supported CLI version
 and refuses to guess when the installed binary is older or its version cannot
-be parsed. It also reads the adapter's appropriate help surface and only passes
+be parsed. A model with a minimum of its own (GPT-6.1 Sol) refuses only the
+reviewers that select it. It also reads the adapter's appropriate help surface and only passes
 optional flags it advertises. A missing **safety** flag - read-only enforcement
 - refuses that lane instead. Parent and nested subcommand help are not
 interchangeable; Codex, for example, keeps crbuddy's sandbox/config flags on

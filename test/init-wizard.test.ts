@@ -413,6 +413,81 @@ test('a CLI whose version cannot be read is flagged and never added by default',
   );
 });
 
+test('setup shows the gpt-6.1-sol minimum on an older Codex without refusing Codex', async (t) => {
+  const setup = async (version: string) => {
+    const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-model-minimum-'));
+    t.after(() => rm(repo, { recursive: true, force: true }));
+    const reviewerHints: Array<string | undefined> = [];
+    let modelChoices: Array<Choice<unknown>> = [];
+    let modelDefault: unknown;
+    class RecordingUI extends DefaultingUI {
+      override async select<T>(
+        question: string,
+        choices: Array<Choice<T>>,
+        initialIndex = 0,
+      ): Promise<T> {
+        if (question === 'Add a reviewer') reviewerHints.push(...choices.map((choice) => choice.hint));
+        if (question === 'Model for Codex CLI') {
+          modelChoices = choices;
+          modelDefault = choices[initialIndex]?.value;
+        }
+        return super.select(question, choices, initialIndex);
+      }
+    }
+    const ui = new RecordingUI();
+    const code = await runInit(
+      { repoRoot: repo, scope: 'project' },
+      {
+        ui,
+        detect: async () => [{ adapter: codexAdapter, present: true, version }],
+        settingsFile: path.join(repo, 'settings.json'),
+      },
+    );
+    assert.equal(code, 0);
+    const saved = JSON.parse(await readFile(path.join(repo, '.crbuddy', 'config.json'), 'utf8'));
+    return {
+      ui,
+      reviewerHints,
+      modelChoices,
+      modelDefault,
+      models: saved.panel.map((entry: PanelEntry) => entry.model),
+      vendors: ui.notes.find((entry) => entry.title === 'Vendor CLIs')?.message ?? '',
+      warnings: ui.messages.filter((entry) => entry.kind === 'warn').map((entry) => entry.message),
+    };
+  };
+
+  const old = await setup('0.158.0');
+  // Codex stays usable and the default; only the one model is marked.
+  assert.deepEqual(old.reviewerHints, [undefined]);
+  assert.ok(
+    old.vendors.includes(
+      '✓ Codex CLI  0.158.0 (codex)\n' +
+        "  gpt-6.1-sol needs 0.159.2 or newer (crbuddy's tested baseline); other models run on 0.158.0",
+    ),
+    old.vendors,
+  );
+  assert.equal(old.modelDefault, 'gpt-6.1-sol');
+  assert.deepEqual(
+    old.modelChoices.map((choice) => choice.hint),
+    [
+      'frontier',
+      'workhorse; needs 0.159.2+, found 0.158.0',
+      'fast and cheap',
+      'any id `codex` accepts, passed through unchecked',
+    ],
+  );
+  assert.deepEqual(old.models, ['gpt-6.1-sol']);
+  assert.equal(old.warnings.length, 1);
+  assert.match(old.warnings[0]!, /^crbuddy go will refuse this reviewer here:\ngpt-6\.1-sol requires Codex CLI >= 0\.159\.2/);
+  assert.match(old.warnings[0]!, /npm install -g @openai\/codex@0\.159\.2/);
+
+  const current = await setup('0.159.2');
+  assert.ok(current.vendors.includes('✓ Codex CLI  0.159.2 (codex)'), current.vendors);
+  assert.doesNotMatch(current.vendors, /needs/);
+  assert.equal(current.modelChoices[1]?.hint, 'workhorse');
+  assert.deepEqual(current.warnings, []);
+});
+
 test('setup stops when every installed CLI is too old for crbuddy go', async (t) => {
   const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-panel-all-outdated-'));
   t.after(() => rm(repo, { recursive: true, force: true }));

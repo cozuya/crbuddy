@@ -56,6 +56,18 @@ export interface VendorModel {
   hint?: string;
   /** Model-specific effort values; omitted means the vendor list applies. */
   efforts?: string[];
+  /**
+   * A CLI version this exact ID needs above the adapter's `minVersion`. Other
+   * IDs, aliases included, keep the adapter minimum.
+   */
+  cliMinimum?: ModelCliMinimum;
+}
+
+export interface ModelCliMinimum {
+  /** crbuddy's tested baseline for the model, not a vendor-published minimum. */
+  version: string;
+  /** Model ID suggested instead to someone whose CLI is older. */
+  instead: string;
 }
 
 /**
@@ -93,6 +105,8 @@ export interface Adapter {
   readonly defaultModel: string;
   /** Minimum CLI version this adapter was written against. */
   readonly minVersion: string;
+  /** npm package that installs the CLI, for upgrade hints. */
+  readonly npmPackage?: string;
 
   /** Argv that prints a version. */
   versionArgs(): string[];

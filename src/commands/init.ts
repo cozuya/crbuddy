@@ -24,7 +24,12 @@ import {
   slug,
 } from '../config/load.js';
 import { ADAPTERS, getAdapter } from '../adapters/vendors.js';
-import { isVersionAtLeast, probedVersion } from '../adapters/version.js';
+import {
+  isVersionAtLeast,
+  modelsNeedingNewerCli,
+  modelVersionProblem,
+  probedVersion,
+} from '../adapters/version.js';
 import { probe } from '../run/spawn.js';
 import { Adapter } from '../adapters/types.js';
 import { PromptAborted } from '../util/prompt.js';
@@ -191,6 +196,7 @@ async function wizard(
     'Vendor CLIs checked',
   );
   const available = detections.filter((d) => d.present).map((d) => d.adapter);
+  const versions = new Map(detections.map((d) => [d.adapter, d.version] as const));
   const unusable = new Map(
     detections.flatMap((d) => {
       const problem = versionProblem(d);
@@ -227,6 +233,7 @@ async function wizard(
     ui,
     available,
     unusable,
+    versions,
     existing?.panel ?? [],
     initialSavedReviewInstructions,
   );
@@ -503,8 +510,17 @@ function formatDetection(detection: Detection): string {
   const summary =
     `${mark} ${detection.adapter.label}  ${version} ` +
     `(${detection.adapter.command})${why}`;
+  // Usable, just not with these models: said here so a CLI that runs every
+  // other model is not mistaken for one go refuses outright.
+  const models = problem
+    ? []
+    : modelsNeedingNewerCli(detection.adapter, detection.version).map(
+        (model) =>
+          `  ${model.id} needs ${model.cliMinimum.version} or newer (crbuddy's tested ` +
+          `baseline); other models run on ${detection.version}`,
+      );
 
-  return detection.error ? `${summary}\n  ${detection.error}` : summary;
+  return [summary, ...models, ...(detection.error ? [`  ${detection.error}`] : [])].join('\n');
 }
 
 function formatReviewer(entry: PanelEntry): string {
@@ -620,12 +636,20 @@ export function formatConfigSummary(
 
 const OTHER = '\u0000other';
 
-async function pickModel(ui: WizardUI, adapter: Adapter): Promise<string> {
-  const choices = adapter.models.map((model) => ({
-    label: model.label,
-    value: model.id,
-    ...(model.hint ? { hint: model.hint } : {}),
-  }));
+async function pickModel(
+  ui: WizardUI,
+  adapter: Adapter,
+  cliVersion: string | null,
+): Promise<string> {
+  const tooOld = new Map(
+    modelsNeedingNewerCli(adapter, cliVersion).map(
+      (model) => [model.id, `needs ${model.cliMinimum.version}+, found ${cliVersion}`] as const,
+    ),
+  );
+  const choices = adapter.models.map((model) => {
+    const hint = [model.hint, tooOld.get(model.id)].filter(Boolean).join('; ');
+    return { label: model.label, value: model.id, ...(hint ? { hint } : {}) };
+  });
 
   choices.push({
     label: 'Other\u2026',
@@ -840,6 +864,7 @@ async function buildPanel(
   ui: WizardUI,
   available: Adapter[],
   unusable: ReadonlyMap<Adapter, VersionProblem>,
+  versions: ReadonlyMap<Adapter, string | null>,
   existing: PanelEntry[],
   initialSavedReviewInstructions?: string,
 ): Promise<PanelBuildResult> {
@@ -904,7 +929,13 @@ async function buildPanel(
       unused >= 0 ? unused : 0,
     );
 
-    const model = await pickModel(ui, adapter);
+    const model = await pickModel(ui, adapter, versions.get(adapter) ?? null);
+    const tooOld = modelVersionProblem(adapter, model, versions.get(adapter) ?? null);
+
+    // Still added, for someone about to update the CLI, as with a CLI too old
+    // for crbuddy altogether.
+    if (tooOld) ui.message(`crbuddy go will refuse this reviewer here:\n${tooOld}`, 'warn');
+
     const effort = await pickEffort(ui, adapter, model);
     const instructionChoice = await chooseReviewInstructions(
       ui,
