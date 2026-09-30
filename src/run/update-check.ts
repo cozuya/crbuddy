@@ -43,11 +43,14 @@ function enabled(value: string | undefined): boolean {
   return value !== undefined && value.trim() !== '' && !/^(?:0|false)$/i.test(value.trim());
 }
 
-/** CI, a pipe, or an explicit opt-out: nobody to tell, so nothing is fetched. */
+/**
+ * CI, a pipe, or an explicit opt-out: nobody to tell, so nothing is fetched.
+ * The opt-outs count when set at all, as update-notifier reads its variable.
+ */
 export function updateCheckSuppressed(env: NodeJS.ProcessEnv, interactive: boolean): boolean {
   return (
     !interactive ||
-    ['CRBUDDY_NO_UPDATE_CHECK', 'NO_UPDATE_NOTIFIER'].some((name) => enabled(env[name])) ||
+    ['CRBUDDY_NO_UPDATE_CHECK', 'NO_UPDATE_NOTIFIER'].some((name) => env[name] !== undefined) ||
     ['CI', 'CONTINUOUS_INTEGRATION', 'BUILD_NUMBER', 'RUN_ID', 'GITHUB_ACTIONS'].some(
       (name) => enabled(env[name]),
     )
@@ -66,8 +69,14 @@ export function startUpdateCheck(options: UpdateCheckOptions): UpdateCheck {
   const env = options.env ?? process.env;
   const interactive = options.interactive ?? Boolean(process.stderr.isTTY);
 
-  if (updateCheckSuppressed(env, interactive) || parseSemver(options.installed) === null) {
-    return { notice: async () => null };
+  const none: UpdateCheck = { notice: async () => null };
+
+  try {
+    if (updateCheckSuppressed(env, interactive) || parseSemver(options.installed) === null) {
+      return none;
+    }
+  } catch {
+    return none;
   }
 
   const latest = resolveLatest(options).catch(() => null);

@@ -11,7 +11,7 @@ import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
 import { runView } from './commands/view.js';
 import { configureClaudeBackgroundWait } from './run/claude-background-wait.js';
-import { startUpdateCheck } from './run/update-check.js';
+import { UpdateCheck, startUpdateCheck } from './run/update-check.js';
 
 const HELP = `crbuddy - fan one code review across several agent CLIs, then hand off every review.
 
@@ -45,14 +45,26 @@ Exit codes:
   2  partial success, only with --strict
 `;
 
+let manifestVersion: Promise<string | null> | undefined;
+
+/** This package's version, read once; null when it cannot be read. */
+function installedVersion(): Promise<string | null> {
+  manifestVersion ??= (async () => {
+    try {
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      const manifest = await readFile(path.join(here, '..', 'package.json'), 'utf8');
+      const { version } = JSON.parse(manifest) as { version?: unknown };
+      return typeof version === 'string' ? version : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  return manifestVersion;
+}
+
 async function version(): Promise<string> {
-  try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const manifest = await readFile(path.join(here, '..', 'package.json'), 'utf8');
-    return (JSON.parse(manifest) as { version?: string }).version ?? '0.0.0';
-  } catch {
-    return '0.0.0';
-  }
+  return (await installedVersion()) ?? '0.0.0';
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -158,11 +170,21 @@ function reportError(error: unknown): void {
 /** Commands that end with an update notice. Never --version or --help. */
 const UPDATE_NOTICE_COMMANDS = new Set(['go', 'init', 'config', 'view', 'doctor', 'check']);
 
+/** Best effort: without a readable version of our own there is nothing to compare. */
+async function beginUpdateCheck(command: string | undefined): Promise<UpdateCheck | null> {
+  if (!UPDATE_NOTICE_COMMANDS.has(command ?? '')) return null;
+
+  try {
+    const installed = await installedVersion();
+    return installed === null ? null : startUpdateCheck({ installed });
+  } catch {
+    return null;
+  }
+}
+
 async function run(argv: string[]): Promise<number> {
   // Started before the command so the registry request overlaps its work.
-  const update = UPDATE_NOTICE_COMMANDS.has(argv[2] ?? '')
-    ? startUpdateCheck({ installed: await version() })
-    : null;
+  const update = await beginUpdateCheck(argv[2]);
   let code: number;
 
   try {
@@ -178,6 +200,11 @@ async function run(argv: string[]): Promise<number> {
   return code;
 }
 
-run(process.argv).then((code) => {
-  process.exitCode = code;
-});
+run(process.argv)
+  .then((code) => {
+    process.exitCode = code;
+  })
+  .catch((error) => {
+    reportError(error);
+    process.exitCode = 1;
+  });

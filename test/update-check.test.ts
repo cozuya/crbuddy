@@ -144,8 +144,10 @@ test('CI, non-interactive and opted-out runs neither check nor print', async (t)
   }
   assert.equal(h.requests(), 0);
 
-  // A variable set to false is not an opt-out.
-  assert.equal(updateCheckSuppressed({ CI: 'false', NO_UPDATE_NOTIFIER: '0' }, true), false);
+  // CI=false is not CI; the opt-outs count when set at all, as update-notifier's does.
+  assert.equal(updateCheckSuppressed({ CI: 'false', GITHUB_ACTIONS: '' }, true), false);
+  assert.equal(updateCheckSuppressed({ NO_UPDATE_NOTIFIER: '' }, true), true);
+  assert.equal(updateCheckSuppressed({ CRBUDDY_NO_UPDATE_CHECK: '0' }, true), true);
 });
 
 test('an installed version that is not semver never checks', async (t) => {

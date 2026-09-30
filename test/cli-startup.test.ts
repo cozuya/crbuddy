@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -10,7 +10,9 @@ import { pathToFileURL } from 'node:url';
 /**
  * The real CLI, its update check and registry worker. A preload stands in for
  * the registry in every thread, records each request, and can make stderr a
- * terminal, since a check only runs when someone will see the notice.
+ * terminal, since a check only runs when someone will see the notice. The
+ * built CLI runs from a copy beside a package.json saying 0.4.2: dist-test has
+ * none, and a version the CLI cannot read is never compared.
  */
 async function fixture(t: TestContext) {
   const root = await mkdtemp(path.join(tmpdir(), 'crbuddy-cli-startup-'));
@@ -24,6 +26,18 @@ async function fixture(t: TestContext) {
   await mkdir(outside);
   await mkdir(repo);
   execFileSync('git', ['init', '--quiet'], { cwd: repo, stdio: 'pipe' });
+
+  const cli = path.join(root, 'cli');
+  await cp(path.resolve('dist-test/src'), path.join(cli, 'src'), { recursive: true });
+  await writeFile(
+    path.join(cli, 'package.json'),
+    JSON.stringify({ name: 'crbuddy', version: '0.4.2', type: 'module' }),
+  );
+  await symlink(
+    path.resolve('node_modules'),
+    path.join(cli, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
 
   await writeFile(preload, `
     import fs from 'node:fs';
@@ -43,19 +57,28 @@ async function fixture(t: TestContext) {
     };
   `);
 
-  async function run(args: string[], env: Record<string, string> = {}, cwd = outside) {
+  async function run(
+    args: string[],
+    env: Record<string, string> = {},
+    cwd = outside,
+    entry = path.join(cli, 'src', 'index.js'),
+  ) {
     await rm(requests, { force: true });
     const started = Date.now();
+    const inherited: NodeJS.ProcessEnv = { ...process.env };
+    // The opt-outs count when merely set, so they are removed, not emptied.
+    delete inherited.CRBUDDY_NO_UPDATE_CHECK;
+    delete inherited.NO_UPDATE_NOTIFIER;
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
       (resolve, reject) => {
         const child = spawn(process.execPath, [
           '--import', pathToFileURL(preload).href,
-          path.resolve('dist-test/src/index.js'),
+          entry,
           ...args,
         ], {
           cwd,
           env: {
-            ...process.env,
+            ...inherited,
             HOME: home,
             USERPROFILE: home,
             // The suite itself may run in CI; each case sets what it tests.
@@ -64,8 +87,6 @@ async function fixture(t: TestContext) {
             BUILD_NUMBER: '',
             RUN_ID: '',
             GITHUB_ACTIONS: '',
-            CRBUDDY_NO_UPDATE_CHECK: '',
-            NO_UPDATE_NOTIFIER: '',
             ...env,
           },
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -93,7 +114,7 @@ async function fixture(t: TestContext) {
   return { home, repo, run };
 }
 
-const NOTICE = /\nUpdate available: crbuddy \S+ → 99\.0\.0\nRun: npm i -g crbuddy@latest\n$/;
+const NOTICE = /\nUpdate available: crbuddy 0\.4\.2 → 99\.0\.0\nRun: npm i -g crbuddy@latest\n$/;
 
 test('a newer registry version is announced after the command, on stderr', async (t) => {
   const f = await fixture(t);
@@ -113,11 +134,14 @@ test('a newer registry version is announced after the command, on stderr', async
 
 test('a registry version that is not newer prints nothing', async (t) => {
   const f = await fixture(t);
-  const result = await f.run(['view'], { CRB_TEST_TTY: '1', CRB_TEST_REGISTRY: '0.0.0' });
+  for (const latest of ['0.4.2', '0.4.1']) {
+    await rm(path.join(f.home, '.crbuddy', 'update-check.json'), { force: true });
+    const result = await f.run(['view'], { CRB_TEST_TTY: '1', CRB_TEST_REGISTRY: latest });
 
-  assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.fetched.length, 1);
-  assert.doesNotMatch(result.stderr, /Update available/);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.fetched.length, 1, latest);
+    assert.doesNotMatch(result.stderr, /Update available/, latest);
+  }
 });
 
 test('a failed or hanging registry request leaves the command unaffected', async (t) => {
@@ -172,7 +196,7 @@ test('--version prints only the version and never checks', async (t) => {
   const result = await f.run(['--version'], { CRB_TEST_TTY: '1', CRB_TEST_REGISTRY: '99.0.0' });
 
   assert.equal(result.code, 0);
-  assert.match(result.stdout, /^\d+\.\d+\.\d+\n$/);
+  assert.equal(result.stdout, '0.4.2\n');
   assert.equal(result.stderr, '');
   assert.deepEqual(result.fetched, []);
 });
@@ -204,4 +228,35 @@ test('a config that exists but is broken keeps its specific error', async (t) =>
   assert.equal(global.code, 1);
   assert.doesNotMatch(global.stderr, /isn't configured yet/);
   assert.match(global.stderr, /config declares version 99/);
+});
+
+test('a version the CLI cannot read is never compared with the registry', async (t) => {
+  const f = await fixture(t);
+  // dist-test has no package.json beside it, so the CLI does not know its version.
+  const result = await f.run(
+    ['view'],
+    { CRB_TEST_TTY: '1', CRB_TEST_REGISTRY: '99.0.0' },
+    undefined,
+    path.resolve('dist-test/src/index.js'),
+  );
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /Update available/);
+  assert.deepEqual(result.fetched, []);
+});
+
+test('a dangling config symlink is reported as broken, not as unconfigured', {
+  skip: process.platform === 'win32' ? 'creating symlinks needs privileges on Windows' : false,
+}, async (t) => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.home, '.crbuddy'), { recursive: true });
+  await symlink(
+    path.join(f.home, 'moved-dotfiles', 'config.json'),
+    path.join(f.home, '.crbuddy', 'config.json'),
+  );
+
+  const result = await f.run(['go'], {}, f.repo);
+  assert.equal(result.code, 1);
+  assert.doesNotMatch(result.stderr, /isn't configured yet/);
+  assert.match(result.stderr, /Cannot read config at .*config\.json/);
 });
