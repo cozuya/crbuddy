@@ -116,6 +116,8 @@ Adapter metadata declares whether a vendor has a supported **headless native rev
 
 Detection establishes CLI presence/version/capability, not authentication. Each adapter declares a minimum supported CLI version. `go` refuses an older or unparseable version rather than guessing at version-sensitive native-review behavior; `check` reports the same condition before a paid run starts.
 
+A listed model can declare a higher minimum of its own, as Codex `gpt-6.1-sol` does (0.159.2, crbuddy's tested baseline rather than a vendor-published minimum). It matches that exact ID only; model strings stay pass-through, with no allowlist, alias inference, or fallback. `go` refuses just the reviewers that select it, before launch, against the version probed from the executable the lane would run, and the rest of the panel proceeds. Setup and `doctor` mark the model without calling the CLI unusable.
+
 ---
 
 ## 4. Target resolution and provenance
@@ -372,7 +374,7 @@ HTML comments delimit human-navigation sections, but they are not parser boundar
 
 These are expected maintenance points rather than reasons to weaken the architecture:
 
-- vendor minimum CLI versions
+- vendor minimum CLI versions, and per-model minimums above them
 - vendor model and effort lists
 - vendor CLI flags and their help hierarchy
 - native review invocation syntax

@@ -4,7 +4,12 @@ import path from 'node:path';
 
 import { ADAPTERS, claudeHooksDisabledReason } from '../adapters/vendors.js';
 import { isNewerThanStamp } from '../adapters/effort.js';
-import { isVersionAtLeast, probedVersion } from '../adapters/version.js';
+import {
+  isVersionAtLeast,
+  modelMinimumNote,
+  modelsNeedingNewerCli,
+  probedVersion,
+} from '../adapters/version.js';
 import { probe, runProcess } from '../run/spawn.js';
 import { findRepoRoot } from '../git/target.js';
 
@@ -132,6 +137,14 @@ export async function runDoctor(): Promise<number> {
           if (!versionOk) {
             console.log(
               `       problem:  too old for this adapter; update to ${adapter.minVersion} or newer`,
+            );
+          }
+
+          // Not a problem line: the CLI stays usable for every other model.
+          for (const model of versionOk ? modelsNeedingNewerCli(adapter, version) : []) {
+            console.log(
+              `       note:     ${modelMinimumNote(model, version)}. Upgrade ` +
+                `${adapter.label} where crbuddy runs, or select ${model.cliMinimum.instead}`,
             );
           }
 

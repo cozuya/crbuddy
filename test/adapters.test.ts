@@ -219,7 +219,12 @@ test('Codex vendorArgs cannot use arbitrary config overrides around safety', () 
 test('Codex offers Astra, GPT-6.1 Sol and Luna, defaulting to GPT-6.1 Sol', () => {
   assert.deepEqual(codexAdapter.models, [
     { id: 'gpt-6-astra', label: 'GPT-6 Astra', hint: 'frontier' },
-    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', hint: 'workhorse' },
+    {
+      id: 'gpt-6.1-sol',
+      label: 'GPT-6.1 Sol',
+      hint: 'workhorse',
+      cliMinimum: { version: '0.159.2', instead: 'gpt-6-sol' },
+    },
     { id: 'gpt-6-luna', label: 'GPT-6 Luna', hint: 'fast and cheap' },
   ]);
   assert.equal(codexAdapter.defaultModel, 'gpt-6.1-sol');

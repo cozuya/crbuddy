@@ -22,6 +22,9 @@ import {
 
 export class ConfigError extends Error {}
 
+/** Neither a project nor a global config exists: crbuddy was never set up. */
+export class ConfigMissingError extends ConfigError {}
+
 export interface LoadedConfig {
   config: Config;
   /** Absolute path the config came from. */
@@ -49,10 +52,26 @@ export function projectConfigPath(repoRoot: string): string {
  * Project-local config REPLACES the global one entirely. No implicit
  * merging — see DESIGN.md §3 for why.
  */
+/**
+ * Whether a config file is there at all. Only a path that does not exist is
+ * missing: a dangling symlink or an unsearchable directory is a broken config,
+ * reported as one rather than as a machine that was never set up.
+ */
+function configPresent(file: string): boolean {
+  try {
+    lstatSync(file);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    throw new ConfigError(`Cannot read config at ${file}: ${String(error)}`);
+  }
+}
+
 export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
   const projectPath = projectConfigPath(repoRoot);
 
-  if (existsSync(projectPath)) {
+  if (configPresent(projectPath)) {
     const { config, obsoleteKeys, legacyRawOutput } = await readConfigFile(projectPath);
     assertUsableOutput(config.output, `${projectPath}.output`, repoRoot);
 
@@ -67,7 +86,7 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
 
   const globalPath = homeConfigPath();
 
-  if (existsSync(globalPath)) {
+  if (configPresent(globalPath)) {
     const { config, obsoleteKeys, legacyRawOutput } = await readConfigFile(globalPath);
     assertUsableOutput(config.output, `${globalPath}.output`, repoRoot);
 
@@ -80,12 +99,9 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
     };
   }
 
-  throw new ConfigError(
-    `No config found.\n` +
-      `  Looked for: ${projectPath}\n` +
-      `              ${globalPath}\n` +
-      `Run \`crb init\` to create one.`,
-  );
+  // Anything present but unreadable or invalid has already said so; this is
+  // the first run after installing.
+  throw new ConfigMissingError("crbuddy isn't configured yet.\n\nRun:\n  crb init");
 }
 
 export async function readAndValidate(file: string): Promise<Config> {

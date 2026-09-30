@@ -1,3 +1,5 @@
+import type { Adapter, ModelCliMinimum, VendorModel } from './types.js';
+
 /** Compare dotted CLI versions numerically, ignoring surrounding text. */
 export function compareVersions(left: string, right: string): number {
   const parse = (value: string): number[] =>
@@ -31,4 +33,56 @@ export function probedVersion(
   result: { present: boolean; text?: string },
 ): string | null {
   return result.present ? adapter.parseVersion(result.text ?? '') : null;
+}
+
+/**
+ * Listed models that need a newer CLI than the detected one. Empty when the
+ * version is unknown: go already refuses an unreadable version for every model.
+ */
+export function modelsNeedingNewerCli(
+  adapter: Pick<Adapter, 'models'>,
+  detected: string | null,
+): Array<VendorModel & { cliMinimum: ModelCliMinimum }> {
+  if (detected === null) return [];
+
+  return adapter.models.filter(
+    (model): model is VendorModel & { cliMinimum: ModelCliMinimum } =>
+      model.cliMinimum !== undefined && !isVersionAtLeast(detected, model.cliMinimum.version),
+  );
+}
+
+/** One line for setup and doctor, which still count the CLI as usable. */
+export function modelMinimumNote(
+  model: VendorModel & { cliMinimum: ModelCliMinimum },
+  detected: string,
+): string {
+  return (
+    `${model.id} needs ${model.cliMinimum.version} or newer (crbuddy's tested ` +
+    `baseline); other models run on ${detected}`
+  );
+}
+
+/**
+ * Why a lane must not run `model` on the detected CLI, or null. Only an exact
+ * listed ID has a model minimum; any other string passes through as before.
+ */
+export function modelVersionProblem(
+  adapter: Pick<Adapter, 'label' | 'models' | 'npmPackage'>,
+  model: string,
+  detected: string | null,
+): string | null {
+  const listed = modelsNeedingNewerCli(adapter, detected).find((entry) => entry.id === model);
+  if (!listed) return null;
+
+  const { version, instead } = listed.cliMinimum;
+
+  return [
+    `${listed.id} requires ${adapter.label} >= ${version} in crbuddy (tested ` +
+      `compatibility baseline); found ${detected}.`,
+    `Upgrade ${adapter.label} in the environment where crbuddy runs (updating ` +
+      `crbuddy does not update it), or select ${instead}.`,
+    ...(adapter.npmPackage
+      ? [`For npm installations: npm install -g ${adapter.npmPackage}@${version}`]
+      : []),
+  ].join('\n');
 }

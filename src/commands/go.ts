@@ -23,7 +23,11 @@ import {
 } from '../git/target.js';
 import { Adapter, UnsafeInvocationError } from '../adapters/types.js';
 import { getAdapter } from '../adapters/vendors.js';
-import { isVersionAtLeast, probedVersion } from '../adapters/version.js';
+import {
+  isVersionAtLeast,
+  modelVersionProblem,
+  probedVersion,
+} from '../adapters/version.js';
 import { Semaphore } from '../util/semaphore.js';
 import { Lock, acquireLock, acquireLockAt } from '../util/lock.js';
 import { killAll, probe, runProcess } from '../run/spawn.js';
@@ -733,6 +737,31 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     wallClockMs: 0,
   };
 
+  /** Refused before launch: nothing was spawned and no model was asked. */
+  const refuse = (reason: string, diagnostics: string, shown: string[]): RunRecord => {
+    const display = args.display(entry.effort ?? null);
+    progress.laneFinished(display);
+    progress.line(
+      `  ${display} - FAILED: ${reason}${shown.map((line) => `\n      ${line}`).join('')}`,
+    );
+
+    return { ...base, ok: false, reason, output: '', diagnostics };
+  };
+
+  // Against the version probed from the same executable this lane would run,
+  // resolved through the same PATH: a newer CLI put first on PATH counts.
+  const tooOld = modelVersionProblem(adapter, entry.model, args.cliVersion);
+
+  if (tooOld) {
+    // crbuddy's own text, so every line is shown: it is the whole remedy, and
+    // a panel with nothing else to report writes no report to find it in.
+    return refuse(
+      'cli_too_old_for_model',
+      tooOld,
+      tooOld.split('\n').map(sanitizeTerminalInline),
+    );
+  }
+
   let invocation;
 
   try {
@@ -772,23 +801,7 @@ async function executeEntry(args: ExecuteArgs): Promise<RunRecord> {
     });
   } catch (error) {
     if (error instanceof UnsafeInvocationError) {
-      const display = args.display(entry.effort ?? null);
-      progress.laneFinished(display);
-
-      const outcome: RunRecord = {
-        ...base,
-        ok: false,
-        reason: 'unsafe_invocation',
-        output: '',
-        diagnostics: error.message,
-      };
-
-      progress.line(
-        `  ${display} - FAILED: unsafe_invocation\n      ` +
-          `${firstLine(outcome.diagnostics)}`,
-      );
-
-      return outcome;
+      return refuse('unsafe_invocation', error.message, [firstLine(error.message)]);
     }
 
     throw error;

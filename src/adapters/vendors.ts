@@ -648,10 +648,20 @@ export const codexAdapter: Adapter = {
   nativeReview: true,
   nativeReviewCommand: 'codex exec review',
   minVersion: '0.130.0',
+  npmPackage: '@openai/codex',
 
   models: [
     { id: 'gpt-6-astra', label: 'GPT-6 Astra', hint: 'frontier' },
-    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', hint: 'workhorse' },
+    {
+      id: 'gpt-6.1-sol',
+      label: 'GPT-6.1 Sol',
+      hint: 'workhorse',
+      // 0.158.0 was seen failing this model with HTTP 400 under a ChatGPT
+      // account and 0.159.2 was seen working. The earliest working release
+      // was not established: this is crbuddy's tested baseline, not OpenAI's
+      // published minimum.
+      cliMinimum: { version: '0.159.2', instead: 'gpt-6-sol' },
+    },
     { id: 'gpt-6-luna', label: 'GPT-6 Luna', hint: 'fast and cheap' },
   ],
   defaultModel: 'gpt-6.1-sol',
