@@ -481,6 +481,36 @@ test('setup shows the gpt-6.1-sol minimum on an older Codex without refusing Cod
   assert.match(old.warnings[0]!, /^crbuddy go will refuse this reviewer here:\ngpt-6\.1-sol requires Codex CLI >= 0\.159\.2/);
   assert.match(old.warnings[0]!, /npm install -g @openai\/codex@0\.159\.2/);
 
+  // Reviewers kept from an earlier setup are checked as well.
+  const kept = await (async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-model-minimum-kept-'));
+    t.after(() => rm(repo, { recursive: true, force: true }));
+    const configPath = path.join(repo, '.crbuddy', 'config.json');
+    await mkdir(path.dirname(configPath), { recursive: true });
+    await writeFile(configPath, JSON.stringify({
+      configVersion: CONFIG_VERSION,
+      output: { ...DEFAULT_OUTPUT },
+      target: 'uncommitted',
+      panel: [
+        { id: 'sol61', vendor: 'codex', model: 'gpt-6.1-sol' },
+        { id: 'sol6', vendor: 'codex', model: 'gpt-6-sol' },
+      ],
+    }));
+    const ui = new DefaultingUI();
+    const code = await runInit(
+      { repoRoot: repo, scope: 'project' },
+      {
+        ui,
+        detect: async () => [{ adapter: codexAdapter, present: true, version: '0.158.0' }],
+        settingsFile: path.join(repo, 'settings.json'),
+      },
+    );
+    assert.equal(code, 0);
+    return ui.messages.filter((entry) => entry.kind === 'warn').map((entry) => entry.message);
+  })();
+  assert.equal(kept.length, 1, kept.join('\n'));
+  assert.match(kept[0]!, /^crbuddy go will refuse this reviewer here:\ngpt-6\.1-sol requires Codex CLI >= 0\.159\.2/);
+
   const current = await setup('0.159.2');
   assert.ok(current.vendors.includes('✓ Codex CLI  0.159.2 (codex)'), current.vendors);
   assert.doesNotMatch(current.vendors, /needs/);

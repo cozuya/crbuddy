@@ -44,12 +44,17 @@ async function fixture(t: TestContext) {
     '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'Initial');
   await writeFile(path.join(repo, 'code.txt'), 'after\n');
 
-  // Only git's directory besides the fakes, so a real codex elsewhere on the
-  // machine's PATH can never be the one found.
-  const gitDir = (process.env.PATH ?? '')
+  // git alone, through a wrapper, besides the fakes: a real codex, even one
+  // installed beside git, can never be the one found.
+  const realGit = (process.env.PATH ?? '')
     .split(path.delimiter)
-    .find((dir) => dir !== '' && existsSync(path.join(dir, 'git')));
-  assert.ok(gitDir, 'git must be on PATH');
+    .map((dir) => path.join(dir, 'git'))
+    .find((file) => file !== 'git' && existsSync(file));
+  assert.ok(realGit, 'git must be on PATH');
+  const gitDir = path.join(root, 'git-only');
+  await mkdir(gitDir);
+  await writeFile(path.join(gitDir, 'git'), `#!/bin/sh\nexec ${JSON.stringify(realGit)} "$@"\n`);
+  await chmod(path.join(gitDir, 'git'), 0o755);
 
   async function codex(version: string): Promise<string> {
     const dir = path.join(root, `codex-${version}`);
@@ -202,7 +207,7 @@ test('doctor notes the gpt-6.1-sol minimum without calling Codex unusable', posi
   assert.match(old.stdout, /OK {3}Codex CLI - `codex`/);
   assert.match(
     old.stdout,
-    /note: {5}gpt-6\.1-sol needs 0\.159\.2 or newer \(crbuddy's tested baseline\); other models run on 0\.158\.0\. Upgrade codex where crbuddy runs, or select gpt-6-sol/,
+    /note: {5}gpt-6\.1-sol needs 0\.159\.2 or newer \(crbuddy's tested baseline\); other models run on 0\.158\.0\. Upgrade Codex CLI where crbuddy runs, or select gpt-6-sol/,
   );
   assert.equal(old.code, 0, old.stdout);
   // Read-only: doctor asks for version and help, never a model.

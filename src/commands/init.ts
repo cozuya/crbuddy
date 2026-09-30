@@ -26,6 +26,7 @@ import {
 import { ADAPTERS, getAdapter } from '../adapters/vendors.js';
 import {
   isVersionAtLeast,
+  modelMinimumNote,
   modelsNeedingNewerCli,
   modelVersionProblem,
   probedVersion,
@@ -512,12 +513,10 @@ function formatDetection(detection: Detection): string {
     `(${detection.adapter.command})${why}`;
   // Usable, just not with these models: said here so a CLI that runs every
   // other model is not mistaken for one go refuses outright.
-  const models = problem
+  const models = problem || detection.version === null
     ? []
     : modelsNeedingNewerCli(detection.adapter, detection.version).map(
-        (model) =>
-          `  ${model.id} needs ${model.cliMinimum.version} or newer (crbuddy's tested ` +
-          `baseline); other models run on ${detection.version}`,
+        (model) => `  ${modelMinimumNote(model, detection.version!)}`,
       );
 
   return [summary, ...models, ...(detection.error ? [`  ${detection.error}`] : [])].join('\n');
@@ -860,6 +859,10 @@ async function chooseReviewInstructions(
   return enterCustomReviewInstructions(ui, savedReviewInstructions);
 }
 
+function warnModelVersion(ui: WizardUI, problem: string): void {
+  ui.message(`crbuddy go will refuse this reviewer here:\n${problem}`, 'warn');
+}
+
 async function buildPanel(
   ui: WizardUI,
   available: Adapter[],
@@ -877,6 +880,15 @@ async function buildPanel(
     if (await ui.confirm('Keep these reviewers?', true)) {
       panel.push(...existing);
       ui.note(formatPanel(panel), 'Panel');
+
+      for (const entry of existing) {
+        const adapter = available.find((candidate) => candidate.name === entry.vendor);
+        const tooOld = adapter
+          ? modelVersionProblem(adapter, entry.model, versions.get(adapter) ?? null)
+          : null;
+
+        if (tooOld) warnModelVersion(ui, tooOld);
+      }
     } else {
       // Said out loud because nothing else on screen changes: the listing
       // above stays visible, and without this the next prompt reads as if
@@ -929,12 +941,13 @@ async function buildPanel(
       unused >= 0 ? unused : 0,
     );
 
-    const model = await pickModel(ui, adapter, versions.get(adapter) ?? null);
-    const tooOld = modelVersionProblem(adapter, model, versions.get(adapter) ?? null);
+    const cliVersion = versions.get(adapter) ?? null;
+    const model = await pickModel(ui, adapter, cliVersion);
+    const tooOld = modelVersionProblem(adapter, model, cliVersion);
 
     // Still added, for someone about to update the CLI, as with a CLI too old
     // for crbuddy altogether.
-    if (tooOld) ui.message(`crbuddy go will refuse this reviewer here:\n${tooOld}`, 'warn');
+    if (tooOld) warnModelVersion(ui, tooOld);
 
     const effort = await pickEffort(ui, adapter, model);
     const instructionChoice = await chooseReviewInstructions(

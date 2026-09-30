@@ -51,12 +51,23 @@ export function modelsNeedingNewerCli(
   );
 }
 
+/** One line for setup and doctor, which still count the CLI as usable. */
+export function modelMinimumNote(
+  model: VendorModel & { cliMinimum: ModelCliMinimum },
+  detected: string,
+): string {
+  return (
+    `${model.id} needs ${model.cliMinimum.version} or newer (crbuddy's tested ` +
+    `baseline); other models run on ${detected}`
+  );
+}
+
 /**
  * Why a lane must not run `model` on the detected CLI, or null. Only an exact
  * listed ID has a model minimum; any other string passes through as before.
  */
 export function modelVersionProblem(
-  adapter: Pick<Adapter, 'label' | 'command' | 'models' | 'npmPackage'>,
+  adapter: Pick<Adapter, 'label' | 'models' | 'npmPackage'>,
   model: string,
   detected: string | null,
 ): string | null {

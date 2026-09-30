@@ -6,6 +6,7 @@ import { ADAPTERS, claudeHooksDisabledReason } from '../adapters/vendors.js';
 import { isNewerThanStamp } from '../adapters/effort.js';
 import {
   isVersionAtLeast,
+  modelMinimumNote,
   modelsNeedingNewerCli,
   probedVersion,
 } from '../adapters/version.js';
@@ -142,9 +143,8 @@ export async function runDoctor(): Promise<number> {
           // Not a problem line: the CLI stays usable for every other model.
           for (const model of versionOk ? modelsNeedingNewerCli(adapter, version) : []) {
             console.log(
-              `       note:     ${model.id} needs ${model.cliMinimum.version} or newer ` +
-                `(crbuddy's tested baseline); other models run on ${version}. ` +
-                `Upgrade ${adapter.command} where crbuddy runs, or select ${model.cliMinimum.instead}`,
+              `       note:     ${modelMinimumNote(model, version)}. Upgrade ` +
+                `${adapter.label} where crbuddy runs, or select ${model.cliMinimum.instead}`,
             );
           }
 
