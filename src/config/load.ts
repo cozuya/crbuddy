@@ -22,6 +22,9 @@ import {
 
 export class ConfigError extends Error {}
 
+/** Neither a project nor a global config exists: crbuddy was never set up. */
+export class ConfigMissingError extends ConfigError {}
+
 export interface LoadedConfig {
   config: Config;
   /** Absolute path the config came from. */
@@ -80,12 +83,9 @@ export async function loadConfig(repoRoot: string): Promise<LoadedConfig> {
     };
   }
 
-  throw new ConfigError(
-    `No config found.\n` +
-      `  Looked for: ${projectPath}\n` +
-      `              ${globalPath}\n` +
-      `Run \`crb init\` to create one.`,
-  );
+  // A file that exists but cannot be read or validated says so above; this is
+  // only the first run after installing.
+  throw new ConfigMissingError("crbuddy isn't configured yet.\n\nRun:\n  crb init");
 }
 
 export async function readAndValidate(file: string): Promise<Config> {

@@ -498,6 +498,24 @@ navigation aids, not a parsing boundary** - a model's verbatim output can
 contain the closing marker. The report is rendered from structured data;
 nothing in crbuddy parses markdown back out of it.
 
+## Update notice
+
+When npm has a newer crbuddy, `crb go`, `init`, `config`, `view` and `doctor`
+end with:
+
+```text
+Update available: crbuddy 0.4.1 → 0.4.2
+Run: npm i -g crbuddy@latest
+```
+
+crbuddy asks the npm registry for the `latest` tag at most once a day per user
+and keeps the answer in `~/.crbuddy/update-check.json`. The request runs
+alongside the command with a 1.5-second limit, and a failed or slow one is
+ignored. Nothing is requested or printed when stderr is not a terminal, in CI
+(`CI`, `GITHUB_ACTIONS` and similar variables), or when
+`CRBUDDY_NO_UPDATE_CHECK` or `NO_UPDATE_NOTIFIER` is set. `crb --version` and
+`crb --help` never check.
+
 ## Exit codes
 
 | | |

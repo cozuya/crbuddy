@@ -11,6 +11,7 @@ import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
 import { runView } from './commands/view.js';
 import { configureClaudeBackgroundWait } from './run/claude-background-wait.js';
+import { startUpdateCheck } from './run/update-check.js';
 
 const HELP = `crbuddy - fan one code review across several agent CLIs, then hand off every review.
 
@@ -141,21 +142,42 @@ async function main(argv: string[]): Promise<number> {
   });
 }
 
-main(process.argv)
-  .then((code) => {
-    process.exitCode = code;
-  })
-  .catch((error) => {
-    if (
-      error instanceof ConfigError ||
-      error instanceof GitError ||
-      error instanceof LockError ||
-      error instanceof PreflightError
-    ) {
-      console.error(error.message);
-    } else {
-      console.error(error instanceof Error ? error.stack : String(error));
-    }
+function reportError(error: unknown): void {
+  if (
+    error instanceof ConfigError ||
+    error instanceof GitError ||
+    error instanceof LockError ||
+    error instanceof PreflightError
+  ) {
+    console.error(error.message);
+  } else {
+    console.error(error instanceof Error ? error.stack : String(error));
+  }
+}
 
-    process.exitCode = 1;
-  });
+/** Commands that end with an update notice. Never --version or --help. */
+const UPDATE_NOTICE_COMMANDS = new Set(['go', 'init', 'config', 'view', 'doctor', 'check']);
+
+async function run(argv: string[]): Promise<number> {
+  // Started before the command so the registry request overlaps its work.
+  const update = UPDATE_NOTICE_COMMANDS.has(argv[2] ?? '')
+    ? startUpdateCheck({ installed: await version() })
+    : null;
+  let code: number;
+
+  try {
+    code = await main(argv);
+  } catch (error) {
+    reportError(error);
+    code = 1;
+  }
+
+  const notice = await update?.notice();
+  if (notice) console.error(`\n${notice}`);
+
+  return code;
+}
+
+run(process.argv).then((code) => {
+  process.exitCode = code;
+});

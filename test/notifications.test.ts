@@ -208,7 +208,14 @@ async function fixture(t: TestContext) {
         '--import', pathToFileURL(preload).href, path.resolve('dist-test/src/index.js'), ...args,
       ], {
         cwd: repo,
-        env: { ...process.env, HOME: userDir, USERPROFILE: userDir, ...env },
+        // Some cases fake a terminal, and every fetch here is recorded as a post.
+        env: {
+          ...process.env,
+          HOME: userDir,
+          USERPROFILE: userDir,
+          CRBUDDY_NO_UPDATE_CHECK: '1',
+          ...env,
+        },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       });

@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 
 import {
-  ConfigError,
+  ConfigMissingError,
   assertUsableOutput,
   homeConfigPath,
   loadConfig,
@@ -40,12 +40,7 @@ async function configSummary(
         obsoleteKeysNote(loaded, options.repoRoot, 'this config'),
       );
     } catch (error) {
-      if (
-        error instanceof ConfigError &&
-        error.message.startsWith('No config found.')
-      ) {
-        return 'Config: None';
-      }
+      if (error instanceof ConfigMissingError) return 'Config: None';
       throw error;
     }
   }
