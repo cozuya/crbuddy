@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { claudeAdapter, codexAdapter } from '../src/adapters/vendors.js';
+import { claudeAdapter, codexAdapter, geminiAdapter } from '../src/adapters/vendors.js';
 import {
   effectiveInitScope,
   runInit,
@@ -777,3 +777,222 @@ class AbortAtSaveUI extends DefaultingUI {
     return defaultYes;
   }
 }
+
+async function addFixture(t: import('node:test').TestContext) {
+  const repo = await mkdtemp(path.join(tmpdir(), 'crbuddy-add-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  const configPath = path.join(repo, '.crbuddy', 'config.json');
+  const settingsFile = path.join(repo, 'settings.json');
+  const gitignore = path.join(repo, '.gitignore');
+  const existing: Config = {
+    configVersion: CONFIG_VERSION,
+    output: { destination: 'terminal', merged: 'reviews/custom.md' },
+    target: { base: 'release' },
+    savedReviewInstructions: 'Saved criteria.\nKeep these for reuse.',
+    refuseIfOutputExists: true,
+    timeoutMs: 123_456,
+    maxConcurrent: 3,
+    maxDiffBytes: 654_321,
+    panel: [
+      {
+        id: 'codex-gpt-6-1-sol', vendor: 'codex', model: 'gpt-6.1-sol',
+        effort: 'xhigh', instructions: 'Existing instructions.\nSecond line.',
+        vendorArgs: ['--some-flag', 'value with spaces'],
+      },
+      { id: 'codex-gpt-6-1-sol-2', vendor: 'claude', model: 'old-model', effort: 'custom-effort' },
+    ],
+  };
+  await mkdir(path.dirname(configPath));
+  await writeFile(configPath, JSON.stringify(existing));
+  await writeFile(settingsFile, JSON.stringify({ notifications: { provider: 'ntfy', endpoint } }));
+  await writeFile(gitignore, '# Existing ignores\nnode_modules/\n');
+  const before = await Promise.all([configPath, settingsFile, gitignore].map((file) => readFile(file, 'utf8')));
+  return {
+    repo, configPath, settingsFile, gitignore, existing, before,
+    run: (ui: WizardUI, detections: Detection[] = [{ ...detection, version: '0.159.2' }]) => runInit(
+      { repoRoot: repo, mode: 'add' },
+      { ui, detect: async () => detections, settingsFile },
+    ),
+  };
+}
+
+class AddUI extends DefaultingUI {
+  override readonly interactive = true;
+  readonly questions: string[] = [];
+  added = 0;
+
+  constructor(private readonly additions = 1) { super(); }
+
+  override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
+    this.questions.push(question);
+    if (question.startsWith('Where should this config live?')) {
+      assert.deepEqual(choices.map((choice) => choice.value), ['global', 'project']);
+      assert.equal(initialIndex, 1);
+    } else {
+      assert.match(question, /^(Add a reviewer|Model for |Thinking effort for |Review instructions for )/);
+    }
+    return super.select(question, choices, initialIndex);
+  }
+
+  override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+    this.questions.push(question);
+    if (question.endsWith('Add another?')) {
+      // The first such question must follow an actual addition, even with a saved panel.
+      assert.equal(this.notes.filter((note) => note.title === 'Panel').length, this.added + 2);
+      return ++this.added < this.additions;
+    }
+    assert.equal(question, 'Save this config?');
+    assert.equal(defaultYes, true);
+    assert.equal(this.notes.at(-1)?.title, 'Configuration');
+    return true;
+  }
+}
+
+test('add preserves the saved panel and settings, appends unique IDs, and shares the full summary', async (t) => {
+  const f = await addFixture(t);
+  const ui = new AddUI(2);
+  assert.equal(await f.run(ui), 0);
+  const written = JSON.parse(await readFile(f.configPath, 'utf8')) as Config;
+  assert.deepEqual(written, {
+    ...f.existing,
+    panel: [
+      ...f.existing.panel,
+      { id: 'codex-gpt-6-1-sol-3', vendor: 'codex', model: 'gpt-6.1-sol', effort: 'high' },
+      { id: 'codex-gpt-6-1-sol-4', vendor: 'codex', model: 'gpt-6.1-sol', effort: 'high' },
+    ],
+  });
+  assert.match(ui.questions[0]!, /^Where should this config live/);
+  assert.equal(ui.questions[1], 'Add a reviewer');
+  assert.equal(ui.questions.at(-1), 'Save this config?');
+  assert.equal(ui.notes.find((note) => note.title === 'Current panel')?.message.split('\n').length, 2);
+  assert.deepEqual(ui.notes.filter((note) => note.title === 'Panel').map((note) => note.message.split('\n').length), [2, 3, 4]);
+  const summary = ui.notes.at(-1)!.message;
+  assert.ok(summary.includes(f.configPath));
+  assert.match(summary, /Config: This repository/);
+  assert.equal(summary.match(/Codex CLI/g)?.length, 3);
+  assert.match(summary, /Claude Code.*old-model.*custom-effort/);
+  assert.match(summary, /Target: Current branch vs release\nOutput: Terminal\nNotifications \(global\): ntfy/);
+  assert.equal(await readFile(f.settingsFile, 'utf8'), f.before[1]);
+  assert.equal(await readFile(f.gitignore, 'utf8'), f.before[2]);
+});
+
+test('add reuses manual model/effort entry and custom instruction prompts', async (t) => {
+  const f = await addFixture(t);
+  class CustomUI extends AddUI {
+    override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
+      if (question.startsWith('Model for ') || question.startsWith('Thinking effort for ')) {
+        return choices.find((choice) => choice.label === 'Other…')!.value;
+      }
+      if (question.startsWith('Review instructions for ')) {
+        return choices.find((choice) => choice.value === 'custom')!.value;
+      }
+      return super.select(question, choices, initialIndex);
+    }
+    override async text(question: string): Promise<string> {
+      assert.ok(['Model id', 'Effort value'].includes(question));
+      return question === 'Model id' ? 'future-model' : 'future-effort';
+    }
+    override async multiline(question: string): Promise<string> {
+      assert.equal(question, 'Review instructions');
+      return 'New custom criteria.\nAnother line.';
+    }
+    override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+      if (question === 'Replace the saved review instructions with these?') return false;
+      return super.confirm(question, defaultYes);
+    }
+  }
+  assert.equal(await f.run(new CustomUI()), 0);
+  const written = JSON.parse(await readFile(f.configPath, 'utf8')) as Config;
+  assert.deepEqual(written.panel.at(-1), {
+    id: 'codex-future-model', vendor: 'codex', model: 'future-model', effort: 'future-effort',
+    instructions: 'New custom criteria.\nAnother line.',
+  });
+  assert.deepEqual({ ...written, panel: f.existing.panel }, f.existing);
+});
+
+test('add uses saved instructions for vendors that require explicit instructions', async (t) => {
+  const f = await addFixture(t);
+  assert.equal(await f.run(new AddUI(), [{ adapter: geminiAdapter, present: true, version: '99.0.0' }]), 0);
+  const written = JSON.parse(await readFile(f.configPath, 'utf8')) as Config;
+  assert.equal(written.panel.at(-1)?.vendor, 'gemini');
+  assert.equal(written.panel.at(-1)?.instructions, f.existing.savedReviewInstructions);
+  assert.deepEqual({ ...written, panel: f.existing.panel }, f.existing);
+});
+
+test('add decline and cancellation leave config, settings, and gitignore byte-for-byte unchanged', async (t) => {
+  for (const stage of ['scope', 'detection', 'reviewer', 'instructions', 'save', 'decline']) {
+    await t.test(stage, async (t) => {
+      const f = await addFixture(t);
+      class CancelUI extends AddUI {
+        override async select<T>(question: string, choices: Array<Choice<T>>, initialIndex = 0): Promise<T> {
+          if ((stage === 'scope' && question.startsWith('Where should this config live?')) ||
+              (stage === 'reviewer' && question === 'Add a reviewer') ||
+              (stage === 'instructions' && question.startsWith('Review instructions for '))) {
+            throw new PromptAborted();
+          }
+          return super.select(question, choices, initialIndex);
+        }
+        override async confirm(question: string, defaultYes: boolean): Promise<boolean> {
+          if (question === 'Save this config?') {
+            if (stage === 'decline') return false;
+            if (stage === 'save') throw new PromptAborted();
+          }
+          return super.confirm(question, defaultYes);
+        }
+      }
+      const code = await runInit({ repoRoot: f.repo, mode: 'add' }, {
+        ui: new CancelUI(), settingsFile: f.settingsFile,
+        detect: async () => {
+          if (stage === 'detection') throw new PromptAborted();
+          return [{ ...detection, version: '0.159.2' }];
+        },
+      });
+      assert.equal(code, stage === 'decline' ? 1 : 130);
+      assert.deepEqual(await Promise.all(
+        [f.configPath, f.settingsFile, f.gitignore].map((file) => readFile(file, 'utf8')),
+      ), f.before);
+    });
+  }
+});
+
+test('add refuses invalid or unreadable configs without offering replacement or detecting vendors', async (t) => {
+  for (const kind of ['json', 'schema', 'directory', 'output-directory', 'symlink']) {
+    await t.test(kind, { skip: kind === 'symlink' && process.platform === 'win32' }, async (t) => {
+      const f = await addFixture(t);
+      await rm(f.configPath);
+      if (kind === 'directory') await mkdir(f.configPath);
+      else if (kind === 'symlink') await symlink(path.join(f.repo, 'missing.json'), f.configPath);
+      else if (kind === 'output-directory') {
+        await mkdir(path.join(f.repo, 'reports'));
+        await writeFile(f.configPath, JSON.stringify({ ...f.existing, output: { destination: 'file', merged: 'reports' } }));
+      } else await writeFile(f.configPath, kind === 'json' ? '{invalid' : '{"configVersion":99}');
+      const before = kind === 'directory' || kind === 'symlink' ? null : await readFile(f.configPath, 'utf8');
+      const ui = new AddUI();
+      const code = await runInit({ repoRoot: f.repo, scope: 'project', mode: 'add' }, {
+        ui, settingsFile: f.settingsFile, detect: async () => { throw new Error('Unexpected vendor detection'); },
+      });
+      assert.equal(code, 1);
+      assert.deepEqual(ui.questions, []);
+      assert.match(ui.messages.map((message) => message.message).join('\n'), /Could not parse it:/);
+      if (before !== null) assert.equal(await readFile(f.configPath, 'utf8'), before);
+      assert.equal(await readFile(f.settingsFile, 'utf8'), f.before[1]);
+      assert.equal(await readFile(f.gitignore, 'utf8'), f.before[2]);
+    });
+  }
+});
+
+test('add follows the existing serializer for legacy consolidation and raw-output keys', async (t) => {
+  const f = await addFixture(t);
+  await writeFile(f.configPath, JSON.stringify({
+    ...f.existing,
+    merge: { enabled: true, vendor: 'codex', model: 'gpt-6-luna' },
+    mergeTimeoutMs: 10_000,
+    output: { ...f.existing.output, raw: 'custom.raw.md' },
+  }));
+  assert.equal(await f.run(new AddUI()), 0);
+  const written = JSON.parse(await readFile(f.configPath, 'utf8'));
+  assert.equal(written.output.raw, 'custom.raw.md');
+  assert.ok(!('merge' in written));
+  assert.ok(!('mergeTimeoutMs' in written));
+  assert.deepEqual(written.panel.slice(0, f.existing.panel.length), f.existing.panel);
+});

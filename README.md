@@ -18,6 +18,8 @@ crb go
 
 `crb init` interactively creates global or per-repository configuration. `crb go` runs the configured review panel and blocks until it finishes.
 
+Use `crb add` to append reviewers to an existing saved panel. Choose the global or repository config, add reviewers, then confirm the full configuration before saving.
+
 ## What it does
 
 - Runs independent code-review lanes in parallel using the coding-agent CLIs you already have installed and authenticated.

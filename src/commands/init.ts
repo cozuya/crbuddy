@@ -17,6 +17,7 @@ import {
 } from '../config/schema.js';
 import {
   assertUsableOutput,
+  configPresent,
   homeConfigPath,
   projectConfigPath,
   readConfigFile,
@@ -46,6 +47,7 @@ import {
 export interface InitOptions {
   repoRoot: string | null;
   scope?: 'global' | 'project';
+  mode?: 'init' | 'add';
 }
 
 export interface InitDependencies {
@@ -80,13 +82,40 @@ export async function runInit(
   }
 }
 
+function configMayBePresent(file: string): boolean {
+  try {
+    return configPresent(file);
+  } catch {
+    // Before scope selection, only definite absence counts as missing. Defer
+    // access errors so an unselected scope cannot block a usable config;
+    // configPresent(targetFile) below reports the error if that scope is chosen.
+    return true;
+  }
+}
+
 async function wizard(
   options: InitOptions,
   ui: WizardUI,
   detect: (signal?: AbortSignal) => Promise<Detection[]>,
   settingsFile?: string,
 ): Promise<number> {
-  ui.intro('crbuddy setup');
+  const adding = options.mode === 'add';
+
+  if (
+    adding &&
+    !options.scope &&
+    !(options.repoRoot && configMayBePresent(projectConfigPath(options.repoRoot))) &&
+    !configMayBePresent(homeConfigPath())
+  ) {
+    ui.message(
+      'crb add adds reviewers to an existing panel. No saved configuration found. ' +
+        'Run `crb init` first.',
+      'error',
+    );
+    return 1;
+  }
+
+  ui.intro(adding ? 'crbuddy add reviewers' : 'crbuddy setup');
 
   const scopeChoices = [
     { label: 'Global', value: 'global' as const, hint: homeConfigPath() },
@@ -101,6 +130,9 @@ async function wizard(
       : []),
   ];
 
+  // Keep init's choices and default for add, as specified in issue #10, even
+  // when only the other scope exists. Choosing a missing scope must still fail;
+  // changing the default based on file availability is deferred as a UX change.
   let scope =
     options.scope ??
     (scopeChoices.length === 1
@@ -135,13 +167,13 @@ async function wizard(
         'Project config takes precedence',
       );
 
-      const switchToLocal = await ui.confirm(
-        'Edit the repository config instead?',
-        true,
-      );
+      if (!adding) {
+        const switchToLocal = await ui.confirm(
+          'Edit the repository config instead?',
+          true,
+        );
 
-      if (switchToLocal) {
-        scope = 'project';
+        if (switchToLocal) scope = 'project';
       }
     }
   }
@@ -154,14 +186,35 @@ async function wizard(
   let existing: Config | null = null;
   let existingLegacyRaw: string | null = null;
 
-  if (existsSync(targetFile)) {
-    ui.message(`Editing the existing config at ${targetFile}.`);
+  const targetExists = adding ? configPresent(targetFile) : existsSync(targetFile);
+
+  if (adding && !targetExists) {
+    ui.message(
+      'crb add adds reviewers to an existing panel. ' +
+        `No ${scope === 'project' ? 'local' : 'global'} configuration found. ` +
+        `Run \`crb init --${scope}\` first.`,
+      'error',
+    );
+    return 1;
+  }
+
+  if (targetExists) {
+    ui.message(
+      adding
+        ? `Adding reviewers to the ${scope === 'project' ? 'local' : 'global'} config at ${targetFile}.`
+        : `Editing the existing config at ${targetFile}.`,
+    );
 
     try {
       ({ config: existing, legacyRawOutput: existingLegacyRaw } =
         await readConfigFile(targetFile));
+      if (adding) {
+        assertUsableOutput(existing.output, `${targetFile}.output`, options.repoRoot ?? undefined);
+      }
     } catch (error) {
       ui.message(`Could not parse it: ${String(error)}`, 'error');
+
+      if (adding) return 1;
 
       const start = await ui.confirm(
         'Start from scratch instead? The old file will be replaced.',
@@ -177,7 +230,7 @@ async function wizard(
 
   let initialSavedReviewInstructions = existing?.savedReviewInstructions;
 
-  if (ui.interactive && initialSavedReviewInstructions) {
+  if (!adding && ui.interactive && initialSavedReviewInstructions) {
     ui.note(
       formatSavedReviewInstructions(initialSavedReviewInstructions),
       'Saved review instructions',
@@ -237,29 +290,33 @@ async function wizard(
     versions,
     existing?.panel ?? [],
     initialSavedReviewInstructions,
+    adding,
   );
-  const output = await buildOutput(ui, existing?.output, options.repoRoot, scope);
-  const reviewTarget = await buildTarget(ui, existing?.target);
+  const config: Config = adding && existing
+    ? { ...existing, panel }
+    : {
+        configVersion: CONFIG_VERSION,
+        output: await buildOutput(ui, existing?.output, options.repoRoot, scope),
+        target: await buildTarget(ui, existing?.target),
+        refuseIfOutputExists:
+          existing?.refuseIfOutputExists ?? DEFAULTS.refuseIfOutputExists,
+        timeoutMs: existing?.timeoutMs ?? DEFAULTS.timeoutMs,
+        maxConcurrent: existing?.maxConcurrent ?? DEFAULTS.maxConcurrent,
+        maxDiffBytes: existing?.maxDiffBytes ?? DEFAULTS.maxDiffBytes,
+        panel,
+      };
 
-  const config: Config = {
-    configVersion: CONFIG_VERSION,
-    output,
-    target: reviewTarget,
-    ...(savedReviewInstructions ? { savedReviewInstructions } : {}),
-    refuseIfOutputExists:
-      existing?.refuseIfOutputExists ?? DEFAULTS.refuseIfOutputExists,
-    timeoutMs: existing?.timeoutMs ?? DEFAULTS.timeoutMs,
-    maxConcurrent: existing?.maxConcurrent ?? DEFAULTS.maxConcurrent,
-    maxDiffBytes: existing?.maxDiffBytes ?? DEFAULTS.maxDiffBytes,
-    panel,
-  };
+  // The shared reviewer prompts may explicitly save new instructions for reuse.
+  if (savedReviewInstructions) config.savedReviewInstructions = savedReviewInstructions;
 
   const gitignorePlan =
-    scope === 'project' && options.repoRoot
+    !adding && scope === 'project' && options.repoRoot
       ? await planGitignore(ui, options.repoRoot, config)
       : null;
 
-  const settings = await buildNotifications(ui, settingsFile);
+  const settings = adding
+    ? await loadGlobalSettings((message) => ui.message(message, 'warn'), settingsFile)
+    : await buildNotifications(ui, settingsFile);
 
   ui.note(
     formatConfigSummary(scope, targetFile, config, gitignorePlan) +
@@ -280,16 +337,18 @@ async function wizard(
   await mkdir(path.dirname(targetFile), { recursive: true });
   await writeFile(targetFile, `${JSON.stringify(saved, null, 2)}\n`, 'utf8');
   let settingsSaved = true;
-  try {
-    await saveGlobalSettings(settings, settingsFile);
-  } catch {
-    settingsSaved = false;
-    ui.message(
-      'Review config saved, but global notification preferences could not be ' +
-        'saved. Previous notification preferences remain unchanged. Check ' +
-        '~/.crbuddy/settings.json and run `crb config` again.',
-      'warn',
-    );
+  if (!adding) {
+    try {
+      await saveGlobalSettings(settings, settingsFile);
+    } catch {
+      settingsSaved = false;
+      ui.message(
+        'Review config saved, but global notification preferences could not be ' +
+          'saved. Previous notification preferences remain unchanged. Check ' +
+          '~/.crbuddy/settings.json and run `crb config` again.',
+        'warn',
+      );
+    }
   }
 
   if (gitignorePlan) await applyGitignorePlan(ui, gitignorePlan);
@@ -870,6 +929,7 @@ async function buildPanel(
   versions: ReadonlyMap<Adapter, string | null>,
   existing: PanelEntry[],
   initialSavedReviewInstructions?: string,
+  adding = false,
 ): Promise<PanelBuildResult> {
   const panel: PanelEntry[] = [];
   let savedReviewInstructions = initialSavedReviewInstructions;
@@ -877,7 +937,7 @@ async function buildPanel(
   if (existing.length > 0) {
     ui.note(formatPanel(existing), 'Current panel');
 
-    if (await ui.confirm('Keep these reviewers?', true)) {
+    if (adding || (await ui.confirm('Keep these reviewers?', true))) {
       panel.push(...existing);
       ui.note(formatPanel(panel), 'Panel');
 
@@ -917,7 +977,7 @@ async function buildPanel(
         !panel.some((entry) => entry.vendor === candidate.name),
     );
 
-    if (panel.length > 0) {
+    if (panel.length > 0 && !(adding && panel.length === existing.length)) {
       const more = await ui.confirm(
         `${panel.length} reviewer${panel.length === 1 ? '' : 's'} configured. ` +
           `Add another?`,

@@ -21,6 +21,7 @@ to run it.
 Usage:
   crbuddy init                 Interactive setup. Writes a config.
   crbuddy config               Same as init; edits an existing config.
+  crbuddy add                  Append reviewers to an existing saved panel.
   crbuddy view                 Show the effective config. Read-only.
   crbuddy go [instructions]    Run the panel. Blocking.
   crbuddy doctor               Report which vendor CLIs are usable, and why not.
@@ -30,6 +31,10 @@ Options for \`go\`:
   --whole-checkout  Review the whole checkout when the target diff is empty;
                     required when running without a terminal.
   --strict          Exit 2 when any run fails (default: exit 0).
+
+Options for \`init\`, \`config\`, and \`add\`:
+  --global          Select the global config.
+  --project         Select this repository's config (global outside a repo).
 
 Other:
   --help, -h   This text.
@@ -100,14 +105,18 @@ async function main(argv: string[]): Promise<number> {
     return runView({ repoRoot });
   }
 
-  if (command === 'init' || command === 'config') {
+  if (command === 'init' || command === 'config' || command === 'add') {
     const scope = rest.includes('--global')
       ? ('global' as const)
       : rest.includes('--project')
         ? ('project' as const)
         : undefined;
 
-    return runInit({ repoRoot, ...(scope ? { scope } : {}) });
+    return runInit({
+      repoRoot,
+      ...(scope ? { scope } : {}),
+      ...(command === 'add' ? { mode: 'add' as const } : {}),
+    });
   }
 
   if (command !== 'go') {
@@ -168,6 +177,9 @@ function reportError(error: unknown): void {
 }
 
 /** Commands that end with an update notice. Never --version or --help. */
+// `add` is intentionally excluded: startup checks can write an update cache,
+// while a missing config must leave no files behind. Update notices for add
+// are deferred until they can respect that requirement.
 const UPDATE_NOTICE_COMMANDS = new Set(['go', 'init', 'config', 'view', 'doctor', 'check']);
 
 /** Best effort: without a readable version of our own there is nothing to compare. */

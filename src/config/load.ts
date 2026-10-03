@@ -57,7 +57,7 @@ export function projectConfigPath(repoRoot: string): string {
  * missing: a dangling symlink or an unsearchable directory is a broken config,
  * reported as one rather than as a machine that was never set up.
  */
-function configPresent(file: string): boolean {
+export function configPresent(file: string): boolean {
   try {
     lstatSync(file);
     return true;
