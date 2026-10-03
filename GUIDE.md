@@ -82,12 +82,32 @@ separately supported `deepseek` vendor.
 |---|---|
 | `crbuddy init` | Interactive setup. Writes a config. |
 | `crbuddy config` | The same command; edits an existing config. |
+| `crbuddy add` | Append reviewers to an existing saved panel. |
 | `crbuddy view` | Show the effective repository-or-global config. Read-only. |
 | `crbuddy go [instructions]` | Run the panel. |
 | `crbuddy doctor` | Report which vendor CLIs are usable, which flags they accept, and why not. Read-only; contacts no models. Also aliased as `check`. |
 
 `crb` is installed as a second name for the same binary, so `crb go` and
 `crbuddy go` are interchangeable.
+
+`crbuddy add` / `crb add` asks which saved config to extend, using the same
+scope choices as `init` (global only outside a repository). `--global` and
+`--project` select the scope directly, as they do for `init` and `config`.
+It keeps the existing reviewers and opens the normal vendor, model, effort,
+and instructions prompts. After each addition, it shows the whole panel and
+offers to add another. New reviewers get unique IDs even when their vendor
+and model repeat an existing entry.
+
+When finished, it shows the full configuration and asks to save in a terminal.
+Output, target, limits, notification settings, and `.gitignore` setup are
+skipped; their values stay as they were. The reviewer prompts still let you
+use or explicitly save custom instructions for reuse. Declining save or
+cancelling leaves files unchanged. Piped input uses the normal line prompts
+and saves after the final No to “Add another?”, without a save question.
+
+The selected config must already exist. If it is missing, `add` exits 1 and
+directs you to `crb init` for that scope. It never copies the other scope's
+config or starts fresh, and invalid or unreadable configs are left untouched.
 
 The optional positional argument to `go` overrides the review instructions on
 **every** panel entry, for a one-off run without editing config:
